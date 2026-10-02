@@ -101,6 +101,7 @@ export function toolCalls(events: readonly RuntimeEvent[]): ToolCall[] {
     if (p.itemType !== "tool") continue;
     const known = calls.get(event.itemId);
     const input = isRecord(p.input) ? p.input : (known?.input ?? {});
+    const parentItemId = p.parentItemId ?? known?.parentItemId;
     calls.set(event.itemId, {
       itemId: event.itemId,
       toolName: p.toolName ?? known?.toolName ?? "unknown",
@@ -108,7 +109,7 @@ export function toolCalls(events: readonly RuntimeEvent[]): ToolCall[] {
       input,
       status: p.status,
       output: p.output ?? known?.output ?? "",
-      ...(p.parentItemId ? { parentItemId: p.parentItemId } : {}),
+      ...(parentItemId ? { parentItemId } : {}),
     });
   }
   return [...calls.values()];
@@ -129,6 +130,39 @@ function threadText(events: readonly RuntimeEvent[]): string {
 
 type Configured = RuntimeEventOf<"session.configured">["payload"];
 
+/**
+ * The only tools the main thread may use: the four steps, plus ToolSearch, which Claude Code
+ * uses to load deferred MCP tools. Anything else (Read, Grep, Bash, …) could have fetched a
+ * codeword from the fixture's files, and Read, Glob and Grep never ask permission.
+ */
+export const MAIN_THREAD_TOOLS: ReadonlySet<string> = new Set([
+  "Skill",
+  "Agent",
+  "Task", // Agent's older name
+  "ToolSearch",
+  FIXTURE.mcpTool,
+]);
+
+/** Tool calls of the main thread, not of a subagent. */
+function mainThread(calls: readonly ToolCall[]): ToolCall[] {
+  return calls.filter((c) => c.parentItemId === undefined);
+}
+
+/**
+ * Why the codewords can't be trusted, if they can't: the main thread used a tool outside the
+ * check, or pointed one at the config folder. Null when the run stayed inside the four steps.
+ */
+function peeked(calls: readonly ToolCall[]): string | null {
+  const main = mainThread(calls);
+  const outside = [
+    ...new Set(main.filter((c) => !MAIN_THREAD_TOOLS.has(c.toolName)).map((c) => c.toolName)),
+  ];
+  if (outside.length > 0) return `the main thread used ${outside.join(", ")}`;
+  const config = main.find((c) => /\.claude\b/.test(JSON.stringify(c.input)));
+  if (config) return `${config.toolName} was pointed at .claude/`;
+  return null;
+}
+
 /** The four parity checks, plus whether the turn itself ran clean, in table order. */
 export function checkParity(
   events: readonly RuntimeEvent[],
@@ -144,7 +178,7 @@ export function checkParity(
     checkSkill(configured, calls, threadText(events)),
     checkHook(hooks),
     checkMcp(configured, calls, word),
-    checkTurn(events),
+    checkTurn(events, calls),
   ];
 }
 
@@ -165,6 +199,11 @@ function checkSubagent(
     return fail(name, `Claude never ran ${FIXTURE.agent}; subagents run: ${list(seen)}`);
   }
   if (call.status !== "completed") return fail(name, `${call.toolName} ${call.status}${out(call)}`);
+  const peek = peeked(calls);
+  if (peek) return fail(name, `can't trust the codeword: ${peek}`);
+  if (JSON.stringify(call.input).includes(FIXTURE.agentCodeword)) {
+    return fail(name, `the codeword was in ${call.toolName}'s own input, not from the subagent`);
+  }
   // A foreground subagent's answer is the tool's result. A background one (Claude Code's default
   // for Agent now) returns "launched" at once; its answer is its own message, under the call.
   if (call.output.includes(FIXTURE.agentCodeword)) {
@@ -195,6 +234,8 @@ function checkSkill(configured: Configured | undefined, calls: ToolCall[], said:
   const call = calls.find((c) => c.toolName === "Skill" && skillName(c.input) === FIXTURE.skill);
   if (!call) return fail(name, `listed, but Claude never invoked ${FIXTURE.skill}`);
   if (call.status !== "completed") return fail(name, `Skill ${call.status}${out(call)}`);
+  const peek = peeked(calls);
+  if (peek) return fail(name, `can't trust the codeword: ${peek}`);
   if (!said.includes(FIXTURE.skillCodeword)) {
     return fail(
       name,
@@ -209,6 +250,10 @@ function checkHook(hooks: readonly HookRecord[] | null): Check {
   if (hooks === null) return fail(name, `no ${FIXTURE.hookLog} in the worktree: it never ran`);
   const post = hooks.filter((h) => h.hook === "PostToolUse");
   if (post.length === 0) return fail(name, `${FIXTURE.hookLog} has no PostToolUse entry`);
+  if (!post.some((h) => h.tool === FIXTURE.mcpTool)) {
+    const seen = [...new Set(post.map((h) => h.tool ?? "?"))];
+    return fail(name, `no PostToolUse entry for ${FIXTURE.mcpTool}; only ${seen.join(", ")}`);
+  }
   const tools = [...new Set(post.map((h) => h.tool ?? "?"))];
   return pass(
     name,
@@ -247,7 +292,7 @@ export function answerFor(event: RuntimeEvent): string | null | undefined {
   return undefined;
 }
 
-function checkTurn(events: readonly RuntimeEvent[]): Check {
+function checkTurn(events: readonly RuntimeEvent[], calls: readonly ToolCall[]): Check {
   const name = "Turn";
   const expected = events.filter((e) => e.type === "request.opened" && answerFor(e) === "y");
   const asked = events.flatMap((e) =>
@@ -262,6 +307,8 @@ function checkTurn(events: readonly RuntimeEvent[]): Check {
     (e): e is RuntimeEventOf<"turn.completed"> => e.type === "turn.completed",
   );
   if (asked.length > 0) return fail(name, `asked for ${asked.join(", ")}: not part of the check`);
+  const peek = peeked(calls);
+  if (peek) return fail(name, `${peek}: not part of the check`);
   if (errors.length > 0) return fail(name, `error: ${errors.join("; ")}`);
   if (!done) return fail(name, "the turn never completed");
   const p = done.payload;

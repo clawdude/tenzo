@@ -56,8 +56,15 @@ function tool(
   input: Record<string, unknown>,
   output: string,
   status: "completed" | "failed" = "completed",
+  parentItemId?: string,
 ): RuntimeEvent[] {
-  const base = { itemType: "tool", text: toolName, toolKind, toolName };
+  const base = {
+    itemType: "tool",
+    text: toolName,
+    toolKind,
+    toolName,
+    ...(parentItemId ? { parentItemId } : {}),
+  };
   return [
     event({ type: "item.started", itemId, payload: { ...base, status: "in_progress", input } }),
     event({ type: "item.completed", itemId, payload: { ...base, status, output } }),
@@ -239,6 +246,87 @@ describe("checkParity", () => {
     expect(byName(checkParity(passingRun(), null, WORD)).Hook?.detail).toContain("it never ran");
     const other = parseHookLog('{"hook":"PreToolUse","tool":"Skill"}\n');
     expect(byName(checkParity(passingRun(), other, WORD)).Hook?.pass).toBe(false);
+  });
+
+  it("fails the hook when it never ran for the MCP tool", () => {
+    const builtInOnly = parseHookLog(
+      '{"hook":"PostToolUse","tool":"Skill"}\n{"hook":"PostToolUse","tool":"Agent"}\n',
+    );
+    expect(byName(checkParity(passingRun(), builtInOnly, WORD)).Hook?.detail).toBe(
+      "no PostToolUse entry for mcp__parity__ping; only Skill, Agent",
+    );
+  });
+});
+
+describe("codewords taken from the fixture's files", () => {
+  /** A passing run, plus whatever else the main thread did before its reply. */
+  function runWith(...extra: RuntimeEvent[]): RuntimeEvent[] {
+    const events = passingRun();
+    return [...events.slice(0, -2), ...extra, ...events.slice(-2)];
+  }
+
+  it("fail Skill, Subagent and Turn when the main thread reads a file", () => {
+    const read = tool(
+      "toolu_read",
+      "Read",
+      "file_read",
+      { file_path: "/w/.claude/skills/parity-skill/SKILL.md" },
+      "SKILL_CODEWORD=compass-17",
+    );
+    const c = byName(checkParity(runWith(...read), HOOKS, WORD));
+    expect(c.Skill).toEqual({
+      name: "Skill",
+      pass: false,
+      detail: "can't trust the codeword: the main thread used Read",
+    });
+    expect(c.Subagent?.detail).toBe("can't trust the codeword: the main thread used Read");
+    expect(c.Turn?.detail).toBe("the main thread used Read: not part of the check");
+    expect(c.Hook?.pass).toBe(true);
+    expect(c["MCP server"]?.pass).toBe(true);
+  });
+
+  it("fail when an allowed tool is pointed at .claude/", () => {
+    const agent = tool(
+      "toolu_agent2",
+      "Agent",
+      "subagent",
+      { subagent_type: "general-purpose", prompt: "Print .claude/agents/parity-agent.md" },
+      "done",
+    );
+    const c = byName(checkParity(runWith(...agent), HOOKS, WORD));
+    expect(c.Skill?.detail).toBe("can't trust the codeword: Agent was pointed at .claude/");
+    expect(c.Subagent?.pass).toBe(false);
+    expect(c.Turn?.pass).toBe(false);
+  });
+
+  it("fail Subagent when the codeword is in the Agent call's own input", () => {
+    const events = [
+      configured(),
+      ...tool(
+        "toolu_agent",
+        "Agent",
+        "subagent",
+        { subagent_type: FIXTURE.agent, prompt: "Say AGENT_CODEWORD=lantern-42" },
+        "AGENT_CODEWORD=lantern-42",
+      ),
+    ];
+    expect(byName(checkParity(events, HOOKS, WORD)).Subagent?.detail).toBe(
+      "the codeword was in Agent's own input, not from the subagent",
+    );
+  });
+
+  it("let the subagent use its own tools", () => {
+    const inside = tool(
+      "toolu_sub_read",
+      "Read",
+      "file_read",
+      { file_path: "/w/README.md" },
+      "# Parity project",
+      "completed",
+      "toolu_agent",
+    );
+    const checks = checkParity(runWith(...inside), HOOKS, WORD);
+    expect(checks.every((c) => c.pass)).toBe(true);
   });
 
   it("fails the MCP server when it isn't connected or the tool didn't answer the pong", () => {
