@@ -2,6 +2,9 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "types": ["node"],
+    // Resolve like Node does at runtime, so tsc rejects imports that type stripping would reject.
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
     // The daemon runs on Node's built-in type stripping: only erasable TS syntax.
     "erasableSyntaxOnly": true
   },

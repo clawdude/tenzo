@@ -13,8 +13,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@tenzo/contracts": "workspace:*",
-    "zod": "^4.6.5"
+    "@tenzo/contracts": "workspace:*"
   },
   "devDependencies": {
     "typescript": "^5.9.3",

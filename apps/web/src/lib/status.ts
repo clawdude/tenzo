@@ -13,3 +13,26 @@ export function connectionLabel(snapshot: ConnectionSnapshot): string {
 			return snapshot.attempt > 1 ? `Reconnecting (attempt ${snapshot.attempt})…` : 'Reconnecting…';
 	}
 }
+
+/** The status dot: live when the daemon said hello, waiting while trying, off when closed. */
+export function connectionTone(snapshot: ConnectionSnapshot): 'live' | 'waiting' | 'off' {
+	switch (snapshot.state) {
+		case 'connected':
+			return 'live';
+		case 'connecting':
+		case 'reconnecting':
+			return 'waiting';
+		case 'closed':
+			return 'off';
+	}
+}
+
+/**
+ * The daemon's WebSocket on the page's own origin. The daemon serves the web app, Vite proxies
+ * `/ws` in dev, and Tailscale Serve fronts both with HTTPS, so the socket is always `/ws` next to
+ * the page: `wss:` under https (an https page may not open `ws:`), `ws:` otherwise.
+ */
+export function daemonSocketUrl(location: Pick<Location, 'protocol' | 'host'>): string {
+	const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
+	return `${scheme}//${location.host}/ws`;
+}

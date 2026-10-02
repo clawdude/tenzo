@@ -3,9 +3,17 @@ import { type ClientFrame, type EnvironmentId, ServerFrame } from "@tenzo/contra
 export type ConnectionState = "closed" | "connecting" | "connected" | "reconnecting";
 
 export interface ConnectionSnapshot {
+  /**
+   * `connected` means the daemon said hello, not merely that a socket opened: a daemon that
+   * accepts and then drops (crash on hello, rejected token) must not look healthy.
+   */
   state: ConnectionState;
-  /** Consecutive failed attempts since the last successful open. */
+  /** Consecutive failed attempts since the last hello. Drives the backoff. */
   attempt: number;
+  /**
+   * The last daemon that said hello. Kept across reconnects and after `close()` on purpose:
+   * it is the "last known daemon", for showing cached state while offline.
+   */
   environmentId: EnvironmentId | null;
   serverVersion: string | null;
 }
@@ -111,12 +119,16 @@ export class Connection {
   }
 
   #open(): void {
-    const socket = new this.#WebSocket(this.#url);
+    let socket: WebSocket;
+    try {
+      socket = new this.#WebSocket(this.#url);
+    } catch {
+      // A bad URL or a mixed-content SecurityError throws instead of closing; retry the same way.
+      this.#scheduleReconnect();
+      return;
+    }
     this.#socket = socket;
-    socket.onopen = () => {
-      if (socket !== this.#socket) return;
-      this.#update({ state: "connected", attempt: 0 });
-    };
+    // No onopen handler: the connection only counts once the daemon's hello arrives.
     socket.onmessage = (event: MessageEvent) => {
       if (socket !== this.#socket) return;
       this.#receive(event.data);
@@ -142,7 +154,12 @@ export class Connection {
     if (!parsed.success) return;
     const frame = parsed.data;
     if (frame.type === "hello") {
-      this.#update({ environmentId: frame.environmentId, serverVersion: frame.version });
+      this.#update({
+        state: "connected",
+        attempt: 0,
+        environmentId: frame.environmentId,
+        serverVersion: frame.version,
+      });
     }
     for (const listener of this.#frameListeners) listener(frame);
   }
