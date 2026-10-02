@@ -9,7 +9,7 @@
  */
 import { spawn, spawnSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { cpSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { RuntimeEvent } from "@tenzo/contracts";
@@ -22,10 +22,10 @@ import {
   parseEvents,
   parseHookLog,
 } from "./checks.ts";
+import { copyFixture } from "./fixture.ts";
 
 const REPO_ROOT = resolve(import.meta.dirname, "../../..");
 const CLI = join(REPO_ROOT, "apps/daemon/src/cli.ts");
-const FIXTURE_DIR = resolve(import.meta.dirname, "../fixture");
 /** A run takes well under a minute on haiku; past this something is stuck. */
 const TIMEOUT_MS = 5 * 60_000;
 
@@ -63,10 +63,10 @@ function run(
   return result.stdout;
 }
 
-/** A scratch git repo holding the fixture, committed on `main`. */
+/** A scratch git repo holding the fixture under its live names, committed on `main`. */
 function makeProject(root: string): string {
   const repo = join(root, "parity-project");
-  cpSync(FIXTURE_DIR, repo, { recursive: true });
+  copyFixture(repo);
   const git = (...args: string[]) => run("git", args, { cwd: repo });
   git("init", "-q", "-b", "main");
   git("add", "-A");
@@ -163,6 +163,26 @@ function startThread(repo: string, prompt: string, model: string, env: NodeJS.Pr
 async function main(): Promise<void> {
   const { model, keep } = parseCli(process.argv.slice(2));
   const root = mkdtempSync(join(tmpdir(), "tenzo-parity-"));
+  let passed = false;
+  try {
+    passed = await check(root, model);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    console.log(`\nFAIL: the check couldn't run.\n${message}`);
+  } finally {
+    if (passed && !keep) {
+      rmSync(root, { recursive: true, force: true });
+    } else {
+      console.log(
+        `\nKept ${root}: events.jsonl, tenzo.stderr, the repo and its thread's worktree.`,
+      );
+    }
+  }
+  process.exitCode = passed ? 0 : 1;
+}
+
+/** One run in `root`: prints the table and says whether every check passed. */
+async function check(root: string, model: string): Promise<boolean> {
   // Only Tenzo's state is redirected; Claude runs with your own config, as in a real thread.
   const env = { ...process.env, TENZO_HOME: join(root, "home") };
   const word = randomBytes(4).toString("hex");
@@ -179,18 +199,12 @@ async function main(): Promise<void> {
   const hookLog = worktree ? join(worktree, FIXTURE.hookLog) : undefined;
   const hooks = parseHookLog(hookLog && existsSync(hookLog) ? readFileSync(hookLog, "utf8") : null);
   const checks = checkParity(events, hooks, word);
-  const passed = checks.every((c) => c.pass);
 
   console.log(`\n${formatTable(checks)}`);
   if (events.length === 0) {
     console.log(`\ntenzo exited with ${code} and no events:\n${stderr.trim()}`);
   }
-  if (passed && !keep) {
-    rmSync(root, { recursive: true, force: true });
-  } else {
-    console.log(`\nKept ${root}: events.jsonl, tenzo.stderr, the repo and its thread's worktree.`);
-  }
-  process.exitCode = passed ? 0 : 1;
+  return checks.every((c) => c.pass);
 }
 
 await main();

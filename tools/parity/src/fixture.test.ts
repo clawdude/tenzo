@@ -1,21 +1,36 @@
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { join } from "node:path";
+import { afterAll, afterEach, describe, expect, it } from "vitest";
 import { expectedPong, FIXTURE, parseHookLog } from "./checks.ts";
+import { copyFixture, FIXTURE_DIR, INERT_NAMES } from "./fixture.ts";
 
-/** The fixture's own moving parts, run directly: no Claude involved. */
-const FIXTURE_DIR = resolve(import.meta.dirname, "../fixture");
+/** The fixture's own moving parts, run directly on a live copy: no Claude involved. */
+const scratch = mkdtempSync(join(tmpdir(), "tenzo-parity-fixture-"));
+const PROJECT = join(scratch, "parity-project");
+copyFixture(PROJECT);
+afterAll(() => rmSync(scratch, { recursive: true, force: true }));
 
 const dirs: string[] = [];
 afterEach(() => {
   for (const dir of dirs.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
+describe("the stored fixture", () => {
+  it("is inert in this repo and live once copied", () => {
+    for (const [stored, live] of Object.entries(INERT_NAMES)) {
+      expect(existsSync(join(FIXTURE_DIR, stored))).toBe(true);
+      expect(existsSync(join(FIXTURE_DIR, live))).toBe(false);
+      expect(existsSync(join(PROJECT, live))).toBe(true);
+      expect(existsSync(join(PROJECT, stored))).toBe(false);
+    }
+  });
+});
+
 describe("the fixture's MCP server", () => {
   it("speaks enough MCP for Claude Code: initialize, tools/list, tools/call", () => {
-    const mcp = JSON.parse(readFileSync(join(FIXTURE_DIR, ".mcp.json"), "utf8"));
+    const mcp = JSON.parse(readFileSync(join(PROJECT, ".mcp.json"), "utf8"));
     const server = mcp.mcpServers[FIXTURE.mcpServer];
     const requests = [
       { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } },
@@ -30,7 +45,7 @@ describe("the fixture's MCP server", () => {
       { jsonrpc: "2.0", id: 4, method: "resources/list" },
     ];
     const result = spawnSync(server.command, server.args, {
-      cwd: FIXTURE_DIR, // Claude Code starts project servers in the project
+      cwd: PROJECT, // Claude Code starts project servers in the project
       input: requests.map((r) => JSON.stringify(r)).join("\n") + "\n",
       encoding: "utf8",
     });
@@ -53,13 +68,13 @@ describe("the fixture's MCP server", () => {
 
 describe("the fixture's hook", () => {
   it("is a PostToolUse hook that appends the tool to .parity/hooks.jsonl", () => {
-    const settings = JSON.parse(readFileSync(join(FIXTURE_DIR, ".claude/settings.json"), "utf8"));
+    const settings = JSON.parse(readFileSync(join(PROJECT, ".claude/settings.json"), "utf8"));
     expect(settings.hooks.PostToolUse[0].hooks[0].command).toContain("record-tool.mjs");
     expect(settings.enabledMcpjsonServers).toEqual([FIXTURE.mcpServer]);
 
     const project = mkdtempSync(join(tmpdir(), "tenzo-parity-hook-"));
     dirs.push(project);
-    const hook = join(FIXTURE_DIR, ".claude/hooks/record-tool.mjs");
+    const hook = join(PROJECT, ".claude/hooks/record-tool.mjs");
     for (const tool of ["Skill", FIXTURE.mcpTool]) {
       const result = spawnSync(process.execPath, [hook], {
         input: JSON.stringify({ hook_event_name: "PostToolUse", tool_name: tool, tool_input: {} }),
@@ -78,13 +93,10 @@ describe("the fixture's hook", () => {
 
 describe("the fixture's subagent and skill", () => {
   it("define the names and codewords the checks look for", () => {
-    const agent = readFileSync(join(FIXTURE_DIR, ".claude/agents/parity-agent.md"), "utf8");
+    const agent = readFileSync(join(PROJECT, ".claude/agents/parity-agent.md"), "utf8");
     expect(agent).toContain(`name: ${FIXTURE.agent}\n`);
     expect(agent).toContain(FIXTURE.agentCodeword);
-    const skill = readFileSync(
-      join(FIXTURE_DIR, `.claude/skills/${FIXTURE.skill}/SKILL.md`),
-      "utf8",
-    );
+    const skill = readFileSync(join(PROJECT, `.claude/skills/${FIXTURE.skill}/SKILL.md`), "utf8");
     expect(skill).toContain(`name: ${FIXTURE.skill}\n`);
     expect(skill).toContain(FIXTURE.skillCodeword);
   });
