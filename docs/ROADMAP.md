@@ -13,7 +13,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 
 - [x] #3 `tenzo project add <path>`: projects in SQLite; worktree created per thread under `~/.tenzo/worktrees`, removed on archive
 - [x] #4 Claude adapter over the Agent SDK, running the user's own `claude` with `settingSources: user, project, local`; events normalized into Tenzo's vocabulary
-- [ ] #5 Feature-parity check: a thread uses a subagent, a skill, a hook and an MCP server from the user's config, and all four work
+- [x] #5 Feature-parity check: a thread uses a subagent, a skill, a hook and an MCP server from the user's config, and all four work
 - [ ] #6 Event store + items: SQLite tables for threads, events, items; quick-lane items derived from questions and permission requests; answers round-trip to the SDK
 - [ ] #7 WebSocket API: snapshot on connect, live events after; `packages/client-runtime` owns the connection and reconnect
 - [ ] #8 The Pass, first card: the pile, a question card with one suggested answer, free text with mic, folded options; answering lifts the card

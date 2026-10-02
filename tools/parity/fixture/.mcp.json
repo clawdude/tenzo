@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "parity": {
+      "type": "stdio",
+      "command": "node",
+      "args": [".claude/mcp/parity-server.mjs"]
+    }
+  }
+}
