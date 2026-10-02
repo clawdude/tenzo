@@ -78,7 +78,7 @@ export function removeProject(store: Store, ref: string): Project {
     .map((row) => String(row.id));
   if (active.length > 0) {
     throw new TenzoError(
-      `"${project.name}" has ${active.length} active thread(s): ${active.join(", ")}. Archive them first.`,
+      `"${project.name}" has ${active.length} active thread(s): ${active.join(", ")}. Archive them first (\`tenzo thread archive <id>\`).`,
     );
   }
   store.db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);

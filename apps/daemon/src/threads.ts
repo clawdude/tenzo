@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+import { isAbsolute, join, relative } from "node:path";
 import type { ThreadId } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import {
@@ -18,6 +19,7 @@ import { type Store, worktreePath } from "./store.ts";
 export interface Thread {
   id: ThreadId;
   projectId: Project["id"];
+  title: string;
   slug: string;
   /** `tenzo/<slug>`; outlives the thread so finished work is never lost. */
   branch: string;
@@ -57,6 +59,7 @@ export async function createThread(
   const thread: Thread = {
     id,
     projectId: project.id,
+    title: title.trim(),
     slug,
     branch: BRANCH_PREFIX + slug,
     worktreePath: worktreePath(store, project.name, id),
@@ -70,12 +73,14 @@ export async function createThread(
   try {
     store.db
       .prepare(
-        `INSERT INTO threads (id, project_id, slug, branch, worktree_path, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO threads
+           (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
         thread.projectId,
+        thread.title,
         thread.slug,
         thread.branch,
         thread.worktreePath,
@@ -95,6 +100,9 @@ export async function createThread(
 /**
  * Archives a thread: removes its worktree, keeps its branch. Refuses when the worktree holds
  * uncommitted changes unless `force`, because removing it would throw that work away.
+ *
+ * If the project's repo has been moved or deleted there is no git left to ask: `force` then
+ * deletes the worktree folder itself so the thread (and then the project) can be let go.
  */
 export async function archiveThread(
   store: Store,
@@ -104,13 +112,23 @@ export async function archiveThread(
   const thread = getThread(store, threadId);
   if (thread.status === "archived") return thread;
   const project = projectOf(store, thread);
+  const force = options.force ?? false;
 
-  if (!options.force && (await worktreeHasChanges(thread.worktreePath))) {
-    throw new TenzoError(
-      `${thread.worktreePath} has uncommitted changes. Commit them to ${thread.branch}, or archive with --force to discard them.`,
-    );
+  if (!existsSync(join(project.path, ".git"))) {
+    if (!force) {
+      throw new TenzoError(
+        `The repo ${project.path} is gone (moved or deleted). Archive with --force to forget this thread and delete ${thread.worktreePath}.`,
+      );
+    }
+    deleteWorktreeFolder(store, thread.worktreePath);
+  } else {
+    if (!force && (await worktreeHasChanges(thread.worktreePath))) {
+      throw new TenzoError(
+        `${thread.worktreePath} has uncommitted changes. Commit them to ${thread.branch}, or archive with --force to discard them.`,
+      );
+    }
+    await removeWorktree(project.path, thread.worktreePath, force);
   }
-  await removeWorktree(project.path, thread.worktreePath, options.force ?? false);
 
   const now = new Date().toISOString();
   store.db
@@ -145,6 +163,15 @@ function projectOf(store: Store, thread: Thread): Project {
   return toProject(row);
 }
 
+/** `rm -rf` for a worktree whose repo is gone, but only ever inside `<home>/worktrees/`. */
+function deleteWorktreeFolder(store: Store, path: string): void {
+  const inside = relative(join(store.home, "worktrees"), path);
+  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
+    throw new Error(`Refusing to delete ${path}: it is not under ${store.home}/worktrees`);
+  }
+  rmSync(path, { recursive: true, force: true });
+}
+
 async function worktreeHasChanges(path: string): Promise<boolean> {
   if (!existsSync(path)) return false;
   try {
@@ -158,6 +185,7 @@ function toThread(row: Record<string, unknown>): Thread {
   return {
     id: String(row.id) as ThreadId,
     projectId: String(row.project_id) as Project["id"],
+    title: String(row.title),
     slug: String(row.slug),
     branch: String(row.branch),
     worktreePath: String(row.worktree_path),

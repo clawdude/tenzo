@@ -25,7 +25,8 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE TABLE threads (
         id             TEXT PRIMARY KEY,
         project_id     TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-        slug           TEXT NOT NULL,
+        title          TEXT NOT NULL,         -- what the person called it
+        slug           TEXT NOT NULL,         -- derived from the title; unique per project
         branch         TEXT NOT NULL,         -- tenzo/<slug>; kept after archive
         worktree_path  TEXT NOT NULL,
         status         TEXT NOT NULL,         -- 'active' | 'archived'
@@ -49,9 +50,13 @@ export function openDatabase(
   try {
     // The CLI and the daemon write from separate processes: wait for the lock instead of failing.
     db.exec("PRAGMA busy_timeout = 5000");
-    db.exec("PRAGMA foreign_keys = ON");
     db.exec("PRAGMA journal_mode = WAL");
+    // Migrations run with foreign keys off: SQLite's table-rebuild recipe drops the old table,
+    // and with them on that drop would cascade-delete every child row. `migrate` checks the
+    // keys itself before committing. The pragma is ignored inside a transaction, so set it here.
+    db.exec("PRAGMA foreign_keys = OFF");
     migrate(db, migrations);
+    db.exec("PRAGMA foreign_keys = ON");
   } catch (error) {
     db.close();
     throw error;
@@ -59,24 +64,44 @@ export function openDatabase(
   return db;
 }
 
-/** Applies the migrations this database hasn't seen yet, all or nothing. */
+/**
+ * Applies the migrations this database hasn't seen yet, all or nothing. A database that is
+ * already current is left alone: no write lock, no write. Run it with foreign keys off.
+ */
 export function migrate(db: DatabaseSync, migrations: readonly Migration[]): void {
+  if (checkVersion(db, migrations) === migrations.length) return;
+
   // IMMEDIATE takes the write lock up front, so two processes can't both apply the same step.
   db.exec("BEGIN IMMEDIATE");
   try {
-    const current = schemaVersion(db);
-    if (current > migrations.length) {
+    const current = checkVersion(db, migrations); // another process may have migrated meanwhile
+    for (const migration of migrations.slice(current)) db.exec(migration.sql);
+    const broken = db.prepare("PRAGMA foreign_key_check").all();
+    if (broken.length > 0) {
       throw new Error(
-        `Tenzo's database is at schema ${current}, newer than this tenzo knows (${migrations.length}). Update tenzo.`,
+        `Migration left ${broken.length} broken foreign key(s): ${JSON.stringify(broken)}`,
       );
     }
-    for (const migration of migrations.slice(current)) db.exec(migration.sql);
     db.exec(`PRAGMA user_version = ${migrations.length}`);
     db.exec("COMMIT");
   } catch (error) {
-    db.exec("ROLLBACK");
+    try {
+      db.exec("ROLLBACK");
+    } catch {
+      // SQLite already rolled back on its own (e.g. SQLITE_FULL); the original error is the story.
+    }
     throw error;
   }
+}
+
+function checkVersion(db: DatabaseSync, migrations: readonly Migration[]): number {
+  const current = schemaVersion(db);
+  if (current > migrations.length) {
+    throw new Error(
+      `Tenzo's database is at schema ${current}, newer than this tenzo knows (${migrations.length}). Update tenzo.`,
+    );
+  }
+  return current;
 }
 
 export function schemaVersion(db: DatabaseSync): number {

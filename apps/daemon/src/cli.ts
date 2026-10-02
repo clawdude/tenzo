@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { VERSION } from "./app.ts";
 import { readConfig } from "./config.ts";
+import { parseArgs } from "./args.ts";
 import { TenzoError } from "./errors.ts";
 import { addProject, findProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
@@ -17,7 +18,11 @@ Usage:
   tenzo thread new <project> <title…>    new worktree on branch tenzo/<slug> from the default branch
   tenzo thread list [<project>] [--all]  list active threads (--all: archived too)
   tenzo thread archive <id> [--force]    remove the thread's worktree, keep its branch
+                                         (--force: discard uncommitted work, or forget a
+                                         thread whose repo was moved or deleted)
   tenzo --version                        print the version
+
+Arguments after a bare -- are never options: tenzo thread new app -- --weird title
 
 Environment:
   TENZO_PORT     port to listen on
@@ -61,7 +66,8 @@ function usageError(message: string): never {
   throw new TenzoError(`${message}\n\n${USAGE}`);
 }
 
-async function project([sub, ...args]: string[]): Promise<void> {
+async function project([sub, ...rest]: string[]): Promise<void> {
+  const args = parseArgs(rest).positional;
   switch (sub) {
     case "add": {
       const [path] = args;
@@ -91,9 +97,9 @@ async function project([sub, ...args]: string[]): Promise<void> {
   }
 }
 
-async function thread([sub, ...args]: string[]): Promise<void> {
-  const flags = new Set(args.filter((a) => a.startsWith("--")));
-  const positional = args.filter((a) => !a.startsWith("--"));
+async function thread([sub, ...rest]: string[]): Promise<void> {
+  const allowed = sub === "list" || sub === "ls" ? ["--all"] : sub === "archive" ? ["--force"] : [];
+  const { flags, positional } = parseArgs(rest, allowed);
   switch (sub) {
     case "new": {
       const [projectRef, ...words] = positional;

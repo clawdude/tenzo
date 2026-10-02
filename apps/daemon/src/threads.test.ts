@@ -1,8 +1,9 @@
-import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { join, relative } from "node:path";
 import { ThreadId } from "@tenzo/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { addProject, type Project } from "./projects.ts";
+import { addWorktree } from "./git.ts";
+import { addProject, type Project, removeProject } from "./projects.ts";
 import { slugify } from "./slug.ts";
 import { openStore, type Store } from "./store.ts";
 import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
@@ -37,6 +38,7 @@ describe("createThread", () => {
     const thread = await createThread(store, "app", "Fix the login bug");
     expect(ThreadId.safeParse(thread.id).success).toBe(true);
     expect(thread).toMatchObject({
+      title: "Fix the login bug",
       slug: "fix-the-login-bug",
       branch: "tenzo/fix-the-login-bug",
       status: "active",
@@ -66,6 +68,23 @@ describe("createThread", () => {
     expect(sh(repo, "branch", "--show-current")).toBe("wip");
     expect(sh(repo, "status", "--porcelain")).toBe(status);
     expect(readFileSync(join(repo, "README.md"), "utf8")).toBe("# edited, not committed\n");
+  });
+
+  it("puts worktrees under TENZO_HOME even when it was given as a relative path", async () => {
+    store.close();
+    store = openStore(relative(process.cwd(), home)); // git runs in the repo: must not resolve there
+    const thread = await createThread(store, "app", "relative");
+    expect(thread.worktreePath).toBe(join(home, "worktrees", "app", thread.id));
+    expect(existsSync(thread.worktreePath)).toBe(true);
+    expect(sh(repo, "status", "--porcelain", "--ignored")).toBe("");
+  });
+
+  it("refuses a relative worktree path outright", async () => {
+    await expect(addWorktree(repo, "relhome/wt", "tenzo/x", "refs/heads/main")).rejects.toThrow(
+      /must be absolute/,
+    );
+    expect(sh(repo, "status", "--porcelain", "--ignored")).toBe("");
+    expect(branches(repo)).toEqual(["main"]);
   });
 
   it("does not make the thread branch track the default branch's upstream", async () => {
@@ -134,6 +153,31 @@ describe("archiveThread", () => {
     await archiveThread(store, thread.id);
     expect(worktrees(repo)).toEqual([repo]); // the stale registration was pruned
     expect(getThread(store, thread.id).status).toBe("archived");
+  });
+
+  it("lets go of a thread whose repo was moved or deleted, with --force", async () => {
+    const thread = await createThread(store, "app", "Orphan");
+    renameSync(repo, `${repo}-moved`);
+
+    await expect(archiveThread(store, thread.id)).rejects.toThrow(/is gone.*--force/);
+    expect(getThread(store, thread.id).status).toBe("active");
+    expect(() => removeProject(store, "app")).toThrow(/active thread/);
+
+    await archiveThread(store, thread.id, { force: true });
+    expect(existsSync(thread.worktreePath)).toBe(false);
+    expect(getThread(store, thread.id).status).toBe("archived");
+    expect(removeProject(store, "app").id).toBe(project.id); // no longer a dead end
+  });
+
+  it("never deletes a folder outside TENZO_HOME/worktrees, even for a gone repo", async () => {
+    const thread = await createThread(store, "app", "Tampered");
+    const outside = tempDir("precious");
+    writeFileSync(join(outside, "keep.txt"), "keep\n");
+    store.db.prepare("UPDATE threads SET worktree_path = ? WHERE id = ?").run(outside, thread.id);
+    rmSync(repo, { recursive: true, force: true });
+
+    await expect(archiveThread(store, thread.id, { force: true })).rejects.toThrow(/Refusing/);
+    expect(existsSync(join(outside, "keep.txt"))).toBe(true);
   });
 
   it("is idempotent and filters by project", async () => {

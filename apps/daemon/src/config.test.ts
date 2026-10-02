@@ -26,4 +26,10 @@ describe("readConfig", () => {
     expect(config.home).toBe("/tmp/th");
     expect(config.webDir).toBe("/tmp/web");
   });
+
+  it("makes a relative TENZO_HOME absolute, so worktrees can't land inside a repo", () => {
+    const config = readConfig({ TENZO_HOME: "relhome", TENZO_WEB_DIR: "web" });
+    expect(config.home).toBe(join(process.cwd(), "relhome"));
+    expect(config.webDir).toBe(join(process.cwd(), "web"));
+  });
 });
