@@ -119,6 +119,22 @@ describe("openDatabase", () => {
     db.close();
   });
 
+  it("gives threads from before agent sessions an empty session, keeping them", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const first = openDatabase(path, MIGRATIONS.slice(0, 1));
+    first.exec(`
+      INSERT INTO projects VALUES ('prj_1', 'app', '/r/app', 'main', 'now');
+      INSERT INTO threads (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at)
+        VALUES ('thr_1', 'prj_1', 'Old', 'old', 'tenzo/old', '/w/old', 'active', 'now', 'now');
+    `);
+    first.close();
+    const db = openDatabase(path);
+    expect(db.prepare("SELECT id, title, agent, session_id FROM threads").all()).toEqual([
+      { id: "thr_1", title: "Old", agent: null, session_id: null },
+    ]);
+    db.close();
+  });
+
   it("refuses a database from a newer tenzo instead of guessing", () => {
     const path = join(tempDir(), "tenzo.db");
     openDatabase(path).close();

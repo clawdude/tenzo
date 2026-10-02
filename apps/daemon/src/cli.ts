@@ -1,4 +1,7 @@
 #!/usr/bin/env node
+import { createInterface } from "node:readline";
+import type { AgentSession } from "./agent/agent.ts";
+import { createClaudeAdapter } from "./agent/claude.ts";
 import { VERSION } from "./app.ts";
 import { readConfig } from "./config.ts";
 import { parseArgs } from "./args.ts";
@@ -6,7 +9,15 @@ import { TenzoError } from "./errors.ts";
 import { addProject, findProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
 import { openStore, type Store } from "./store.ts";
-import { archiveThread, createThread, listThreads, type Thread } from "./threads.ts";
+import { runTurn, titleFrom } from "./thread-run.ts";
+import {
+  archiveThread,
+  createThread,
+  getThread,
+  listThreads,
+  setThreadSession,
+  type Thread,
+} from "./threads.ts";
 
 const USAGE = `tenzo ${VERSION}
 
@@ -16,6 +27,11 @@ Usage:
   tenzo project list                     list projects
   tenzo project remove <name|path>       forget a project (its repo is left alone)
   tenzo thread new <project> <title…>    new worktree on branch tenzo/<slug> from the default branch
+  tenzo thread start <project> <prompt…> new thread, then one Claude Code turn in its worktree:
+                                         prints its events, asks you its questions and
+                                         permission requests (--model <name>, --json)
+  tenzo thread send <id> <prompt…>       one more turn in a thread, resuming its Claude session
+                                         (--model <name>, --json)
   tenzo thread list [<project>] [--all]  list active threads (--all: archived too)
   tenzo thread archive <id> [--force]    remove the thread's worktree, keep its branch
                                          (--force: discard uncommitted work, or forget a
@@ -98,9 +114,41 @@ async function project([sub, ...rest]: string[]): Promise<void> {
 }
 
 async function thread([sub, ...rest]: string[]): Promise<void> {
-  const allowed = sub === "list" || sub === "ls" ? ["--all"] : sub === "archive" ? ["--force"] : [];
-  const { flags, positional } = parseArgs(rest, allowed);
+  const runs = sub === "start" || sub === "send";
+  const allowed =
+    sub === "list" || sub === "ls"
+      ? ["--all"]
+      : sub === "archive"
+        ? ["--force"]
+        : runs
+          ? ["--json"]
+          : [];
+  const { flags, options, positional } = parseArgs(rest, allowed, runs ? ["--model"] : []);
   switch (sub) {
+    case "start": {
+      const [projectRef, ...words] = positional;
+      const prompt = words.join(" ").trim();
+      if (!projectRef || prompt === "") {
+        usageError("tenzo thread start needs a project and a prompt.");
+      }
+      return withStore(async (store) => {
+        const t = await createThread(store, projectRef, titleFrom(prompt));
+        // With --json, stdout is events only.
+        const say = flags.has("--json") ? console.error : console.log;
+        say(`Created ${t.id} on ${t.branch}\n${t.worktreePath}`);
+        await runThreadTurn(store, t, prompt, options.get("--model"), flags.has("--json"));
+      });
+    }
+    case "send": {
+      const [id, ...words] = positional;
+      const prompt = words.join(" ").trim();
+      if (!id || prompt === "") usageError("tenzo thread send needs a thread id and a prompt.");
+      return withStore(async (store) => {
+        const t = getThread(store, id);
+        if (t.status === "archived") throw new TenzoError(`${t.id} is archived.`);
+        await runThreadTurn(store, t, prompt, options.get("--model"), flags.has("--json"));
+      });
+    }
     case "new": {
       const [projectRef, ...words] = positional;
       if (!projectRef || words.length === 0)
@@ -143,6 +191,86 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
     default:
       usageError(`Unknown thread command "${sub ?? ""}".`);
   }
+}
+
+async function runThreadTurn(
+  store: Store,
+  thread: Thread,
+  prompt: string,
+  model: string | undefined,
+  json: boolean,
+): Promise<void> {
+  const keyboard = stdinLines(json ? process.stderr : process.stdout);
+  let session: AgentSession | undefined;
+  let interrupts = 0;
+  // Ctrl-C once interrupts the turn, twice stops the session, a third time stops waiting.
+  const onSigint = () => {
+    interrupts++;
+    if (interrupts === 1) void session?.interrupt();
+    else if (interrupts === 2) void session?.stop();
+    else process.exit(130);
+  };
+  process.on("SIGINT", onSigint);
+  try {
+    const { state } = await runTurn({
+      adapter: createClaudeAdapter(),
+      thread,
+      prompt,
+      ...(model ? { model } : {}),
+      json,
+      onStarted: (started) => {
+        session = started;
+      },
+      onSession: (sessionId) => {
+        if (sessionId !== thread.sessionId) setThreadSession(store, thread.id, "claude", sessionId);
+      },
+      ask: keyboard.ask,
+      print: (line) => console.log(line),
+    });
+    if (state !== "completed" && state !== "interrupted") process.exitCode = 1;
+  } finally {
+    process.off("SIGINT", onSigint);
+    keyboard.close();
+  }
+}
+
+/** Lines typed on stdin, read only once asked for: a run that asks nothing never holds stdin. */
+function stdinLines(out: NodeJS.WritableStream) {
+  let reader: ReturnType<typeof createInterface> | undefined;
+  const lines: string[] = [];
+  const waiting: ((line: string | null) => void)[] = [];
+  let ended = false;
+  const open = () => {
+    if (reader) return;
+    reader = createInterface({ input: process.stdin, terminal: false });
+    reader.on("line", (line) => {
+      const next = waiting.shift();
+      if (next) next(line);
+      else lines.push(line);
+    });
+    reader.on("close", () => {
+      ended = true;
+      for (const next of waiting.splice(0)) next(null);
+    });
+  };
+  return {
+    async ask(prompt: string): Promise<string | null> {
+      out.write(prompt);
+      open();
+      const line =
+        lines.length > 0
+          ? (lines.shift() as string)
+          : ended
+            ? null
+            : await new Promise<string | null>((resolve) => waiting.push(resolve));
+      // A terminal echoes what was typed; piped input doesn't, so show it to keep the log readable.
+      if (!process.stdin.isTTY) out.write(line === null ? "(end of input)\n" : `${line}\n`);
+      return line;
+    },
+    close() {
+      reader?.close();
+    },
+  };
 }
 
 function printTable(rows: string[][]): void {

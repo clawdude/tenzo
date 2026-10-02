@@ -24,4 +24,24 @@ describe("parseArgs", () => {
   it("leaves single-dash words alone", () => {
     expect(parseArgs(["app", "-", "fix", "-x"]).positional).toEqual(["app", "-", "fix", "-x"]);
   });
+
+  it("reads valued options as --name value or --name=value", () => {
+    const { options, flags, positional } = parseArgs(
+      ["app", "--model", "haiku", "fix", "--json", "it"],
+      ["--json"],
+      ["--model"],
+    );
+    expect(Object.fromEntries(options)).toEqual({ "--model": "haiku" });
+    expect([...flags]).toEqual(["--json"]);
+    expect(positional).toEqual(["app", "fix", "it"]);
+    expect(parseArgs(["--model=opus", "x"], [], ["--model"]).options.get("--model")).toBe("opus");
+  });
+
+  it("insists on a value for a valued option", () => {
+    for (const args of [["x", "--model"], ["--model", "--json"], ["--model="]]) {
+      expect(() => parseArgs(args, ["--json"], ["--model"])).toThrow(/--model needs a value/);
+    }
+    expect(() => parseArgs(["--mdl", "x"], [], ["--model"])).toThrow(/Known: --model <value>/);
+    expect(parseArgs(["--", "--model", "x"], [], ["--model"]).positional).toEqual(["--model", "x"]);
+  });
 });

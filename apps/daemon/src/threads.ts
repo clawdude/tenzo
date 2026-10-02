@@ -1,6 +1,6 @@
-import { existsSync, rmSync } from "node:fs";
-import { isAbsolute, join, relative } from "node:path";
-import type { ThreadId } from "@tenzo/contracts";
+import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
+import { dirname, join } from "node:path";
+import type { AgentKind, ThreadId } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import {
   addWorktree,
@@ -28,6 +28,10 @@ export interface Thread {
   createdAt: string;
   updatedAt: string;
   archivedAt: string | null;
+  /** The agent running this thread, once it has started. */
+  agent: AgentKind | null;
+  /** The agent's own session id: what resumes the conversation after a restart. */
+  sessionId: string | null;
 }
 
 const BRANCH_PREFIX = "tenzo/";
@@ -67,6 +71,8 @@ export async function createThread(
     createdAt: now,
     updatedAt: now,
     archivedAt: null,
+    agent: null,
+    sessionId: null,
   };
 
   await addWorktree(project.path, thread.worktreePath, thread.branch, base);
@@ -120,7 +126,7 @@ export async function archiveThread(
         `The repo ${project.path} is gone (moved or deleted). Archive with --force to forget this thread and delete ${thread.worktreePath}.`,
       );
     }
-    deleteWorktreeFolder(store, thread.worktreePath);
+    deleteWorktreeFolder(store, project, thread);
   } else {
     if (!force && (await worktreeHasChanges(thread.worktreePath))) {
       throw new TenzoError(
@@ -135,6 +141,18 @@ export async function archiveThread(
     .prepare("UPDATE threads SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?")
     .run(now, now, thread.id);
   return { ...thread, status: "archived", archivedAt: now, updatedAt: now };
+}
+
+/** Records the agent session a thread runs in, so a later run can resume it. */
+export function setThreadSession(
+  store: Store,
+  threadId: ThreadId,
+  agent: AgentKind,
+  sessionId: string,
+): void {
+  store.db
+    .prepare("UPDATE threads SET agent = ?, session_id = ?, updated_at = ? WHERE id = ?")
+    .run(agent, sessionId, new Date().toISOString(), threadId);
 }
 
 export function getThread(store: Store, threadId: string): Thread {
@@ -163,11 +181,23 @@ function projectOf(store: Store, thread: Thread): Project {
   return toProject(row);
 }
 
-/** `rm -rf` for a worktree whose repo is gone, but only ever inside `<home>/worktrees/`. */
-function deleteWorktreeFolder(store: Store, path: string): void {
-  const inside = relative(join(store.home, "worktrees"), path);
-  if (inside === "" || inside.startsWith("..") || isAbsolute(inside)) {
-    throw new Error(`Refusing to delete ${path}: it is not under ${store.home}/worktrees`);
+/**
+ * `rm -rf` for a worktree whose repo is gone, but only ever the folder Tenzo itself made for this
+ * thread, `<home>/worktrees/<project>/<thread id>`: a tampered path, a symlinked project folder or
+ * a symlinked worktree is refused rather than followed.
+ */
+function deleteWorktreeFolder(store: Store, project: Project, thread: Thread): void {
+  const path = thread.worktreePath;
+  const refuse = (why: string) =>
+    new TenzoError(`Refusing to delete ${path}: ${why}. Remove it by hand if it is safe to.`);
+  const expected = worktreePath(store, project.name, thread.id);
+  if (path !== expected) throw refuse(`Tenzo made this thread's worktree at ${expected}`);
+  const stat = lstatSync(path, { throwIfNoEntry: false });
+  if (!stat) return; // already gone
+  if (!stat.isDirectory()) throw refuse("it is not a plain folder");
+  const root = join(store.home, "worktrees");
+  if (realpathSync(dirname(path)) !== join(realpathSync(root), project.name)) {
+    throw refuse(`its folder does not resolve to ${join(root, project.name)}`);
   }
   rmSync(path, { recursive: true, force: true });
 }
@@ -193,5 +223,8 @@ function toThread(row: Record<string, unknown>): Thread {
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
     archivedAt: row.archived_at === null ? null : String(row.archived_at),
+    agent: row.agent === "claude" || row.agent === "codex" ? row.agent : null,
+    sessionId:
+      row.session_id === null || row.session_id === undefined ? null : String(row.session_id),
   };
 }
