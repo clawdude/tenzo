@@ -38,5 +38,31 @@ The daemon serves the web app, `GET /health` (version and environment id) and th
 | Variable | Default | |
 |---|---|---|
 | `TENZO_PORT` | `4780` | port to listen on |
-| `TENZO_HOME` | `~/.tenzo` | Tenzo's state; holds `environment-id`, this machine's stable identity |
+| `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
+
+## Projects and threads
+
+A project is a local git repo Tenzo knows about. Each thread gets its own worktree under `$TENZO_HOME/worktrees/<project>/<thread-id>`, on a new branch `tenzo/<slug>` cut from the project's default branch, so your main checkout is never touched. Archiving a thread removes its worktree and keeps its branch. Tenzo writes nothing into your repo; a `.tenzo/` folder there is optional.
+
+```bash
+pnpm tenzo project add ~/code/app              # any path inside the repo; detects the default branch
+pnpm tenzo project list
+pnpm tenzo thread new app "Fix the login bug"  # worktree on branch tenzo/fix-the-login-bug
+pnpm tenzo thread list [app] [--all]
+pnpm tenzo thread archive <thread-id>          # refuses if the worktree has uncommitted changes; --force discards them
+pnpm tenzo project remove app                  # refuses while the project has active threads; the repo is left alone
+```
+
+The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` is a stand-in until threads start agents (#4, #6, #9).
+
+To try it without touching your real state, use a scratch `TENZO_HOME` and a scratch repo:
+
+```bash
+export TENZO_HOME=$(mktemp -d)
+git init -q -b main /tmp/scratch && git -C /tmp/scratch commit -q --allow-empty -m init
+pnpm tenzo project add /tmp/scratch
+pnpm tenzo thread new scratch "Try it"
+git -C /tmp/scratch worktree list              # main checkout plus the thread's worktree
+pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try-it kept
+```
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |

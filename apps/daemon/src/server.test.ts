@@ -75,6 +75,15 @@ describe("startDaemon", () => {
     expect(second.environmentId).toBe(id);
   });
 
+  it("says plainly when the port is taken", async () => {
+    const first = await start();
+    await expect(
+      startDaemon({ host: "127.0.0.1", port: first.port, home, webDir: join(home, "web") }),
+    ).rejects.toThrow(new RegExp(`127.0.0.1:${first.port} is already in use`));
+    // The first daemon is unaffected.
+    expect((await fetch(`${first.url}/health`)).status).toBe(200);
+  });
+
   it("drops open sockets on close so clients notice", async () => {
     const daemon = await start();
     const { ws } = await frames(`ws://127.0.0.1:${daemon.port}/ws`, 1);

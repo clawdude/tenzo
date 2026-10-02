@@ -58,8 +58,10 @@ describe("web app", () => {
     expect(await res.text()).toContain("<title>Tenzo</title>");
   });
 
-  it("404s a missing asset instead of answering with HTML", async () => {
-    expect((await app().request("/_app/immutable/gone.js")).status).toBe(404);
+  it("404s a missing asset instead of answering with HTML, and doesn't let it be cached", async () => {
+    const res = await app().request("/_app/immutable/gone.js");
+    expect(res.status).toBe(404);
+    expect(res.headers.get("cache-control")).toBe("no-cache");
   });
 
   it("does not escape the web dir", async () => {

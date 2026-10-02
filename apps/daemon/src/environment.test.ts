@@ -1,9 +1,22 @@
-import { mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EnvironmentId } from "@tenzo/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { generateEnvironmentId, loadEnvironmentId } from "./environment.ts";
+
+// Lets a test make the id write fail halfway, as a full disk would.
+const failWrite = vi.hoisted(() => ({ on: false }));
+vi.mock("node:fs", async (importOriginal) => {
+  const fs = await importOriginal<typeof import("node:fs")>();
+  return {
+    ...fs,
+    writeFileSync: (...args: Parameters<typeof fs.writeFileSync>) => {
+      fs.writeFileSync(...args);
+      if (failWrite.on) throw Object.assign(new Error("ENOSPC: no space left"), { code: "ENOSPC" });
+    },
+  };
+});
 
 let dir: string;
 beforeEach(() => {
@@ -20,6 +33,17 @@ describe("loadEnvironmentId", () => {
     expect(EnvironmentId.safeParse(id).success).toBe(true);
     expect(readFileSync(join(home, "environment-id"), "utf8")).toBe(`${id}\n`);
     expect(readdirSync(home)).toEqual(["environment-id"]); // no temp files left behind
+    expect(statSync(home).mode & 0o777).toBe(0o700);
+  });
+
+  it("cleans up its temp file when the write fails", () => {
+    failWrite.on = true;
+    try {
+      expect(() => loadEnvironmentId(dir)).toThrow(/ENOSPC/);
+    } finally {
+      failWrite.on = false;
+    }
+    expect(readdirSync(dir)).toEqual([]);
   });
 
   it("returns the same id on every later run", () => {

@@ -42,10 +42,15 @@ export function createApp({ environmentId, webDir }: AppOptions): Hono {
   );
 
   // SvelteKit content-hashes everything under _app/immutable; everything else must revalidate.
+  // Decided after the route answers: a 404 for a missing hashed asset must not be cached for a year.
   app.use("*", async (c, next) => {
-    const immutable = c.req.path.startsWith("/_app/immutable/");
-    c.header("Cache-Control", immutable ? "public, max-age=31536000, immutable" : "no-cache");
     await next();
+    const found = c.res.ok || c.res.status === 304;
+    const immutable = c.req.path.startsWith("/_app/immutable/") && found;
+    c.res.headers.set(
+      "Cache-Control",
+      immutable ? "public, max-age=31536000, immutable" : "no-cache",
+    );
   });
   app.use("*", serveStatic({ root: webDir }));
 
