@@ -35,10 +35,25 @@ const color: UserInputQuestion = {
   header: "Color",
   question: "Which color?",
   options: [
-    { label: "Red", description: "Warm", recommended: false },
-    { label: "Blue", description: "Cool", recommended: true },
+    { label: "Red", value: "Red", description: "Warm", recommended: false },
+    { label: "Blue", value: "Blue (Recommended)", description: "Cool", recommended: true },
   ],
   multiSelect: false,
+};
+
+/** The same question as Claude sends it to AskUserQuestion. */
+const askColor = {
+  questions: [
+    {
+      question: "Which color?",
+      header: "Color",
+      options: [
+        { label: "Red", description: "Warm" },
+        { label: "Blue (Recommended)", description: "Cool" },
+      ],
+      multiSelect: false,
+    },
+  ],
 };
 
 /** Answers prompts from a list, then reports end of input. */
@@ -111,7 +126,7 @@ describe("runTurn", () => {
     const out = await run(
       async function* (turn) {
         yield init();
-        results.push(await turn.canUseTool("AskUserQuestion", { questions: [color] }, "toolu_q"));
+        results.push(await turn.canUseTool("AskUserQuestion", askColor, "toolu_q"));
         results.push(await turn.canUseTool("Bash", { command: "make" }, "toolu_1"));
         results.push(await turn.canUseTool("Bash", { command: "make install" }, "toolu_2"));
         results.push(await turn.canUseTool("Bash", { command: "rm -rf /" }, "toolu_3"));
@@ -122,12 +137,14 @@ describe("runTurn", () => {
     expect(results).toEqual([
       {
         behavior: "allow",
-        updatedInput: { questions: [color], answers: { "Which color?": "Blue" } },
+        // Shown as "Blue (recommended)", answered with Claude's own label so it matches the option.
+        updatedInput: { ...askColor, answers: { "Which color?": "Blue (Recommended)" } },
       },
       { behavior: "allow", updatedInput: { command: "make" } },
       { behavior: "deny", message: "The user denied this." },
       { behavior: "deny", message: "Never do that" },
     ]);
+    expect(out.asked[0]).toContain("  2. Blue (recommended) — Cool\n");
     expect(out.asked[1]).toBe("? Allow Bash: make? [y]es, [n]o, or type why not: ");
     expect(out.state).toBe("completed");
   });
@@ -135,8 +152,8 @@ describe("runTurn", () => {
   it("interrupts the turn when nobody is there to answer", async () => {
     const out = await run(async function* (turn) {
       yield init();
-      yield assistant([toolUse("toolu_q", "AskUserQuestion", { questions: [color] })]);
-      const answer = await turn.canUseTool("AskUserQuestion", { questions: [color] }, "toolu_q");
+      yield assistant([toolUse("toolu_q", "AskUserQuestion", askColor)]);
+      const answer = await turn.canUseTool("AskUserQuestion", askColor, "toolu_q");
       yield toolResult("toolu_q", answer?.behavior ?? "", true);
       yield result({ terminal_reason: "aborted_tools", is_error: true });
     }, []);
@@ -184,10 +201,10 @@ describe("askQuestions", () => {
   it("joins several picks for a multi-select question", async () => {
     const multi = { ...color, multiSelect: true };
     expect(await askQuestions([multi], keyboard("1, 2").ask)).toEqual({
-      "Which color?": "Red, Blue",
+      "Which color?": "Red, Blue (Recommended)",
     });
     expect(await askQuestions([color], keyboard("1,2", "2").ask)).toEqual({
-      "Which color?": "Blue",
+      "Which color?": "Blue (Recommended)",
     });
   });
 

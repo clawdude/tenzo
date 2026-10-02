@@ -53,7 +53,10 @@ export const RequestDecision = z.enum(["allow", "deny", "cancel"]);
 export type RequestDecision = z.infer<typeof RequestDecision>;
 
 export const UserInputOption = z.object({
+  /** What to show. */
   label: z.string(),
+  /** What to answer when this option is picked: the agent's own text for it, which may differ. */
+  value: z.string(),
   description: z.string(),
   /** The agent's suggested answer: the card's filled button. */
   recommended: z.boolean(),
@@ -73,7 +76,7 @@ export const UserInputQuestion = z.object({
 });
 export type UserInputQuestion = z.infer<typeof UserInputQuestion>;
 
-/** Question id → the answer: an option label, several joined by ", ", or free text. */
+/** Question id → the answer: an option's `value`, several joined by ", ", or free text. */
 export const UserInputAnswers = z.record(z.string(), z.string());
 export type UserInputAnswers = z.infer<typeof UserInputAnswers>;
 

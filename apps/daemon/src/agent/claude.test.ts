@@ -133,6 +133,8 @@ describe("Claude adapter: starting", () => {
       CLAUDE_CODE_BRIDGE_MCP_CARRIER: "c",
       CLAUDE_CODE_WORKER_EPOCH: "3",
       CLAUDE_CODE_EXECPATH: "/x/claude",
+      CLAUDE_CODE_ENVIRONMENT_KIND: "bridge",
+      CLAUDE_EFFORT: "high",
     };
     const user = {
       PATH: "/usr/bin",
@@ -348,8 +350,14 @@ describe("Claude adapter: questions", () => {
             header: "Color",
             question: "Which color do you prefer?",
             options: [
-              { label: "Red", description: "Warm", recommended: false },
-              { label: "Blue", description: "Cool", recommended: true, preview: "#0000ff" },
+              { label: "Red", value: "Red", description: "Warm", recommended: false },
+              {
+                label: "Blue",
+                value: "Blue (Recommended)",
+                description: "Cool",
+                recommended: true,
+                preview: "#0000ff",
+              },
             ],
             multiSelect: false,
           },
@@ -409,8 +417,8 @@ describe("Claude adapter: questions", () => {
         header: "",
         question: "",
         options: [
-          { label: "A", description: "", recommended: false },
-          { label: "B", description: "", recommended: true },
+          { label: "A", value: "A", description: "", recommended: false },
+          { label: "B", value: "(recommended) B", description: "", recommended: true },
         ],
         multiSelect: false,
       },

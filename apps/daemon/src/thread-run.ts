@@ -144,8 +144,8 @@ function pick(q: UserInputQuestion, reply: string): string | undefined {
   const numbers = reply.split(/\s*,\s*/);
   if (!numbers.every((n) => /^\d+$/.test(n))) return reply; // free text
   if (!q.multiSelect && numbers.length > 1) return undefined;
-  const labels = numbers.map((n) => q.options[Number(n) - 1]?.label);
-  return labels.every((l) => l !== undefined) ? labels.join(", ") : undefined;
+  const values = numbers.map((n) => q.options[Number(n) - 1]?.value);
+  return values.every((v) => v !== undefined) ? values.join(", ") : undefined;
 }
 
 /** One readable line per event: its type, then what it says. */

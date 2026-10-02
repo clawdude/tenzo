@@ -297,6 +297,8 @@ const PARENT_SESSION_VARS = new Set([
   "CLAUDE_CODE_MESSAGING_TOKEN",
   "CLAUDE_CODE_WORKER_EPOCH",
   "CLAUDE_CODE_EXECPATH",
+  "CLAUDE_CODE_ENVIRONMENT_KIND", // e.g. "bridge": adds hosted-only tools such as SendUserFile
+  "CLAUDE_EFFORT", // the parent's live /effort; the user's own is effortLevel in settings
 ]);
 const PARENT_SESSION_PREFIXES = ["CLAUDE_CODE_BRIDGE_"];
 
@@ -330,10 +332,12 @@ export function parseQuestions(input: Record<string, unknown>): UserInputQuestio
       question,
       options: options.filter(isRecord).map((o) => {
         const raw = typeof o.label === "string" ? o.label : "";
-        // Claude marks its suggestion in the label: "Blue (Recommended)".
+        // Claude marks its suggestion in the label: "Blue (Recommended)". The card shows "Blue";
+        // the answer must be the label exactly as Claude wrote it, so it matches the option.
         const label = raw.replace(RECOMMENDED, " ").trim();
         return {
           label,
+          value: raw,
           description: typeof o.description === "string" ? o.description : "",
           recommended: label !== raw.trim(),
           ...(typeof o.preview === "string" && o.preview !== "" ? { preview: o.preview } : {}),
