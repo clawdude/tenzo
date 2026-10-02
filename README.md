@@ -39,6 +39,7 @@ The daemon serves the web app, `GET /health` (version and environment id) and th
 |---|---|---|
 | `TENZO_PORT` | `4780` | port to listen on |
 | `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
+| `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
 
 ## Projects and threads
 
@@ -54,7 +55,7 @@ pnpm tenzo thread archive <thread-id>          # refuses if the worktree has unc
 pnpm tenzo project remove app                  # refuses while the project has active threads; the repo is left alone
 ```
 
-The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` is a stand-in until threads start agents (#4, #6, #9).
+The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` makes the worktree without starting an agent; `thread start` (below) does both.
 
 To try it without touching your real state, use a scratch `TENZO_HOME` and a scratch repo:
 
@@ -66,4 +67,16 @@ pnpm tenzo thread new scratch "Try it"
 git -C /tmp/scratch worktree list              # main checkout plus the thread's worktree
 pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try-it kept
 ```
-| `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
+
+## Running Claude Code in a thread
+
+Threads run your own `claude` (the first one on `PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo only sets the permission mode to accept edits and catches questions and permission prompts so they can come to you.
+
+```bash
+pnpm tenzo thread start scratch "create hello.txt containing hi"   # new thread + one turn
+pnpm tenzo thread send <thread-id> "now make it say hello"         # another turn, same conversation
+```
+
+Both print the thread's events as they happen (`--json` for JSON lines), ask you on the terminal when Claude uses `AskUserQuestion` or wants permission for something accept-edits doesn't cover (`y`, `n`, or a reason to deny), and exit when the turn ends. `--model haiku` picks a model. Claude's session id is stored on the thread, so `send` resumes the conversation even after a restart. Until the daemon and the Pass take over (#6–#9), this is how a thread runs.
+
+The events are Tenzo's own vocabulary (`packages/contracts/src/runtime.ts`): `session.*`, `turn.*`, `item.*`, `request.opened/resolved`, `user-input.requested/resolved`, `runtime.error`. Nothing above the agent adapter (`apps/daemon/src/agent/`) knows it is talking to Claude.

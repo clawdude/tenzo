@@ -1,4 +1,12 @@
-import { existsSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { join, relative } from "node:path";
 import { ThreadId } from "@tenzo/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
@@ -7,7 +15,13 @@ import { addProject, type Project, removeProject } from "./projects.ts";
 import { slugify } from "./slug.ts";
 import { openStore, type Store } from "./store.ts";
 import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
-import { archiveThread, createThread, getThread, listThreads } from "./threads.ts";
+import {
+  archiveThread,
+  createThread,
+  getThread,
+  listThreads,
+  setThreadSession,
+} from "./threads.ts";
 
 let home: string;
 let repo: string;
@@ -180,6 +194,54 @@ describe("archiveThread", () => {
     expect(existsSync(join(outside, "keep.txt"))).toBe(true);
   });
 
+  it("only deletes the exact folder Tenzo made for that thread", async () => {
+    const thread = await createThread(store, "app", "Neighbour");
+    const sibling = await createThread(store, "app", "Sibling");
+    rmSync(repo, { recursive: true, force: true });
+
+    for (const tampered of [
+      sibling.worktreePath,
+      join(home, "worktrees"),
+      join(home, "worktrees", "app"),
+    ]) {
+      store.db
+        .prepare("UPDATE threads SET worktree_path = ? WHERE id = ?")
+        .run(tampered, thread.id);
+      await expect(archiveThread(store, thread.id, { force: true })).rejects.toThrow(
+        /^Refusing to delete .*: Tenzo made this thread's worktree at /,
+      );
+    }
+    expect(existsSync(join(sibling.worktreePath, "README.md"))).toBe(true);
+    expect(getThread(store, thread.id).status).toBe("active");
+  });
+
+  it("refuses to follow a symlinked project folder or worktree out of TENZO_HOME", async () => {
+    const thread = await createThread(store, "app", "Linked");
+    rmSync(repo, { recursive: true, force: true });
+    const outside = tempDir("precious");
+    mkdirSync(join(outside, thread.id));
+    writeFileSync(join(outside, thread.id, "keep.txt"), "keep\n");
+
+    // The project's folder under worktrees/ now points somewhere else.
+    const projectDir = join(home, "worktrees", "app");
+    rmSync(projectDir, { recursive: true, force: true });
+    symlinkSync(outside, projectDir);
+    await expect(archiveThread(store, thread.id, { force: true })).rejects.toThrow(
+      /^Refusing to delete .*: its folder does not resolve to /,
+    );
+    expect(existsSync(join(outside, thread.id, "keep.txt"))).toBe(true);
+
+    // The worktree itself is a symlink to somewhere else.
+    rmSync(projectDir);
+    mkdirSync(projectDir);
+    symlinkSync(join(outside, thread.id), thread.worktreePath);
+    await expect(archiveThread(store, thread.id, { force: true })).rejects.toThrow(
+      /not a plain folder/,
+    );
+    expect(existsSync(join(outside, thread.id, "keep.txt"))).toBe(true);
+    expect(getThread(store, thread.id).status).toBe("active");
+  });
+
   it("is idempotent and filters by project", async () => {
     const thread = await createThread(store, "app", "Twice");
     const once = await archiveThread(store, thread.id);
@@ -190,6 +252,19 @@ describe("archiveThread", () => {
       listThreads(store, { projectId: project.id, includeArchived: true }).map((t) => t.id),
     ).toEqual([thread.id]);
     expect(listThreads(store, { projectId: other.id })).toHaveLength(1);
+  });
+});
+
+describe("setThreadSession", () => {
+  it("remembers the agent session so a later run can resume it", async () => {
+    const thread = await createThread(store, "app", "Resume me");
+    expect(thread).toMatchObject({ agent: null, sessionId: null });
+    const session = "5b0c7a6e-3f1d-4c2b-9a8e-1d2c3b4a5f60";
+    setThreadSession(store, thread.id, "claude", session);
+    const reopened = openStore(home); // as after a restart
+    expect(getThread(reopened, thread.id)).toMatchObject({ agent: "claude", sessionId: session });
+    expect(listThreads(reopened)[0]?.sessionId).toBe(session);
+    reopened.close();
   });
 });
 

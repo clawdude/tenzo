@@ -39,6 +39,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX threads_by_project ON threads (project_id, status);
     `,
   },
+  {
+    name: "agent session per thread",
+    sql: `
+      -- Which agent runs the thread and the agent's own session id, so the thread can resume
+      -- after a restart. Both NULL until the agent first starts.
+      ALTER TABLE threads ADD COLUMN agent TEXT;
+      ALTER TABLE threads ADD COLUMN session_id TEXT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */
