@@ -66,9 +66,14 @@ interface Pending {
   settle: (outcome: Settled) => void;
 }
 
+/**
+ * How a pending request ended. `ended`: the session stopped or its process exited, so nobody
+ * answered and no `*.resolved` event is emitted; `session.exited` says it (the request outlives
+ * the process as a detached item, see engine.ts).
+ */
 type Settled =
-  | { kind: "request"; decision: "allow" | "deny" | "cancel"; message?: string }
-  | { kind: "user-input"; answers: UserInputAnswers | null };
+  | { kind: "request"; decision: "allow" | "deny" | "cancel"; message?: string; ended?: true }
+  | { kind: "user-input"; answers: UserInputAnswers | null; ended?: true };
 
 function startSession(
   query: typeof sdkQuery,
@@ -127,6 +132,7 @@ function startSession(
       payload: { questions, itemId: toolUseID },
     });
     const outcome = await waitFor(requestId, "user-input", signal);
+    if (outcome.ended) return { behavior: "deny", message: "The session ended." };
     const answers = outcome.kind === "user-input" ? outcome.answers : null;
     emit({
       type: "user-input.resolved",
@@ -159,6 +165,7 @@ function startSession(
       },
     });
     const outcome = await waitFor(requestId, "request", context.signal);
+    if (outcome.ended) return { behavior: "deny", message: "The session ended." };
     const decision = outcome.kind === "request" ? outcome.decision : "cancel";
     const message = outcome.kind === "request" ? outcome.message : undefined;
     emit({
@@ -189,9 +196,15 @@ function startSession(
 
   const run = query({ prompt: prompts, options });
 
-  const cancelPending = () => {
+  /** Settles every open request: cancelled (an interrupt), or left unanswered (`ended`). */
+  const cancelPending = (ended: boolean) => {
+    const flag = ended ? { ended: true as const } : {};
     for (const { kind, settle } of [...pending.values()]) {
-      settle(kind === "request" ? { kind, decision: "cancel" } : { kind, answers: null });
+      settle(
+        kind === "request"
+          ? { kind, decision: "cancel", ...flag }
+          : { kind, answers: null, ...flag },
+      );
     }
   };
 
@@ -217,7 +230,7 @@ function startSession(
       });
     } finally {
       prompts.close();
-      cancelPending();
+      cancelPending(true);
       events.close();
     }
   })();
@@ -259,13 +272,13 @@ function startSession(
       answer(requestId, { kind: "user-input", answers });
     },
     async interrupt() {
-      cancelPending();
+      cancelPending(false);
       await run.interrupt().catch(() => {}); // already finished: nothing to interrupt
     },
     async stop() {
       stopping = true;
       prompts.close(); // end of input: Claude finishes and exits
-      cancelPending();
+      cancelPending(true);
       let timer: NodeJS.Timeout | undefined;
       const exited = await Promise.race([
         done.then(() => true),

@@ -2,9 +2,16 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Health, ServerFrame } from "@tenzo/contracts";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
+import { FakeAdapter } from "./agent/fake-agent.ts";
 import { VERSION } from "./app.ts";
+import { callDaemon } from "./client.ts";
+import { addProject } from "./projects.ts";
+import { openStore } from "./store.ts";
+import { initRepo, removeTempDirs } from "./testing.ts";
+
+afterAll(removeTempDirs);
 import { type RunningDaemon, startDaemon } from "./server.ts";
 
 let home: string;
@@ -18,8 +25,16 @@ afterEach(async () => {
   rmSync(home, { recursive: true, force: true });
 });
 
+const config = (dir: string) => ({
+  host: "127.0.0.1" as const,
+  port: 0,
+  home: dir,
+  webDir: join(dir, "web"),
+  allowedHosts: [],
+});
+
 async function start(): Promise<RunningDaemon> {
-  const daemon = await startDaemon({ host: "127.0.0.1", port: 0, home, webDir: join(home, "web") });
+  const daemon = await startDaemon(config(home), { adapters: { claude: new FakeAdapter() } });
   running.push(daemon);
   return daemon;
 }
@@ -77,11 +92,104 @@ describe("startDaemon", () => {
 
   it("says plainly when the port is taken", async () => {
     const first = await start();
-    await expect(
-      startDaemon({ host: "127.0.0.1", port: first.port, home, webDir: join(home, "web") }),
-    ).rejects.toThrow(new RegExp(`127.0.0.1:${first.port} is already in use`));
+    const otherHome = mkdtempSync(join(tmpdir(), "tenzo-home-"));
+    try {
+      await expect(
+        startDaemon({ ...config(otherHome), port: first.port }, { adapters: { claude: new FakeAdapter() } }),
+      ).rejects.toThrow(new RegExp(`127.0.0.1:${first.port} is already in use`));
+    } finally {
+      rmSync(otherHome, { recursive: true, force: true });
+    }
     // The first daemon is unaffected.
     expect((await fetch(`${first.url}/health`)).status).toBe(200);
+  });
+
+  it("runs one daemon per TENZO_HOME", async () => {
+    await start();
+    await expect(start()).rejects.toThrow(/Another tenzo daemon \(pid \d+\) is running/);
+  });
+
+  it("refuses WebSocket upgrades from another origin or host", async () => {
+    const daemon = await start();
+    const url = `ws://127.0.0.1:${daemon.port}/ws`;
+    const status = (headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(url, { headers });
+        ws.on("open", () => {
+          ws.close();
+          resolve(101);
+        });
+        ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", reject);
+      });
+    expect(await status({ Origin: "https://evil.example" })).toBe(403);
+    expect(await status({ Origin: "null" })).toBe(403);
+    expect(await status({ Host: "evil.example" })).toBe(403);
+    expect(await status({ Origin: `http://127.0.0.1:${daemon.port}` })).toBe(101);
+    expect(await status({ Origin: "http://localhost:5173" })).toBe(101);
+  });
+
+  it("runs commands from the CLI over HTTP, and open items survive a restart", async () => {
+    const repo = initRepo("app");
+    const setup = openStore(home);
+    await addProject(setup, repo);
+    setup.close();
+
+    const asking = () => {
+      const adapter = new FakeAdapter();
+      adapter.onStart = (s) => {
+        s.onPrompt = () => {
+          s.say("Before I paint:");
+          s.ask([
+            {
+              id: "Which color?",
+              header: "",
+              question: "Which color?",
+              options: [
+                { label: "Red", value: "Red", description: "", recommended: true },
+                { label: "Blue", value: "Blue", description: "", recommended: false },
+              ],
+              multiSelect: false,
+            },
+          ]);
+        };
+      };
+      return adapter;
+    };
+    const firstAdapter = asking();
+    const first = await startDaemon(config(home), { adapters: { claude: firstAdapter } });
+    running.push(first);
+    const client = { host: "127.0.0.1", port: first.port } as const;
+
+    const { thread } = await callDaemon(client, {
+      type: "thread.create",
+      project: "app",
+      prompt: "Paint it",
+    });
+    await expect.poll(async () => (await callDaemon(client, { type: "snapshot" })).items).toHaveLength(1);
+    const [item] = (await callDaemon(client, { type: "snapshot" })).items;
+    expect(item).toMatchObject({ threadId: thread.id, context: "Before I paint:", suggested: "Red" });
+    await expect(
+      callDaemon(client, { type: "thread.send", threadId: "thr_nope", prompt: "x" }),
+    ).rejects.toThrow(/No thread "thr_nope"/);
+
+    await first.close();
+    running.splice(0);
+    const secondAdapter = asking();
+    const second = await startDaemon(config(home), { adapters: { claude: secondAdapter } });
+    running.push(second);
+    const again = { host: "127.0.0.1", port: second.port } as const;
+    const { items } = await callDaemon(again, { type: "snapshot" });
+    expect(items).toMatchObject([{ id: item?.id, status: "open", detached: true }]);
+
+    const answered = await callDaemon(again, {
+      type: "item.answer",
+      itemId: item?.id ?? "",
+      answer: { kind: "question", answers: { "Which color?": "Blue" } },
+    });
+    expect(answered.delivery).toBe("message");
+    expect(secondAdapter.last.input.resumeSessionId).toBe(firstAdapter.last.sessionId);
+    expect(secondAdapter.last.prompts[0]).toContain("My answer: Blue");
   });
 
   it("drops open sockets on close so clients notice", async () => {

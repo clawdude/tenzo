@@ -16,7 +16,14 @@ describe("openDatabase", () => {
   it("creates the schema on first open", () => {
     const db = openDatabase(join(tempDir(), "tenzo.db"));
     expect(schemaVersion(db)).toBe(MIGRATIONS.length);
-    expect(tables(db)).toEqual(["projects", "threads"]);
+    expect(tables(db)).toEqual([
+      "events",
+      "items",
+      "projects",
+      "prompts",
+      "sqlite_sequence",
+      "threads",
+    ]);
     expect(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys).toBe(1);
     expect(db.prepare("PRAGMA journal_mode").get()?.journal_mode).toBe("wal");
     db.close();
@@ -132,6 +139,40 @@ describe("openDatabase", () => {
     expect(db.prepare("SELECT id, title, agent, session_id FROM threads").all()).toEqual([
       { id: "thr_1", title: "Old", agent: null, session_id: null },
     ]);
+    db.close();
+  });
+
+  it("keeps the log append-only", () => {
+    const db = openDatabase(join(tempDir(), "tenzo.db"));
+    db.exec(`
+      INSERT INTO projects (id, name, path, default_branch, created_at) VALUES ('prj_1', 'app', '/r', 'main', 'now');
+      INSERT INTO threads (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at)
+        VALUES ('thr_1', 'prj_1', 'T', 't', 'tenzo/t', '/w', 'active', 'now', 'now');
+      INSERT INTO events (id, environment_id, thread_id, type, created_at, body)
+        VALUES ('evt_1', 'env_1', 'thr_1', 'runtime.error', 'now', '{}');
+    `);
+    expect(() => db.exec("UPDATE events SET type = 'x'")).toThrow(/append-only/);
+    expect(() => db.exec("DELETE FROM events")).toThrow(/append-only/);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM events").get()?.n).toBe(1);
+    db.close();
+  });
+
+  it("gives older threads and projects room for the event store, keeping them", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const first = openDatabase(path, MIGRATIONS.slice(0, 2));
+    first.exec(`
+      INSERT INTO projects VALUES ('prj_1', 'app', '/r/app', 'main', 'now');
+      INSERT INTO threads (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at, agent, session_id)
+        VALUES ('thr_1', 'prj_1', 'Old', 'old', 'tenzo/old', '/w/old', 'active', 'now', 'now', 'claude', 's-1');
+    `);
+    first.close();
+    const db = openDatabase(path);
+    expect(
+      db.prepare("SELECT session_id, model, live, turn_id, context, environment_id FROM threads").all(),
+    ).toEqual([
+      { session_id: "s-1", model: null, live: 0, turn_id: null, context: "", environment_id: null },
+    ]);
+    expect(db.prepare("SELECT removed_at FROM projects").all()).toEqual([{ removed_at: null }]);
     db.close();
   });
 

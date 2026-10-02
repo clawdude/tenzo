@@ -5,7 +5,7 @@ import { afterAll, beforeEach, describe, expect, it } from "vitest";
 import { addProject, findProject, listProjects, removeProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
 import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
-import { archiveThread, createThread } from "./threads.ts";
+import { archiveThread, createThread, getThread, listThreads } from "./threads.ts";
 
 let home: string;
 const open: Store[] = [];
@@ -92,6 +92,35 @@ describe("projects", () => {
     expect(() => removeProject(store(), "app")).toThrow(/1 active thread.*Archive them first/);
     await archiveThread(store(), thread.id);
     expect(removeProject(store(), "app").id).toBe(project.id);
+  });
+
+  it("removing keeps the history: threads stay, and adding the repo again brings it back", async () => {
+    const repo = initRepo("app");
+    const project = await addProject(store(), repo);
+    const thread = await createThread(store(), "app", "work");
+    await archiveThread(store(), thread.id);
+    removeProject(store(), "app");
+    expect(listProjects(store())).toEqual([]);
+    expect(() => findProject(store(), "app")).toThrow(/No project "app"/);
+    expect(getThread(store(), thread.id).status).toBe("archived");
+
+    const again = await addProject(store(), repo);
+    expect(again).toEqual(project);
+    expect(listThreads(store(), { includeArchived: true }).map((t) => t.id)).toEqual([thread.id]);
+    await expect(addProject(store(), repo)).rejects.toThrow(/already a project/);
+  });
+
+  it("stamps this machine's environment id on projects and threads", async () => {
+    const s = store();
+    const project = await addProject(s, initRepo("app"));
+    const thread = await createThread(s, "app", "work");
+    expect(project.environmentId).toBe(s.environmentId);
+    expect(thread.environmentId).toBe(s.environmentId);
+    // Rows written before records carried it get it on the next open.
+    s.db.exec("UPDATE projects SET environment_id = NULL; UPDATE threads SET environment_id = NULL");
+    const reopened = store();
+    expect(listProjects(reopened)[0]?.environmentId).toBe(s.environmentId);
+    expect(getThread(reopened, thread.id).environmentId).toBe(s.environmentId);
   });
 });
 

@@ -77,3 +77,42 @@ describe("web app", () => {
     expect(await res.text()).toMatch(/pnpm build/);
   });
 });
+
+describe("who may call", () => {
+  const post = (headers: Record<string, string>, body = '{"type":"snapshot"}') =>
+    app().request("/api/commands", {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body,
+    });
+
+  it("refuses a foreign Host everywhere (DNS rebinding)", async () => {
+    for (const path of ["/health", "/", "/api/commands"]) {
+      const res = await app().request(path, { headers: { Host: "evil.example" } });
+      expect(res.status, path).toBe(403);
+    }
+    const allowed = createApp({ environmentId, webDir, allowedHosts: ["mac.tailnet.ts.net"] });
+    const res = await allowed.request("/health", { headers: { Host: "mac.tailnet.ts.net" } });
+    expect(res.status).toBe(200);
+  });
+
+  it("refuses API calls from another site's page", async () => {
+    expect((await post({ Origin: "https://evil.example" })).status).toBe(403);
+    expect((await post({ Origin: "null" })).status).toBe(403);
+    // Ours (or no Origin at all: the CLI) get through to the API.
+    expect((await post({ Origin: "http://127.0.0.1:4780" })).status).toBe(503);
+    expect((await post({})).status).toBe(503);
+  });
+
+  it("takes commands as JSON only", async () => {
+    const res = await post({ "content-type": "text/plain" });
+    expect(res.status).toBe(415);
+    expect(await res.json()).toEqual({ ok: false, error: "Send the command as application/json." });
+  });
+
+  it("answers unknown API paths with JSON, not the web app", async () => {
+    const res = await app().request("/api/nope");
+    expect(res.status).toBe(404);
+    expect(await res.json()).toMatchObject({ ok: false });
+  });
+});

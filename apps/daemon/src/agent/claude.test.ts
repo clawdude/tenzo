@@ -478,18 +478,26 @@ describe("Claude adapter: permission requests", () => {
     await session.stop();
   });
 
-  it("cancels open requests when the session stops", async () => {
+  it("leaves open requests unanswered when the session stops: session.exited says it", async () => {
     const outcome: { result?: PermissionResult | null } = {};
     const { session, events } = start(permissionScript(outcome));
     session.sendTurn("clean up");
     await events.until("request.opened");
     await session.stop();
     const rest = await events.rest();
-    expect(rest.find((e) => e.type === "request.resolved")?.payload).toEqual({
-      decision: "cancel",
-    });
+    expect(rest.some((e) => e.type === "request.resolved")).toBe(false);
     expect(rest.at(-1)?.type).toBe("session.exited");
-    expect(outcome.result).toEqual({ behavior: "deny", message: "Cancelled." });
+    expect(outcome.result).toEqual({ behavior: "deny", message: "The session ended." });
+  });
+
+  it("cancels open requests when the turn is interrupted", async () => {
+    const outcome: { result?: PermissionResult | null } = {};
+    const { session, events } = start(permissionScript(outcome));
+    session.sendTurn("clean up");
+    await events.until("request.opened");
+    await session.interrupt();
+    expect((await events.until("request.resolved")).payload).toEqual({ decision: "cancel" });
+    await session.stop();
   });
 
   it("keeps a bounded copy of the input on the event; Claude gets the full input back", async () => {

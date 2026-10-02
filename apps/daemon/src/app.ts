@@ -2,9 +2,20 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { upgradeWebSocket } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { ClientFrame, type EnvironmentId, type Health, type ServerFrame } from "@tenzo/contracts";
+import {
+  ClientFrame,
+  Command,
+  type CommandResponse,
+  type EnvironmentId,
+  type Health,
+  type ServerFrame,
+} from "@tenzo/contracts";
 import { Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
+import { accessGuard } from "./access.ts";
+import { runCommand } from "./commands.ts";
+import type { Engine } from "./engine.ts";
+import { TenzoError } from "./errors.ts";
 
 export const VERSION: string = pkg.version;
 
@@ -12,16 +23,56 @@ export interface AppOptions {
   environmentId: EnvironmentId;
   /** The built web app. Served from the same origin so Tailscale Serve needs one proxy. */
   webDir: string;
+  /** Runs `/api/commands`. Without one, the API answers 503. */
+  engine?: Engine;
+  /** Host names besides loopback that may reach the daemon (access.ts). */
+  allowedHosts?: readonly string[];
 }
 
 /**
- * The daemon's HTTP surface: `/health`, the `/ws` WebSocket, and the web app with an SPA
- * fallback. The WebSocket only upgrades when served by `startDaemon` (it needs the Node server).
+ * The daemon's HTTP surface: `/health`, `POST /api/commands`, the `/ws` WebSocket, and the web
+ * app with an SPA fallback. The WebSocket only upgrades when served by `startDaemon` (it needs the
+ * Node server). A foreign `Host` is refused everywhere, a foreign `Origin` on the API and `/ws`.
  */
-export function createApp({ environmentId, webDir }: AppOptions): Hono {
+export function createApp({ environmentId, webDir, engine, allowedHosts = [] }: AppOptions): Hono {
   const app = new Hono();
 
+  app.use(
+    "*",
+    accessGuard({ allowedHosts }, (path) => path === "/ws" || path.startsWith("/api/")),
+  );
+
   app.get("/health", (c) => c.json({ ok: true, version: VERSION, environmentId } satisfies Health));
+
+  app.post("/api/commands", async (c) => {
+    const fail = (error: string, status: 400 | 415 | 500 | 503) =>
+      c.json({ ok: false, error } satisfies CommandResponse, status);
+    // JSON only: a form post can't fake it without a CORS preflight, which the daemon never grants.
+    if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
+      return fail("Send the command as application/json.", 415);
+    }
+    if (!engine) return fail("This daemon runs no threads.", 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return fail("The body is not JSON.", 400);
+    }
+    const parsed = Command.safeParse(body);
+    if (!parsed.success) {
+      const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`);
+      return fail(`Not a command: ${issues.join("; ")}`, 400);
+    }
+    try {
+      const result = await runCommand(engine, parsed.data);
+      return c.json({ ok: true, result } satisfies CommandResponse);
+    } catch (error) {
+      if (error instanceof TenzoError) return fail(error.message, 400);
+      console.error(`tenzo: ${parsed.data.type} failed:`, error);
+      return fail(`${parsed.data.type} failed: ${String(error)}`, 500);
+    }
+  });
+  app.all("/api/*", (c) => c.json({ ok: false, error: "No such API." } satisfies CommandResponse, 404));
 
   app.get(
     "/ws",

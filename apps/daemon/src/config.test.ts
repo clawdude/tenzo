@@ -27,6 +27,17 @@ describe("readConfig", () => {
     expect(config.webDir).toBe("/tmp/web");
   });
 
+  it("takes extra allowed host names from TENZO_ALLOWED_HOSTS", () => {
+    expect(readConfig({}).allowedHosts).toEqual([]);
+    expect(
+      readConfig({ TENZO_ALLOWED_HOSTS: " Mac.tail6259b4.ts.net, other.local ," }).allowedHosts,
+    ).toEqual(["mac.tail6259b4.ts.net", "other.local"]);
+    expect(() => readConfig({ TENZO_ALLOWED_HOSTS: "https://mac.ts.net" })).toThrow(
+      /TENZO_ALLOWED_HOSTS/,
+    );
+    expect(() => readConfig({ TENZO_ALLOWED_HOSTS: "mac.ts.net:443" })).toThrow(/no scheme or port/);
+  });
+
   it("makes a relative TENZO_HOME absolute, so worktrees can't land inside a repo", () => {
     const config = readConfig({ TENZO_HOME: "relhome", TENZO_WEB_DIR: "web" });
     expect(config.home).toBe(join(process.cwd(), "relhome"));

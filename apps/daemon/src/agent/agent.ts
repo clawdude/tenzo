@@ -41,9 +41,16 @@ export interface AgentSession {
   respondToRequest(requestId: RequestId, decision: "allow" | "deny", message?: string): void;
   /** Answers a `user-input.requested`, one answer per question id. */
   respondToUserInput(requestId: RequestId, answers: UserInputAnswers): void;
-  /** Stops the running turn; the session stays up for the next one. */
+  /**
+   * Stops the running turn; the session stays up for the next one. Open questions and requests
+   * are cancelled (`*.resolved` with cancel).
+   */
   interrupt(): Promise<void>;
-  /** Ends the session and its process. Open questions and requests are cancelled. */
+  /**
+   * Ends the session and its process. Open questions and requests are left unanswered: no
+   * `*.resolved` follows, and `session.exited` means nothing waits on them any more. The same
+   * holds when the process ends by itself. (The daemon keeps them as detached items.)
+   */
   stop(): Promise<void>;
 }
 
