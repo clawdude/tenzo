@@ -13,6 +13,13 @@ T3 Code is the architectural reference. A clone lives at `../reference/t3code` (
 - Tenzo knows nothing about issue trackers, specs, or skills. Those belong to the agent and its prompts.
 - Keep it light: a feature that can be a prompt should be a prompt.
 
+## How to continue
+
+1. `docs/ROADMAP.md` is the plan; GitHub issues are the tasks. Take the lowest-numbered open issue whose blockers are closed. Read its latest comment first: it holds the handoff state.
+2. A slice is done when its acceptance criteria are demonstrably met, `pnpm check` is green, `docs/ROADMAP.md` has its box ticked, and the commit message says `Closes #N`.
+3. Commit and push after every slice. Don't ask for permission to build, test, commit or push; the repo's `.claude/settings.json` allows it. Ask only before anything destructive.
+4. Work from the repo docs, not from memory of earlier sessions; a new session may run in a different worktree.
+
 ## Stack (see PRODUCT.md §10)
 
 pnpm monorepo. `apps/daemon` (Node 22+, TypeScript, node:sqlite, Hono + ws), `apps/web` (Svelte 5, SvelteKit static, Tailwind v4), `packages/contracts` (zod), `packages/client-runtime` (framework-free).
