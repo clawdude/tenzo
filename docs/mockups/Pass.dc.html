@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Pass: the pile</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#F5F5F7;text-decoration:none}a:hover{color:#FFFFFF}
+.opt{transition:transform .12s ease}.opt:active{transform:scale(.975)}
+.scroll{scrollbar-width:none}.scroll::-webkit-scrollbar{display:none}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #000000; color: #F5F5F7; display: flex; flex-direction: column; font-size: 17px; line-height: 1.4; overflow: hidden; position: relative">
+
+  <div style="position: absolute; top: 54px; right: 20px; display: flex; gap: 8px; z-index: 5">
+    <a href="NewThread.dc.html" aria-label="New thread" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: #1C1C1E; color: #F5F5F7">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+    </a>
+    <a href="Threads.dc.html" aria-label="Threads" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: #1C1C1E; color: #F5F5F7">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+    </a>
+  </div>
+
+  <sc-if value="{{hasCard}}" hint-placeholder-val="{{ true }}">
+  <div style="position: absolute; left: 16px; right: 16px; top: 150px; bottom: 24px">
+
+    <sc-for list="{{pile}}" as="p" hint-placeholder-count="2">
+      <div style="{{p.style}}"></div>
+    </sc-for>
+
+    <div onPointerDown="{{down}}" onPointerMove="{{move}}" onPointerUp="{{up}}" onPointerCancel="{{up}}" style="{{cardStyle}}">
+
+      <div style="display: flex; align-items: center; justify-content: space-between; padding: 20px 22px 0 22px; flex-shrink: 0">
+        <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: {{cur.tint}}">{{cur.thread}}</span>
+        <span style="font-size: 13px; color: #6E6E73">{{cur.age}}</span>
+      </div>
+
+      <div class="scroll" style="flex-grow: 1; min-height: 0; overflow-y: auto; padding: 16px 22px 8px 22px">
+        <p style="margin: 0 0 14px 0; font-size: 18px; line-height: 1.45; color: #C7C7CC">{{cur.context}}</p>
+        <h2 style="margin: 0 0 16px 0; font-size: 26px; line-height: 1.18; font-weight: 700; letter-spacing: -0.02em">{{cur.title}}</h2>
+
+        <sc-if value="{{isProposal}}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px">
+          <sc-for list="{{steps}}" as="s" hint-placeholder-count="3">
+            <div style="display: flex; gap: 12px; align-items: baseline; font-size: 17px; color: #E5E5EA">
+              <span style="flex-shrink: 0; font-size: 13px; color: #6E6E73; font-variant-numeric: tabular-nums">{{s.n}}</span>
+              <span>{{s.text}}</span>
+            </div>
+          </sc-for>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{isFinished}}" hint-placeholder-val="{{ false }}">
+        <div style="display: flex; gap: 6px; margin-bottom: 16px; flex-wrap: wrap">
+          <sc-for list="{{checks}}" as="c" hint-placeholder-count="3">
+            <span style="display: inline-flex; align-items: center; gap: 5px; padding: 6px 11px; border-radius: 999px; background: #1F2A22; color: #6CCB8C; font-size: 13px; font-weight: 500">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg>
+              {{c.label}}
+            </span>
+          </sc-for>
+        </div>
+        <div style="display: flex; gap: 10px; margin-bottom: 16px">
+          <div style="width: 96px; height: 150px; border-radius: 14px; background: #2C2C2E; flex-shrink: 0"></div>
+          <div style="width: 96px; height: 150px; border-radius: 14px; background: #2C2C2E; flex-shrink: 0"></div>
+          <a href="https://example.invalid/" style="flex-grow: 1; height: 150px; border-radius: 14px; background: #2C2C2E; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; color: #F5F5F7; font-size: 14px; font-weight: 500">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h6v6M20 4l-9 9"></path><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"></path></svg>
+            Open app
+          </a>
+        </div>
+        </sc-if>
+
+        <a href="{{cur.more}}" style="display: inline-flex; align-items: center; gap: 6px; min-height: 36px; padding: 0 14px 0 12px; border-radius: 999px; background: #2C2C2E; color: #F5F5F7; font-size: 14px; font-weight: 500">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
+          {{cur.moreLabel}}
+        </a>
+      </div>
+
+      <div class="scroll" style="flex-shrink: 0; max-height: 58%; overflow-y: auto; padding: 12px 16px 16px 16px; display: flex; flex-direction: column; gap: 10px">
+
+        <sc-if value="{{showOthers}}" hint-placeholder-val="{{ false }}">
+          <sc-for list="{{others}}" as="o" hint-placeholder-count="2">
+            <button type="button" class="opt" onClick="{{o.pick}}" style="display:flex;align-items:center;min-height:50px;padding:12px 16px;border-radius:16px;border:0;background:#2C2C2E;color:#F5F5F7;font:inherit;font-size:16px;font-weight:500;line-height:1.3;text-align:left;width:100%;box-sizing:border-box">{{o.label}}</button>
+          </sc-for>
+        </sc-if>
+
+        <button type="button" class="opt" onClick="{{primary}}" style="display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-height:64px;padding:13px 16px;border-radius:18px;border:0;background:#D97757;color:#1A0F0A;font:inherit;text-align:left;width:100%;box-sizing:border-box">
+          <span style="font-size: 12px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; opacity: 0.7">{{cur.primaryKicker}}</span>
+          <span style="font-size: 17px; font-weight: 600; line-height: 1.3">{{cur.primary}}</span>
+        </button>
+
+        <div style="display: flex; align-items: center; gap: 8px; min-height: 52px; box-sizing: border-box; padding: 6px 6px 6px 16px; border-radius: 18px; background: #2C2C2E">
+          <label for="free" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Your answer</label>
+          <input id="free" type="text" placeholder="{{cur.placeholder}}" style="flex-grow: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #F5F5F7; font: inherit; font-size: 16px">
+          <button type="button" aria-label="Dictate" style="width: 40px; height: 40px; border-radius: 50%; border: 0; background: #3A3A3C; color: #F5F5F7; display: flex; align-items: center; justify-content: center">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+          </button>
+        </div>
+
+        <sc-if value="{{hasOthers}}" hint-placeholder-val="{{ false }}">
+          <button type="button" onClick="{{toggleOthers}}" style="min-height: 36px; border: 0; background: transparent; color: #8E8E93; font: inherit; font-size: 14px">{{othersLabel}}</button>
+        </sc-if>
+        <sc-if value="{{isFinished}}" hint-placeholder-val="{{ false }}">
+          <div style="display: flex; justify-content: center; gap: 28px">
+            <button type="button" onClick="{{primary}}" style="min-height: 36px; border: 0; background: transparent; color: #8E8E93; font: inherit; font-size: 14px">Open PR instead</button>
+            <a href="B3.dc.html" style="display: flex; align-items: center; min-height: 36px; color: #8E8E93; font-size: 14px">Needs changes</a>
+          </div>
+        </sc-if>
+      </div>
+    </div>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{allClear}}" hint-placeholder-val="{{ false }}">
+  <div style="flex-grow: 1; display: flex; flex-direction: column; justify-content: center; padding: 0 24px 40px 24px; gap: 28px">
+    <a href="NewThread.dc.html" style="display: flex; flex-direction: column; gap: 10px; min-height: 150px; box-sizing: border-box; padding: 22px 22px; border-radius: 28px; background: #1C1C1E; box-shadow: 0 24px 60px rgba(0,0,0,.6); color: #F5F5F7">
+      <span style="font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; color: #8E8E93">What do you want to do?</span>
+      <span style="flex-grow: 1"></span>
+      <span style="display: flex; align-items: center; justify-content: space-between">
+        <span style="font-size: 14px; color: #6E6E73">tenzo · opus</span>
+        <span style="display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; background: #D97757; color: #1A0F0A">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+        </span>
+      </span>
+    </a>
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6E6E73; margin-bottom: 8px">Meanwhile</span>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF"></span>
+        <span style="flex-grow: 1; font-size: 17px">Flaky checkout test</span>
+        <span style="font-size: 15px; color: #6E6E73">22m</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF"></span>
+        <span style="flex-grow: 1; font-size: 17px">Hourly PR review</span>
+        <span style="font-size: 15px; color: #6E6E73">1m</span>
+      </div>
+      <sc-for list="{{snoozed}}" as="z" hint-placeholder-count="0">
+        <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #48484A"></span>
+          <span style="flex-grow: 1; font-size: 17px; color: #AEAEB2">{{z.thread}} · snoozed</span>
+          <span style="font-size: 15px; color: #6E6E73">15m</span>
+        </div>
+      </sc-for>
+    </div>
+    <button type="button" onClick="{{reset}}" style="align-self: flex-start; min-height: 40px; border: 0; background: transparent; color: #48484A; font: inherit; font-size: 13px; padding: 0">replay the pile</button>
+  </div>
+  </sc-if>
+
+  <sc-if value="{{hasToast}}" hint-placeholder-val="{{ false }}">
+  <div style="position: absolute; left: 16px; right: 16px; bottom: 34px; z-index: 6; display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 0 8px 0 18px; border-radius: 18px; background: #2C2C2E; box-shadow: 0 12px 40px rgba(0,0,0,.7)">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#AEAEB2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7v5l3 2"></path></svg>
+    <span style="flex-grow: 1; font-size: 15px; color: #F5F5F7">{{toast}} · back in 15 min</span>
+    <button type="button" onClick="{{undo}}" style="min-height: 44px; padding: 0 12px; border: 0; background: transparent; color: #D97757; font: inherit; font-size: 15px; font-weight: 600">Undo</button>
+  </div>
+  </sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  constructor(props) {
+    super(props);
+    this.all = [
+      { kind: 'question', thread: 'Refresh tokens', tint: '#D97757', age: '4m',
+        context: 'You asked for refresh-token rotation with a 30-day lifetime. The handler is done and tested against the session store, which keeps 24-hour access tokens in an encrypted SQLite table read by both the web app and the CLI. Refresh tokens live much longer, so where they sit changes the threat model and the migration.',
+        title: 'Where should refresh tokens be stored, and should the CLI share the store with the web app?',
+        primaryKicker: 'Suggested', primary: 'Same SQLite table, new row type, shared by web and CLI',
+        placeholder: "Or say what you'd prefer", more: 'B1.dc.html', moreLabel: "Why it's asking",
+        others: [ { label: 'OS keychain for the CLI, SQLite for the web app' }, { label: 'In memory only; sign in again after a restart' } ] },
+      { kind: 'proposal', thread: 'Hero redesign', tint: '#D97757', age: '9m',
+        context: 'Read the layout and the brand tokens. Nothing unclear.',
+        title: 'Ready to build',
+        steps: [ { n: '1', text: 'Screenshot above the headline; headline 40px on phones.' }, { n: '2', text: 'Three bullets become one line under the CTA.' }, { n: '3', text: 'Existing CTA stays; only spacing changes.' } ],
+        primaryKicker: '3 files · no new dependencies', primary: 'Build it',
+        placeholder: 'Change something first', more: 'B2.dc.html', moreLabel: 'What it looked at', others: [] },
+      { kind: 'question', thread: 'Flaky checkout', tint: '#D97757', age: '12m',
+        context: 'Reproduced it: the cart total test fails 1 run in 10 when two tests share the fake clock.',
+        title: 'Fix the shared clock, or isolate the test?',
+        primaryKicker: 'Suggested', primary: 'Give each test its own clock',
+        placeholder: "Or say what you'd prefer", more: 'B1.dc.html', moreLabel: "Why it's asking",
+        others: [ { label: 'Just isolate the failing test' } ] },
+      { kind: 'finished', thread: 'Dark mode', tint: '#6CCB8C', age: '41m',
+        context: 'Settings → Appearance. Follows the system until you choose, and the choice survives a restart.',
+        title: 'Dark mode toggle is done',
+        checks: [ { label: 'Tests 42' }, { label: 'Types' }, { label: 'Lint' }, { label: '+118 −12' } ],
+        primaryKicker: '4 files', primary: 'Merge',
+        placeholder: 'Ask for a change', more: 'B3.dc.html', moreLabel: 'See the change', others: [] }
+    ];
+    this.state = { queue: this.all.slice(), snoozed: [], dx: 0, drag: false, sx: 0, leave: null, showOthers: false, toast: '' };
+  }
+  advance(dir, snooze) {
+    if (this.state.leave) return;
+    this.setState({ leave: dir, drag: false });
+    setTimeout(() => {
+      const q = this.state.queue.slice();
+      const gone = q.shift();
+      const st = { queue: q, leave: null, dx: 0, showOthers: false };
+      if (snooze && gone) { st.snoozed = this.state.snoozed.concat([gone]); st.toast = gone.thread; st.last = gone; clearTimeout(this.tt); this.tt = setTimeout(() => this.setState({ toast: '' }), 3500); }
+      this.setState(st);
+    }, 360);
+  }
+  renderVals() {
+    const { queue, dx, drag, leave, showOthers, toast, snoozed } = this.state;
+    const hasCard = queue.length > 0;
+    const cur = queue[0] || this.all[0];
+    const behind = Math.min(queue.length - 1, 4);
+    const pile = [];
+    for (let k = 1; k <= behind; k++) {
+      const lift = k * 11; const scale = 1 - k * 0.035; const shade = ['#19191B', '#151517', '#121214', '#0F0F11'][k - 1];
+      pile.push({ style: 'position:absolute;left:0;right:0;top:0;bottom:0;border-radius:28px;background:' + shade + ';transform:translateY(-' + lift + 'px) scale(' + scale + ');transform-origin:top center;box-shadow:0 -2px 0 rgba(255,255,255,.04) inset;transition:transform .38s cubic-bezier(.2,.8,.2,1)' });
+    }
+    pile.reverse();
+
+    let transform = 'translateX(' + dx + 'px) rotate(' + (dx / 22) + 'deg)';
+    let opacity = 1;
+    let transition = drag ? 'none' : 'transform .38s cubic-bezier(.2,.8,.2,1), opacity .3s ease';
+    if (leave === 'right') { transform = 'translateX(520px) rotate(14deg)'; opacity = 0; }
+    if (leave === 'left') { transform = 'translateX(-520px) rotate(-14deg)'; opacity = 0; }
+    if (leave === 'up') { transform = 'translateY(-70px) scale(.94)'; opacity = 0; }
+    const cardStyle = 'position:absolute;left:0;right:0;top:0;bottom:0;box-sizing:border-box;display:flex;flex-direction:column;border-radius:28px;background:#1C1C1E;box-shadow:0 24px 60px rgba(0,0,0,.6);touch-action:pan-y;cursor:grab;user-select:none;overflow:hidden;transform:' + transform + ';opacity:' + opacity + ';transition:' + transition;
+
+    const others = (cur.others || []).map((o) => ({ label: o.label, pick: () => this.advance('up') }));
+    const hasOthers = others.length > 0;
+    return {
+      hasCard, allClear: !hasCard, cur, pile, cardStyle,
+      steps: cur.steps || [], checks: cur.checks || [],
+      isProposal: cur.kind === 'proposal', isFinished: cur.kind === 'finished',
+      others, hasOthers, showOthers: showOthers && hasOthers,
+      othersLabel: showOthers ? 'Fewer options' : (others.length === 1 ? '1 other option' : others.length + ' other options'),
+      toggleOthers: () => this.setState({ showOthers: !this.state.showOthers }),
+      primary: () => this.advance('up'),
+      hasToast: !!toast, toast, snoozed,
+      undo: () => { const last = this.state.last; if (!last) return; clearTimeout(this.tt); this.setState({ queue: [last].concat(this.state.queue), snoozed: this.state.snoozed.filter((s) => s !== last), toast: '', last: null }); },
+      reset: () => this.setState({ queue: this.all.slice(), snoozed: [], dx: 0, leave: null, drag: false, toast: '' }),
+      down: (e) => { if (e.target.closest && e.target.closest('input,button,a')) return; if (e.currentTarget.setPointerCapture) { try { e.currentTarget.setPointerCapture(e.pointerId); } catch (err) {} } this.setState({ drag: true, sx: e.clientX, dx: 0 }); },
+      move: (e) => { if (!this.state.drag) return; this.setState({ dx: e.clientX - this.state.sx }); },
+      up: () => { const d = this.state.dx; if (!this.state.drag) return; if (d > 90) this.advance('right', true); else if (d < -90) this.advance('left', true); else this.setState({ drag: false, dx: 0 }); }
+    };
+  }
+}
+</script>
+</body>
+</html>

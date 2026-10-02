@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Threads</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#F5F5F7;text-decoration:none}a:hover{color:#FFFFFF}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #000000; color: #F5F5F7; display: flex; flex-direction: column; padding: 58px 0 0 0; font-size: 17px; line-height: 1.4; overflow: hidden; position: relative">
+
+  <div style="display: flex; align-items: flex-end; justify-content: space-between; padding: 0 24px; margin-bottom: 22px">
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <h1 style="margin: 0; font-size: 34px; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em">Threads</h1>
+      <span style="font-size: 15px; color: #8E8E93">mac-mini · 6 open</span>
+    </div>
+    <a href="Main.dc.html" aria-label="Pass" style="display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; background: #D97757; color: #1A0F0A; font-size: 15px; font-weight: 700">3</a>
+  </div>
+
+  <div style="display: flex; flex-direction: column; gap: 26px; padding: 0 20px">
+
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #D97757; padding: 0 4px">Needs you</span>
+      <div style="border-radius: 20px; background: #1C1C1E; overflow: hidden">
+        <a href="Main.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #D97757; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Refresh tokens</span>
+          <span style="font-size: 15px; color: #8E8E93">asking</span>
+        </a>
+        <div style="height: 1px; background: #2C2C2E; margin-left: 40px"></div>
+        <a href="Main.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #D97757; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Hero redesign</span>
+          <span style="font-size: 15px; color: #8E8E93">ready</span>
+        </a>
+        <div style="height: 1px; background: #2C2C2E; margin-left: 40px"></div>
+        <a href="Main.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #6CCB8C; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Dark mode</span>
+          <span style="font-size: 15px; color: #8E8E93">done</span>
+        </a>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8E8E93; padding: 0 4px">Working</span>
+      <div style="border-radius: 20px; background: #1C1C1E; overflow: hidden">
+        <a href="Detail.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Flaky checkout test</span>
+          <span style="font-size: 15px; color: #8E8E93">22m</span>
+        </a>
+        <div style="height: 1px; background: #2C2C2E; margin-left: 40px"></div>
+        <a href="Detail.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Hourly PR review</span>
+          <span style="font-size: 15px; color: #8E8E93">1m</span>
+        </a>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #8E8E93; padding: 0 4px">Landing</span>
+      <div style="border-radius: 20px; background: #1C1C1E; overflow: hidden">
+        <a href="Detail.dc.html" style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #48484A; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Rate limiter</span>
+          <span style="font-size: 15px; color: #8E8E93">PR #128</span>
+        </a>
+      </div>
+    </div>
+
+    <div style="display: flex; flex-direction: column; gap: 6px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #48484A; padding: 0 4px">Today</span>
+      <div style="border-radius: 20px; background: #0E0E10; overflow: hidden; position: relative">
+        <div style="position: absolute; right: 0; top: 0; bottom: 0; width: 96px; background: #2C2C2E; display: flex; align-items: center; justify-content: center; font-size: 15px; color: #F5F5F7">Hide</div>
+        <div style="position: relative; display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px; background: #0E0E10; transform: translateX(-96px)">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #2C2C2E; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; color: #8E8E93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Fix README typo</span>
+          <span style="font-size: 15px; color: #48484A">merged</span>
+        </div>
+        <div style="height: 1px; background: #1C1C1E; margin-left: 40px"></div>
+        <div style="display: flex; align-items: center; gap: 14px; min-height: 56px; padding: 0 18px">
+          <span style="width: 8px; height: 8px; border-radius: 50%; background: #2C2C2E; flex-shrink: 0"></span>
+          <span style="flex-grow: 1; min-width: 0; color: #8E8E93; white-space: nowrap; overflow: hidden; text-overflow: ellipsis">Rename session store</span>
+          <span style="font-size: 15px; color: #48484A">merged</span>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div style="position: absolute; left: 0; right: 0; bottom: 34px; display: flex; justify-content: center">
+    <a href="NewThread.dc.html" style="display: flex; align-items: center; gap: 10px; min-height: 52px; padding: 0 22px 0 18px; border-radius: 999px; background: #1C1C1E; color: #F5F5F7; font-size: 16px; font-weight: 500">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+      New
+    </a>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

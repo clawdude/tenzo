@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>A4: the agent's message as prose, chips to answer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#F5F5F7;text-decoration:none}a:hover{color:#FFFFFF}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #000000; color: #F5F5F7; display: flex; flex-direction: column; padding: 58px 0 0 0; font-size: 17px; line-height: 1.4; overflow: hidden; position: relative">
+
+  <div style="display: flex; align-items: center; justify-content: space-between; padding: 0 24px; margin-bottom: 22px">
+    <div style="display: flex; align-items: center; gap: 10px">
+      <span style="display: flex; align-items: center; justify-content: center; width: 32px; height: 32px; border-radius: 50%; background: #D97757; color: #1A0F0A; font-size: 13px; font-weight: 700">1</span>
+      <div style="display: flex; flex-direction: column">
+        <span style="font-size: 15px; font-weight: 600">Refresh tokens</span>
+        <span style="font-size: 13px; color: #8E8E93">tenzo · 2 more waiting</span>
+      </div>
+    </div>
+    <div style="display: flex; gap: 8px">
+      <a href="NewThread.dc.html" aria-label="New thread" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: #1C1C1E; color: #F5F5F7">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"></path></svg>
+      </a>
+      <a href="Threads.dc.html" aria-label="Threads" style="display: flex; align-items: center; justify-content: center; width: 40px; height: 40px; border-radius: 50%; background: #1C1C1E; color: #F5F5F7">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+      </a>
+    </div>
+  </div>
+
+  <div style="flex-grow: 1; min-height: 0; overflow-y: auto; padding: 0 24px; display: flex; flex-direction: column; justify-content: flex-end; gap: 14px">
+    <p style="margin: 0; font-size: 20px; line-height: 1.4; color: #F5F5F7; letter-spacing: -0.01em">The login handler is done and tested. Now I'm writing the token store, and this one is your call: refresh tokens live 30 days, much longer than the 24-hour access tokens in the existing encrypted SQLite table, and both the web app and the CLI read that table.</p>
+    <p style="margin: 0; font-size: 20px; line-height: 1.4; color: #F5F5F7; font-weight: 600; letter-spacing: -0.01em">Should refresh tokens go in the same table, shared by web and CLI? That's what I'd do: one migration, no new dependency.</p>
+    <a href="B1.dc.html" style="display: inline-flex; align-items: center; gap: 4px; min-height: 36px; color: #8E8E93; font-size: 15px">More
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"></path></svg>
+    </a>
+  </div>
+
+  <div style="flex-shrink: 0; padding: 18px 16px 34px 16px; display: flex; flex-direction: column; gap: 10px">
+    <div style="display: flex; gap: 8px; flex-wrap: wrap">
+      <a href="Main.dc.html" style="display: inline-flex; align-items: center; gap: 8px; min-height: 48px; padding: 0 18px; border-radius: 999px; background: #D97757; color: #1A0F0A; font-size: 16px; font-weight: 600">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><path d="M5 12l5 5L20 7"></path></svg>
+        Yes, same table
+      </a>
+      <a href="Main.dc.html" style="display: inline-flex; align-items: center; min-height: 48px; padding: 0 18px; border-radius: 999px; background: #2C2C2E; color: #F5F5F7; font-size: 16px; font-weight: 500">Keychain for CLI</a>
+      <a href="Main.dc.html" style="display: inline-flex; align-items: center; min-height: 48px; padding: 0 18px; border-radius: 999px; background: #2C2C2E; color: #F5F5F7; font-size: 16px; font-weight: 500">Memory only</a>
+    </div>
+    <div style="display: flex; align-items: center; gap: 8px; min-height: 52px; box-sizing: border-box; padding: 6px 6px 6px 18px; border-radius: 999px; background: #1C1C1E">
+      <label for="a4" style="position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0)">Reply</label>
+      <input id="a4" type="text" placeholder="Reply" style="flex-grow: 1; min-width: 0; background: transparent; border: 0; outline: 0; color: #F5F5F7; font: inherit; font-size: 16px">
+      <button type="button" aria-label="Dictate" style="width: 40px; height: 40px; border-radius: 50%; border: 0; background: #2C2C2E; color: #F5F5F7; display: flex; align-items: center; justify-content: center">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+      </button>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>

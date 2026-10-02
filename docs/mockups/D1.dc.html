@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>D1: New only appears when the Pass is clear</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+body{margin:0;font-family:-apple-system,BlinkMacSystemFont,system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased}
+a{color:#F5F5F7;text-decoration:none}a:hover{color:#FFFFFF}
+</style>
+</helmet>
+<div style="width: 390px; height: 844px; box-sizing: border-box; background: #000000; color: #F5F5F7; display: flex; flex-direction: column; padding: 58px 24px 0 24px; font-size: 17px; line-height: 1.4; overflow: hidden; position: relative">
+
+  <div style="display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 16px">
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <h1 style="margin: 0; font-size: 34px; line-height: 1.1; font-weight: 700; letter-spacing: -0.02em">Pass</h1>
+      <span style="font-size: 15px; color: #8E8E93">all clear</span>
+    </div>
+    <a href="Threads.dc.html" aria-label="Threads" style="display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; background: #1C1C1E; color: #F5F5F7">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+    </a>
+  </div>
+
+  <div style="flex-grow: 1; display: flex; flex-direction: column; justify-content: center; gap: 28px; padding-bottom: 40px">
+    <a href="NewThread.dc.html" style="display: flex; flex-direction: column; gap: 10px; min-height: 150px; box-sizing: border-box; padding: 22px 22px; border-radius: 28px; background: #1C1C1E; box-shadow: 0 24px 60px rgba(0,0,0,.6); color: #F5F5F7">
+      <span style="font-size: 26px; font-weight: 700; letter-spacing: -0.02em; line-height: 1.15; color: #8E8E93">What do you want to do?</span>
+      <span style="flex-grow: 1"></span>
+      <span style="display: flex; align-items: center; justify-content: space-between">
+        <span style="font-size: 14px; color: #6E6E73">tenzo · opus</span>
+        <span style="display: flex; align-items: center; justify-content: center; width: 44px; height: 44px; border-radius: 50%; background: #D97757; color: #1A0F0A">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+        </span>
+      </span>
+    </a>
+
+    <div style="display: flex; flex-direction: column; gap: 2px">
+      <span style="font-size: 13px; font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: #6E6E73; margin-bottom: 8px">Meanwhile</span>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF"></span>
+        <span style="flex-grow: 1; font-size: 17px">Flaky checkout test</span>
+        <span style="font-size: 15px; color: #6E6E73">22m</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #0A84FF"></span>
+        <span style="flex-grow: 1; font-size: 17px">Hourly PR review</span>
+        <span style="font-size: 15px; color: #6E6E73">1m</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #48484A"></span>
+        <span style="flex-grow: 1; font-size: 17px; color: #AEAEB2">Rate limiter · PR #128</span>
+        <span style="font-size: 15px; color: #6E6E73">2h</span>
+      </div>
+      <div style="display: flex; align-items: center; gap: 12px; min-height: 48px">
+        <span style="width: 8px; height: 8px; border-radius: 50%; background: #48484A"></span>
+        <span style="flex-grow: 1; font-size: 17px; color: #AEAEB2">Refresh tokens · snoozed</span>
+        <span style="font-size: 15px; color: #6E6E73">12m left</span>
+      </div>
+    </div>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"$preview":{"width":390,"height":844}}'>
+class Component extends DCLogic {
+  renderVals() { return {}; }
+}
+</script>
+</body>
+</html>
