@@ -291,6 +291,29 @@ describe("foldEvent: sessions and turns", () => {
   });
 });
 
+describe("foldEvent: archive", () => {
+  it("thread.archived dismisses every open item, detached or not", () => {
+    const before = fold(started(), turnStarted(), asked(REQ1), exited(), started(), permission(REQ2));
+    const archived = ev({ type: "thread.archived", payload: {} });
+    const after = foldEvent(before.state, archived, ENV);
+    expect(after.state.open).toEqual([]);
+    expect(after.state.runtime).toMatchObject({ live: false, turnId: null });
+    expect(after.changes.map((c) => [c.item.requestId, c.item.resolution])).toEqual([
+      [REQ1, { kind: "dismissed" }],
+      [REQ2, { kind: "dismissed" }],
+    ]);
+  });
+});
+
+describe("foldEvent: fingerprints", () => {
+  it("carries the request's fingerprint onto the item, and none when it had none", () => {
+    const fingerprint = `sha256:${"a".repeat(64)}`;
+    const { items } = fold(started(), permission(REQ2, { fingerprint }), asked(REQ1));
+    expect(items.find((i) => i.requestId === REQ2)?.fingerprint).toBe(fingerprint);
+    expect(items.find((i) => i.requestId === REQ1)).not.toHaveProperty("fingerprint");
+  });
+});
+
 describe("replay", () => {
   it("folding the log in one go equals folding it event by event, as the store does", () => {
     const log = [

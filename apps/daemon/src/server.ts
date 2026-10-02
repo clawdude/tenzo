@@ -48,6 +48,7 @@ export async function startDaemon(
     webDir: config.webDir,
     engine,
     allowedHosts: config.allowedHosts,
+    devOrigins: config.devOrigins,
   });
   const wss = new WebSocketServer({ noServer: true });
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.

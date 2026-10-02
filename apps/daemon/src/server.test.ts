@@ -31,6 +31,7 @@ const config = (dir: string) => ({
   home: dir,
   webDir: join(dir, "web"),
   allowedHosts: [],
+  devOrigins: [],
 });
 
 async function start(): Promise<RunningDaemon> {
@@ -125,8 +126,11 @@ describe("startDaemon", () => {
     expect(await status({ Origin: "https://evil.example" })).toBe(403);
     expect(await status({ Origin: "null" })).toBe(403);
     expect(await status({ Host: "evil.example" })).toBe(403);
+    // Another localhost page (someone else's dev server) gets no socket: no preflight to save us.
+    expect(await status({ Origin: "http://localhost:3000" })).toBe(403);
+    expect(await status({ Origin: "http://localhost:5173" })).toBe(403);
     expect(await status({ Origin: `http://127.0.0.1:${daemon.port}` })).toBe(101);
-    expect(await status({ Origin: "http://localhost:5173" })).toBe(101);
+    expect(await status({})).toBe(101);
   });
 
   it("runs commands from the CLI over HTTP, and open items survive a restart", async () => {

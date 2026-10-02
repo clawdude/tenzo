@@ -19,6 +19,11 @@ export interface DaemonConfig {
    * Serve name. `TENZO_ALLOWED_HOSTS`, comma-separated. See access.ts.
    */
   allowedHosts: string[];
+  /**
+   * Origins of dev servers whose pages may call the API and open `/ws`, e.g. Vite's
+   * `http://localhost:5173` (`pnpm dev` sets it). `TENZO_DEV_ORIGIN`, comma-separated.
+   */
+  devOrigins: string[];
 }
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
@@ -31,7 +36,29 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     home: resolve(env.TENZO_HOME || join(homedir(), ".tenzo")),
     webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
     allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
+    devOrigins: readOrigins(env.TENZO_DEV_ORIGIN),
   };
+}
+
+function readOrigins(raw: string | undefined): string[] {
+  return (raw ?? "")
+    .split(",")
+    .map((o) => o.trim())
+    .filter((o) => o !== "")
+    .map((o) => {
+      let url: URL | undefined;
+      try {
+        url = new URL(o);
+      } catch {
+        // reported below
+      }
+      if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== o.replace(/\/$/, "")) {
+        throw new Error(
+          `TENZO_DEV_ORIGIN takes origins separated by commas, like http://localhost:5173, got "${o}"`,
+        );
+      }
+      return url.origin;
+    });
 }
 
 function readPort(raw: string | undefined): number {

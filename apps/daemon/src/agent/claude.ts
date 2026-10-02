@@ -29,6 +29,7 @@ import {
   type Translated,
   translate,
 } from "./claude-events.ts";
+import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
 
 /**
@@ -129,7 +130,11 @@ function startSession(
       type: "user-input.requested",
       requestId,
       ...inTurn(),
-      payload: { questions, itemId: toolUseID },
+      payload: {
+        questions,
+        itemId: toolUseID,
+        fingerprint: fingerprintOf("AskUserQuestion", toolInput),
+      },
     });
     const outcome = await waitFor(requestId, "user-input", signal);
     if (outcome.ended) return { behavior: "deny", message: "The session ended." };
@@ -162,6 +167,8 @@ function startSession(
         ...(context.decisionReason ? { reason: context.decisionReason } : {}),
         input: boundedInput(toolInput), // Claude gets the full input back below
         itemId: context.toolUseID,
+        // Over the full input: two requests alike in what was kept above must still differ.
+        fingerprint: fingerprintOf(toolName, toolInput),
       },
     });
     const outcome = await waitFor(requestId, "request", context.signal);

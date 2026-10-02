@@ -76,6 +76,14 @@ export const UserInputQuestion = z.object({
 });
 export type UserInputQuestion = z.infer<typeof UserInputQuestion>;
 
+/**
+ * What exactly a question or permission request asks: a SHA-256 over the tool's name and its
+ * full input, computed by the adapter before anything is cut for display. Two requests with the
+ * same fingerprint ask the same thing.
+ */
+export const Fingerprint = z.string().regex(/^sha256:[0-9a-f]{64}$/);
+export type Fingerprint = z.infer<typeof Fingerprint>;
+
 /** Question id → the answer: an option's `value`, several joined by ", ", or free text. */
 export const UserInputAnswers = z.record(z.string(), z.string());
 export type UserInputAnswers = z.infer<typeof UserInputAnswers>;
@@ -172,8 +180,10 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       title: z.string().optional(),
       /** Why it is asking, when the agent says (e.g. a path outside the worktree). */
       reason: z.string().optional(),
+      /** A copy for showing, cut to size: never compare requests by it. */
       input: z.unknown(),
       itemId: ItemId.optional(),
+      fingerprint: Fingerprint.optional(),
     }),
   }),
   z.object({
@@ -193,6 +203,7 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     payload: z.object({
       questions: z.array(UserInputQuestion),
       itemId: ItemId.optional(),
+      fingerprint: Fingerprint.optional(),
     }),
   }),
   z.object({
@@ -204,6 +215,15 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       answers: UserInputAnswers,
       cancelled: z.boolean(),
     }),
+  }),
+  /**
+   * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.
+   * In the log so that folding the log gives what the daemon shows.
+   */
+  z.object({
+    ...base,
+    type: z.literal("thread.archived"),
+    payload: z.object({}),
   }),
   z.object({
     ...base,

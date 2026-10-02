@@ -10,7 +10,7 @@
     "tenzo": "./src/cli.ts"
   },
   "scripts": {
-    "dev": "node --watch src/cli.ts serve",
+    "dev": "TENZO_DEV_ORIGIN=${TENZO_DEV_ORIGIN:-http://localhost:5173,http://127.0.0.1:5173} node --watch src/cli.ts serve",
     "start": "node src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"

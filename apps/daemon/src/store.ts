@@ -30,8 +30,12 @@ export function openStore(homeDir: string): Store {
   return { db, home, environmentId, close: () => db.close() };
 }
 
-/** Runs `fn` in one write transaction: all of it lands, or none. */
+/**
+ * Runs `fn` in one write transaction: all of it lands, or none. Inside another transaction it
+ * just runs, as part of the outer one.
+ */
 export function transaction<T>(store: Store, fn: () => T): T {
+  if (store.db.isTransaction) return fn();
   store.db.exec("BEGIN IMMEDIATE");
   try {
     const result = fn();

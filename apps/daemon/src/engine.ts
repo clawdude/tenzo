@@ -14,15 +14,15 @@ import type { AgentAdapter, AgentSession } from "./agent/agent.ts";
 import {
   checkAnswer,
   deliveryPrompt,
-  requestFingerprint,
+  matchReply,
   type StandingReply,
   standingReply,
 } from "./answers.ts";
 import { TenzoError } from "./errors.ts";
 import {
+  type Appended,
   appendEvent,
   clearPrompts,
-  dismissItems,
   enqueuePrompt,
   getItem,
   lastSeq,
@@ -35,12 +35,20 @@ import {
   threadEvents,
   threadsWithPrompts,
 } from "./event-store.ts";
-import type { ItemChange } from "./fold.ts";
+import { type ItemChange, itemIdFor } from "./fold.ts";
 import { titleFrom } from "./format.ts";
 import { randomId } from "./ids.ts";
 import { findProject } from "./projects.ts";
-import type { Store } from "./store.ts";
-import { archiveThread, createThread, getThread, listThreads, projectOf, type Thread } from "./threads.ts";
+import { type Store, transaction } from "./store.ts";
+import {
+  archiveThread,
+  checkArchivable,
+  createThread,
+  getThread,
+  listThreads,
+  projectOf,
+  type Thread,
+} from "./threads.ts";
 
 /**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
@@ -86,6 +94,8 @@ export class Engine {
   /** Live answers waiting for the agent's `*.resolved` event. */
   readonly #answering = new Map<QueueItemId, (item: QueueItem) => void>();
   readonly #archiving = new Set<ThreadId>();
+  /** Items answered for you from a standing reply: subscribers never see them open. */
+  readonly #quiet = new Set<QueueItemId>();
   #closing = false;
 
   constructor(options: EngineOptions) {
@@ -149,6 +159,8 @@ export class Engine {
   async archive(threadId: string, options: { force?: boolean } = {}): Promise<ThreadView> {
     const thread = getThread(this.store, threadId);
     if (thread.status === "archived") return this.view(thread.id);
+    // Refuse before stopping anything: a refused archive must not kill the running turn.
+    await checkArchivable(this.store, thread, options);
     this.#archiving.add(thread.id); // no new session while its worktree goes away
     try {
       const live = this.#live.get(thread.id);
@@ -165,7 +177,8 @@ export class Engine {
       throw error;
     }
     clearPrompts(this.store, thread.id);
-    for (const change of dismissItems(this.store, thread.id)) this.#emit({ type: "item", change });
+    // Through the log, so folding it gives the dismissed items too.
+    this.#append(draft(getThread(this.store, thread.id), { type: "thread.archived", payload: {} }));
     return this.#changed(thread.id);
   }
 
@@ -224,12 +237,18 @@ export class Engine {
       }
       if (!resolved.cancelled) {
         const done = await resolved.promise;
-        return { item: done ?? item, delivery: "live", thread: this.view(thread.id) };
+        if (done) return { item: done, delivery: "live", thread: this.view(thread.id) };
+        // No confirmation. If the session ended meanwhile, deliver it as a message after all;
+        // otherwise report the item as it stands (still open), not as answered.
+        const now = getItem(this.store, item.id) ?? item;
+        if (now.status !== "open" || !now.detached) {
+          return { item: now, delivery: "live", thread: this.view(thread.id) };
+        }
       }
     }
 
-    this.#append(
-      draft(thread, {
+    const reply = standingReply(item, checked);
+    const resolution = draft(thread, {
         ...(item.turnId ? { turnId: item.turnId } : {}),
         ...(checked.kind === "question"
           ? {
@@ -245,14 +264,14 @@ export class Engine {
                 ...(checked.message ? { message: checked.message } : {}),
               },
             }),
-      } as Draft),
-    );
-    enqueuePrompt(
-      this.store,
-      thread.id,
-      deliveryPrompt(item, checked),
-      standingReply(item, checked),
-    );
+    } as Draft);
+    // Both or neither: a crash in between must not leave the item answered and the answer unsent.
+    const appended = transaction(this.store, () => {
+      const result = appendEvent(this.store, resolution);
+      enqueuePrompt(this.store, thread.id, deliveryPrompt(item, checked), reply);
+      return result;
+    });
+    this.#publish(resolution, appended);
     this.#pump(thread.id);
     return {
       item: getItem(this.store, item.id) ?? item,
@@ -366,23 +385,23 @@ export class Engine {
   }
 
   #ingest(live: Live, event: RuntimeEvent): void {
+    if (event.type === "user-input.requested" || event.type === "request.opened") {
+      const index = matchReply(live.standing, event);
+      const [reply] = index === -1 ? [] : live.standing.splice(index, 1);
+      if (reply) {
+        // Answered for you from your earlier answer: logged, but never shown as a card.
+        this.#quiet.add(itemIdFor(event.requestId));
+        this.#append(event);
+        try {
+          respond(live.session, event.requestId, reply);
+        } catch (error) {
+          if (!(error instanceof TenzoError)) throw error;
+        }
+        return;
+      }
+    }
     this.#append(event);
     switch (event.type) {
-      case "user-input.requested":
-      case "request.opened": {
-        const fingerprint = requestFingerprint(event);
-        const index = live.standing.findIndex((r) => r.fingerprint === fingerprint);
-        if (index === -1) break;
-        const [reply] = live.standing.splice(index, 1);
-        if (reply) {
-          try {
-            respond(live.session, event.requestId, reply);
-          } catch (error) {
-            if (!(error instanceof TenzoError)) throw error;
-          }
-        }
-        break;
-      }
       case "turn.completed":
         if (event.turnId === live.turnId) {
           live.turnId = null;
@@ -399,10 +418,16 @@ export class Engine {
   }
 
   #append(event: RuntimeEvent): void {
-    const { seq, changes } = appendEvent(this.store, event);
+    this.#publish(event, appendEvent(this.store, event));
+  }
+
+  /** Tells subscribers what an appended event did, once it is stored. */
+  #publish(event: RuntimeEvent, { seq, changes }: Appended): void {
     this.#emit({ type: "event", seq, environmentId: this.store.environmentId, event });
     for (const change of changes) {
-      this.#emit({ type: "item", change });
+      const quiet = this.#quiet.has(change.item.id);
+      if (quiet && change.type !== "opened") this.#quiet.delete(change.item.id);
+      if (!quiet) this.#emit({ type: "item", change });
       if (change.type === "resolved") {
         const waiter = this.#answering.get(change.item.id);
         this.#answering.delete(change.item.id);

@@ -4,7 +4,6 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   appendEvent,
   clearPrompts,
-  dismissItems,
   enqueuePrompt,
   getItem,
   lastSeq,
@@ -125,11 +124,28 @@ describe("event store", () => {
     expect(threadEvents(store, threadId)).toEqual([]);
   });
 
-  it("dismissing closes a thread's items; archived threads' items never show", async () => {
+  it("thread.archived dismisses the open items; replaying the log gives the same, archive included", () => {
     for (const e of log()) appendEvent(store, e);
-    const changes = dismissItems(store, threadId);
-    expect(changes.map((c) => c.item.resolution)).toEqual([{ kind: "dismissed" }]);
-    expect(openItems(store)).toEqual([]);
+    appendEvent(store, ev({ type: "session.exited", payload: { exitKind: "graceful" } }));
+    const { changes } = appendEvent(store, ev({ type: "thread.archived", payload: {} }));
+    expect(changes.map((c) => [c.type, c.item.requestId, c.item.resolution])).toEqual([
+      ["resolved", REQ1, { kind: "dismissed" }],
+    ]);
+    const replayed = foldEvents(
+      threadEvents(store, threadId).map((s) => s.event),
+      store.environmentId,
+    );
+    expect(loadFoldState(store, threadId)).toEqual(replayed.state);
+    expect(replayed.state.open).toEqual([]);
+    for (const item of replayed.items) expect(getItem(store, item.id)).toEqual(item);
+  });
+
+  it("never reopens a resolved item when its request shows up again", () => {
+    const events = log();
+    for (const e of events) appendEvent(store, e);
+    const again = { ...events[4], eventId: "evt_zzzzzzzzzzzzzzzzzzzz" } as RuntimeEvent; // REQ2, resolved
+    expect(appendEvent(store, again).changes).toEqual([]);
+    expect(getItem(store, `itm_${REQ2.slice(4)}`)?.status).toBe("resolved");
   });
 
   it("hides an archived thread's open items from the queue", async () => {
@@ -142,7 +158,7 @@ describe("event store", () => {
 describe("prompt queue", () => {
   it("keeps prompts per thread, oldest first, across a reopen", () => {
     enqueuePrompt(store, threadId, "one");
-    enqueuePrompt(store, threadId, "two", { kind: "permission", fingerprint: "f", decision: "allow" });
+    enqueuePrompt(store, threadId, "two", { kind: "permission", fingerprint: `sha256:${"0".repeat(64)}`, decision: "allow" });
     store.close();
     store = openStore(home);
     expect(queuedCount(store, threadId)).toBe(2);

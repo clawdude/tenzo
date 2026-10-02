@@ -51,8 +51,12 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
          WHERE id = ?`,
       )
       .run(r.live ? 1 : 0, r.agent, r.sessionId, r.turnId, r.context, event.threadId);
-    for (const change of folded.changes) saveItem(store, change.item);
-    return { seq: Number(lastInsertRowid), runtime: r, changes: folded.changes };
+    // A request id seen before never opens an item again, even one already resolved.
+    const changes = folded.changes.filter(
+      (change) => change.type !== "opened" || !getItem(store, change.item.id),
+    );
+    for (const change of changes) saveItem(store, change.item);
+    return { seq: Number(lastInsertRowid), runtime: r, changes };
   });
 }
 
@@ -81,7 +85,8 @@ export function saveItem(store: Store, item: QueueItem): void {
          (id, environment_id, thread_id, request_id, kind, lane, status, created_at, resolved_at, body)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT (id) DO UPDATE SET
-         status = excluded.status, resolved_at = excluded.resolved_at, body = excluded.body`,
+         status = excluded.status, resolved_at = excluded.resolved_at, body = excluded.body
+       WHERE items.status = 'open'`,
     )
     .run(
       item.id,
@@ -110,23 +115,6 @@ export function openItems(store: Store, threadId?: ThreadId): QueueItem[] {
        AND (:thread IS NULL OR thread_id = :thread)`,
     { thread: threadId ?? null },
   );
-}
-
-/** Closes a thread's open items without an answer (its thread was archived). */
-export function dismissItems(store: Store, threadId: ThreadId): ItemChange[] {
-  return transaction(store, () => {
-    const at = new Date().toISOString();
-    return queryItems(store, "WHERE thread_id = ? AND status = 'open'", threadId).map((open) => {
-      const item: QueueItem = {
-        ...open,
-        status: "resolved",
-        resolvedAt: at,
-        resolution: { kind: "dismissed" },
-      };
-      saveItem(store, item);
-      return { type: "resolved", item };
-    });
-  });
 }
 
 function queryItems(

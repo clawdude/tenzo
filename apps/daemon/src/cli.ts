@@ -256,9 +256,11 @@ async function answer(args: string[]): Promise<void> {
     answer: answerFromWords(item, words),
   });
   say(
-    result.delivery === "live"
-      ? `Answered ${item.id}.`
-      : `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`,
+    result.delivery === "message"
+      ? `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`
+      : result.item.status === "open"
+        ? `Sent your answer to ${item.id}, but the agent hasn't confirmed it; \`tenzo items\` shows whether it is still open.`
+        : `Answered ${item.id}.`,
   );
   if (!flags.has("--detach")) await follow(item.threadId, result.thread.lastSeq, json);
 }

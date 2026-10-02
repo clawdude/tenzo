@@ -22,7 +22,7 @@ pnpm dev     # daemon on 127.0.0.1:4780 (TENZO_PORT to change), web on localhost
 pnpm check   # typecheck + tests in every package; CI runs the same
 ```
 
-In `pnpm dev`, Vite proxies `/ws` and `/health` to the daemon, so the page always talks to its own origin.
+In `pnpm dev`, Vite proxies `/ws` and `/health` to the daemon, so the page always talks to its own origin. The daemon's dev script sets `TENZO_DEV_ORIGIN` to Vite's `http://localhost:5173` (and `127.0.0.1:5173`), the only other origin it accepts pages from.
 
 ## Run
 
@@ -41,6 +41,7 @@ The daemon serves the web app, `GET /health` (version and environment id) and th
 | `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
+| `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 
 ## Projects and threads
@@ -99,14 +100,14 @@ Every event the agent reports is appended to an append-only log in SQLite (`even
 
 The daemon folds the log into **items** (`apps/daemon/src/fold.ts`, a pure function; `items` table): each question (`AskUserQuestion`) and each permission request becomes one quick-lane item with the thread, the agent's last words before asking (trimmed), the ask, its options and the suggested one. Answering resolves it and hands the answer to the waiting agent. Prompts sent while a turn runs wait in a per-thread queue (`prompts`), which also survives restarts.
 
-**When the agent that asked is gone.** If the daemon restarts (or Claude crashes) while a question or permission request is open, the item stays on the queue, marked as detached: nothing is waiting on it any more, but your answer still counts. Answering it records the answer, resumes the thread's Claude session, and sends a message saying what it asked and what you chose ("You asked: …  My answer: …", or for a permission "I allow it. Go ahead" / "I don't allow it: <reason>"). If the resumed agent then asks the same question or requests the same tool call again in that turn, as it usually does when it re-runs the tool, the daemon answers it with your answer instead of asking you twice. Archiving a thread stops its agent and dismisses its items.
+**When the agent that asked is gone.** If the daemon restarts (or Claude crashes) while a question or permission request is open, the item stays on the queue, marked as detached: nothing is waiting on it any more, but your answer still counts. Answering it records the answer, resumes the thread's Claude session, and sends a message saying what it asked and what you chose ("You asked: …  My answer: …", or for a permission "I allow it. Go ahead" / "I don't allow it: <reason>"). If the resumed agent then asks exactly the same question or requests exactly the same tool call again in that turn, as it usually does when it re-runs the tool, the daemon answers it with your answer instead of asking you twice. "Exactly" is a SHA-256 fingerprint of the tool and its full input, taken by the adapter before anything is shortened for display; anything that differs anywhere is asked again. Archiving a thread stops its agent and dismisses its items (a `thread.archived` event in the log).
 
 ### Who may call the daemon
 
-The daemon's commands (`POST /api/commands`, and `/ws`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding) and browser requests whose `Origin` isn't one of those hosts. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
+The daemon's commands (`POST /api/commands`, and `/ws`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding), and browser requests (WebSocket upgrades included, which get no CORS preflight) from any page but its own: the same host and port, an allowed host over https, or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
 
 ```bash
 TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net pnpm tenzo serve
 ```
 
-One daemon runs per `TENZO_HOME` (`daemon.pid`); a second one refuses to start.
+One daemon runs per `TENZO_HOME` (`daemon.pid`); a second one refuses to start. A lock left by a daemon that died is taken over; if it names a pid that something else now runs as, delete `daemon.pid`.

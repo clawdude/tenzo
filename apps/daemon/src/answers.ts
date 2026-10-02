@@ -1,4 +1,5 @@
 import type {
+  Fingerprint,
   ItemAnswer,
   QueueItem,
   RuntimeEventOf,
@@ -13,15 +14,16 @@ import { TenzoError } from "./errors.ts";
  * When the agent process that asked has ended (it crashed, or the daemon restarted), there is no
  * pending request to answer. Tenzo then resumes the agent's session and sends the answer as a
  * message saying what was asked and what you chose (`deliveryPrompt`). The agent usually just
- * carries on; if it asks the same thing again in that turn (it re-runs the tool, which asks for
- * permission again), the daemon answers it with your answer instead of asking you twice
- * (`StandingReply`).
+ * carries on; if it asks exactly the same thing again in that turn (it re-runs the tool, which
+ * asks for permission again), the daemon answers it with your answer instead of asking you twice
+ * (`StandingReply`). "Exactly" means the same fingerprint of the full request; anything else is
+ * asked again.
  */
 
 /** An answer waiting for the agent to ask again, matched by `fingerprint`. */
 export type StandingReply =
-  | { kind: "question"; fingerprint: string; answers: UserInputAnswers }
-  | { kind: "permission"; fingerprint: string; decision: "allow" | "deny"; message?: string };
+  | { kind: "question"; fingerprint: Fingerprint; answers: UserInputAnswers }
+  | { kind: "permission"; fingerprint: Fingerprint; decision: "allow" | "deny"; message?: string };
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
 export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
@@ -43,8 +45,15 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
   return { kind: "question", answers };
 }
 
-export function standingReply(item: QueueItem, answer: ItemAnswer): StandingReply {
-  const fingerprint = itemFingerprint(item);
+/**
+ * The answer to give if the agent asks exactly this again, or null when the item carries no
+ * fingerprint: then nothing is ever answered for you. Matching is on the adapter's fingerprint
+ * of the full request (agent/fingerprint.ts), never on the cut-down copy items show, which two
+ * different requests can share.
+ */
+export function standingReply(item: QueueItem, answer: ItemAnswer): StandingReply | null {
+  const fingerprint = item.fingerprint;
+  if (!fingerprint) return null;
   return answer.kind === "question"
     ? { kind: "question", fingerprint, answers: answer.answers }
     : {
@@ -55,23 +64,15 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
       };
 }
 
-/** Same questions with the same options, or the same tool with the same input: the same ask. */
-export function itemFingerprint(item: QueueItem): string {
-  return item.kind === "question"
-    ? questionsFingerprint(item.questions)
-    : JSON.stringify(["permission", item.permission?.toolName, item.permission?.input]);
-}
-
-export function requestFingerprint(
+/** The standing reply for this request, if one matches it exactly and is of its kind. */
+export function matchReply(
+  replies: readonly StandingReply[],
   event: RuntimeEventOf<"user-input.requested"> | RuntimeEventOf<"request.opened">,
-): string {
-  return event.type === "user-input.requested"
-    ? questionsFingerprint(event.payload.questions)
-    : JSON.stringify(["permission", event.payload.toolName, event.payload.input]);
-}
-
-function questionsFingerprint(questions: readonly UserInputQuestion[]): string {
-  return JSON.stringify(["question", questions.map((q) => [q.question, q.options.map((o) => o.value)])]);
+): number {
+  const fingerprint = event.payload.fingerprint;
+  if (!fingerprint) return -1;
+  const kind = event.type === "user-input.requested" ? "question" : "permission";
+  return replies.findIndex((r) => r.kind === kind && r.fingerprint === fingerprint);
 }
 
 /** The message that tells a resumed agent what it asked before it stopped, and the answer. */

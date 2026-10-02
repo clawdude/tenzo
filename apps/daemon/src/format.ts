@@ -109,6 +109,8 @@ function describe(event: RuntimeEvent): string {
       return event.payload.cancelled ? "cancelled" : JSON.stringify(event.payload.answers);
     case "runtime.error":
       return event.payload.message;
+    case "thread.archived":
+      return "worktree removed, open items dismissed";
   }
 }
 

@@ -27,6 +27,8 @@ export interface AppOptions {
   engine?: Engine;
   /** Host names besides loopback that may reach the daemon (access.ts). */
   allowedHosts?: readonly string[];
+  /** Dev servers whose pages may call (access.ts). */
+  devOrigins?: readonly string[];
 }
 
 /**
@@ -34,12 +36,21 @@ export interface AppOptions {
  * app with an SPA fallback. The WebSocket only upgrades when served by `startDaemon` (it needs the
  * Node server). A foreign `Host` is refused everywhere, a foreign `Origin` on the API and `/ws`.
  */
-export function createApp({ environmentId, webDir, engine, allowedHosts = [] }: AppOptions): Hono {
+export function createApp({
+  environmentId,
+  webDir,
+  engine,
+  allowedHosts = [],
+  devOrigins = [],
+}: AppOptions): Hono {
   const app = new Hono();
 
   app.use(
     "*",
-    accessGuard({ allowedHosts }, (path) => path === "/ws" || path.startsWith("/api/")),
+    accessGuard(
+      { allowedHosts, devOrigins },
+      (path) => path === "/ws" || path.startsWith("/api/"),
+    ),
   );
 
   app.get("/health", (c) => c.json({ ok: true, version: VERSION, environmentId } satisfies Health));
@@ -48,7 +59,8 @@ export function createApp({ environmentId, webDir, engine, allowedHosts = [] }: 
     const fail = (error: string, status: 400 | 415 | 500 | 503) =>
       c.json({ ok: false, error } satisfies CommandResponse, status);
     // JSON only: a form post can't fake it without a CORS preflight, which the daemon never grants.
-    if (!c.req.header("content-type")?.toLowerCase().startsWith("application/json")) {
+    const mediaType = c.req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (mediaType !== "application/json") {
       return fail("Send the command as application/json.", 415);
     }
     if (!engine) return fail("This daemon runs no threads.", 503);

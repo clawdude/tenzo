@@ -3,31 +3,44 @@ import type { MiddlewareHandler } from "hono";
 /**
  * Who may talk to the daemon over HTTP and WebSocket. It listens on loopback, but a web page in
  * the person's own browser can still reach loopback: by DNS rebinding (an attacker's name that
- * resolves to 127.0.0.1, so the browser calls it same-origin) or by a cross-site request. Since
- * the API starts agents and answers for you, both are refused:
+ * resolves to 127.0.0.1, so the browser calls it same-origin) or by a cross-site request. A
+ * WebSocket has no CORS preflight at all, so any page could open `/ws`. Since the API starts
+ * agents and answers for you, both are refused:
  *
  * - the `Host` must name this machine: 127.0.0.1, localhost, ::1, or a configured name such as
  *   the Tailscale Serve host (`TENZO_ALLOWED_HOSTS`);
  * - a request that carries an `Origin` (every browser request that matters does, WebSocket
- *   upgrades included) must come from one of those hosts. Requests without one are not from a
- *   web page: the CLI, curl.
+ *   upgrades included) must come from the daemon's own pages: the very host and port it was
+ *   reached at, a configured host over https (Tailscale Serve), or a dev server named in
+ *   `TENZO_DEV_ORIGIN`. Not any other localhost port: that is someone else's dev server, a local
+ *   tool's UI, or a package's page. Requests without an Origin are not from a web page: the
+ *   CLI, curl.
  */
 export const LOOPBACK_HOSTS = ["127.0.0.1", "localhost", "[::1]"] as const;
 
 export interface AccessPolicy {
   /** Hostnames allowed besides loopback, e.g. `my-mac.tailnet.ts.net`. */
   allowedHosts: readonly string[];
+  /** Exact origins of dev servers whose pages may call, e.g. `http://localhost:5173`. */
+  devOrigins?: readonly string[];
 }
 
 /** True when a `Host` header names this machine. The port doesn't matter; the name does. */
 export function hostAllowed(host: string | undefined, policy: AccessPolicy): boolean {
   if (!host) return false;
   const name = hostname(`http://${host}`);
-  return name !== null && allowed(name, policy);
+  return name !== null && hostKnown(name, policy);
 }
 
-/** True when a request may come from `origin`: absent (not a browser), or one of our hosts. */
-export function originAllowed(origin: string | undefined, policy: AccessPolicy): boolean {
+/**
+ * True when a request reached at `host` may come from `origin`: absent (not a browser), the same
+ * origin, a configured host over https, or a configured dev origin.
+ */
+export function originAllowed(
+  origin: string | undefined,
+  host: string | undefined,
+  policy: AccessPolicy,
+): boolean {
   if (origin === undefined) return true;
   let url: URL;
   try {
@@ -35,8 +48,17 @@ export function originAllowed(origin: string | undefined, policy: AccessPolicy):
   } catch {
     return false; // "null" (sandboxed frames, file:) and garbage
   }
-  if (url.protocol !== "http:" && url.protocol !== "https:") return false;
-  return allowed(normalize(url.hostname), policy);
+  if (url.origin === "null") return false;
+  if (policy.devOrigins?.some((dev) => sameOrigin(dev, url.origin))) return true;
+  const name = normalize(url.hostname);
+  if (url.protocol === "http:" && (LOOPBACK_HOSTS as readonly string[]).includes(name)) {
+    // The daemon's own page: exactly the host and port this request came in on.
+    return host !== undefined && url.host.toLowerCase() === host.toLowerCase();
+  }
+  if (url.protocol === "https:" && url.port === "") {
+    return policy.allowedHosts.some((h) => normalize(h) === name);
+  }
+  return false;
 }
 
 /** Refuses requests with a foreign `Host` everywhere, and a foreign `Origin` where `guarded`. */
@@ -52,18 +74,29 @@ export function accessGuard(
         403,
       );
     }
-    if (guarded(c.req.path) && !originAllowed(c.req.header("origin"), policy)) {
-      return c.text("Cross-origin requests are not allowed.\n", 403);
+    if (guarded(c.req.path) && !originAllowed(c.req.header("origin"), host, policy)) {
+      return c.text(
+        "Cross-origin requests are not allowed. A dev server's origin goes in TENZO_DEV_ORIGIN.\n",
+        403,
+      );
     }
     await next();
   };
 }
 
-function allowed(name: string, policy: AccessPolicy): boolean {
+function hostKnown(name: string, policy: AccessPolicy): boolean {
   return (
     (LOOPBACK_HOSTS as readonly string[]).includes(name) ||
     policy.allowedHosts.some((h) => normalize(h) === name)
   );
+}
+
+function sameOrigin(a: string, b: string): boolean {
+  try {
+    return new URL(a).origin === new URL(b).origin;
+  } catch {
+    return false;
+  }
 }
 
 function hostname(url: string): string | null {

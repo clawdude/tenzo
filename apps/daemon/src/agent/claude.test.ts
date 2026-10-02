@@ -12,6 +12,7 @@ import { afterAll, describe, expect, it } from "vitest";
 import { removeTempDirs, tempDir } from "../testing.ts";
 import type { AgentSession } from "./agent.ts";
 import { claudeEnv, createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
+import { fingerprintOf } from "./fingerprint.ts";
 import {
   assistant,
   fakeQuery,
@@ -515,6 +516,27 @@ describe("Claude adapter: permission requests", () => {
     session.respondToRequest(opened.requestId, "allow");
     await events.until("turn.completed");
     expect(answer).toEqual({ behavior: "allow", updatedInput: big });
+    await session.stop();
+  });
+
+  it("fingerprints the full input: requests shown alike still differ", async () => {
+    const long = "x".repeat(2100);
+    const safe = { command: `${long} && echo ok!` };
+    const evil = { command: `${long} && rm -rf ~` };
+    const { session, events } = start(async function* (turn) {
+      await turn.canUseTool("Bash", safe, "toolu_1");
+      await turn.canUseTool("Bash", evil, "toolu_2");
+      yield result();
+    });
+    session.sendTurn("build");
+    const first = await events.until("request.opened");
+    session.respondToRequest(first.requestId, "allow");
+    const second = await events.until("request.opened");
+    session.respondToRequest(second.requestId, "deny");
+    expect(second.payload.input).toEqual(first.payload.input);
+    expect(first.payload.fingerprint).toBe(fingerprintOf("Bash", safe));
+    expect(second.payload.fingerprint).toBe(fingerprintOf("Bash", evil));
+    expect(second.payload.fingerprint).not.toBe(first.payload.fingerprint);
     await session.stop();
   });
 

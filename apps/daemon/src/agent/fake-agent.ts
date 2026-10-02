@@ -10,6 +10,8 @@ import type {
 import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
+import { boundedInput, summarizeTool } from "./claude-events.ts";
+import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
 
 /**
@@ -117,11 +119,12 @@ export class FakeSession implements AgentSession {
       type: "user-input.requested",
       ...this.#inTurn(),
       requestId,
-      payload: { questions },
+      payload: { questions, fingerprint: fingerprintOf("AskUserQuestion", { questions }) },
     });
     return requestId;
   }
 
+  /** Like Claude's adapter: the event shows a cut-down input, the fingerprint covers all of it. */
   askPermission(toolName: string, input: Record<string, unknown>): RequestId {
     const requestId = randomId("req");
     this.pending.set(requestId, "permission");
@@ -132,8 +135,9 @@ export class FakeSession implements AgentSession {
       payload: {
         toolKind: toolName === "Bash" ? "command" : "tool",
         toolName,
-        detail: `${toolName}: ${String(input.command ?? "")}`,
-        input,
+        detail: summarizeTool(toolName, input),
+        input: boundedInput(input),
+        fingerprint: fingerprintOf(toolName, input),
       },
     });
     return requestId;
