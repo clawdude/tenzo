@@ -1,3 +1,8 @@
 packages:
   - apps/*
   - packages/*
+
+peerDependencyRules:
+  allowedVersions:
+    # Kit 3 declares typescript ^6; we stay on 5.9 until the Svelte tooling settles. svelte-check is clean on 5.9.
+    "@sveltejs/kit>typescript": "^5.9.3"

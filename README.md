@@ -10,4 +10,14 @@ Self-hosted, open source, no cloud of ours. Your agents, your logins, your netwo
 
 See [docs/PRODUCT.md](docs/PRODUCT.md) for what it is, the decisions behind it, and the MVP scope. Mock-ups are in [docs/mockups](docs/mockups).
 
-Status: pre-MVP. Nothing runs yet.
+Status: pre-MVP. Nothing useful runs yet.
+
+## Develop
+
+Node 22.18+ and pnpm 10.
+
+```bash
+pnpm install
+pnpm dev     # daemon on 127.0.0.1:4780 (TENZO_PORT to change), web on localhost:5173
+pnpm check   # typecheck + tests in every package; CI runs the same
+```
