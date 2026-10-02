@@ -1,6 +1,6 @@
 import { existsSync, realpathSync } from "node:fs";
 import { basename, resolve } from "node:path";
-import type { ProjectId } from "@tenzo/contracts";
+import type { EnvironmentId, ProjectId } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import { detectDefaultBranch, repoRoot } from "./git.ts";
 import { randomId } from "./ids.ts";
@@ -15,18 +15,28 @@ export interface Project {
   path: string;
   defaultBranch: string;
   createdAt: string;
+  environmentId: EnvironmentId;
 }
 
 /**
  * Registers the git repo containing `path`. Reads the repo and writes only to Tenzo's database:
- * no `.tenzo/` folder, no config, nothing in the working tree.
+ * no `.tenzo/` folder, no config, nothing in the working tree. A project removed earlier comes
+ * back as it was, with its name and its threads' history.
  */
 export async function addProject(store: Store, path: string): Promise<Project> {
   const root = await repoRoot(path);
   const existing = projectByPath(store, root);
-  if (existing) throw new TenzoError(`${root} is already a project, "${existing.name}"`);
-
+  if (existing && existing.removedAt === null) {
+    throw new TenzoError(`${root} is already a project, "${existing.project.name}"`);
+  }
   const defaultBranch = await detectDefaultBranch(root);
+  if (existing) {
+    store.db
+      .prepare("UPDATE projects SET removed_at = NULL, default_branch = ? WHERE id = ?")
+      .run(defaultBranch, existing.project.id);
+    return { ...existing.project, defaultBranch };
+  }
+
   const name = await firstFree(slugify(basename(root), "project"), (candidate) =>
     Boolean(store.db.prepare("SELECT 1 FROM projects WHERE name = ?").get(candidate)),
   );
@@ -36,22 +46,36 @@ export async function addProject(store: Store, path: string): Promise<Project> {
     path: root,
     defaultBranch,
     createdAt: new Date().toISOString(),
+    environmentId: store.environmentId,
   };
   store.db
     .prepare(
-      "INSERT INTO projects (id, name, path, default_branch, created_at) VALUES (?, ?, ?, ?, ?)",
+      `INSERT INTO projects (id, name, path, default_branch, created_at, environment_id)
+       VALUES (?, ?, ?, ?, ?, ?)`,
     )
-    .run(project.id, project.name, project.path, project.defaultBranch, project.createdAt);
+    .run(
+      project.id,
+      project.name,
+      project.path,
+      project.defaultBranch,
+      project.createdAt,
+      project.environmentId,
+    );
   return project;
 }
 
 export function listProjects(store: Store): Project[] {
-  return store.db.prepare("SELECT * FROM projects ORDER BY name").all().map(toProject);
+  return store.db
+    .prepare("SELECT * FROM projects WHERE removed_at IS NULL ORDER BY name")
+    .all()
+    .map(toProject);
 }
 
 /** Finds a project by name, id, or a path inside its repo. */
 export function findProject(store: Store, ref: string): Project {
-  const row = store.db.prepare("SELECT * FROM projects WHERE name = ? OR id = ?").get(ref, ref);
+  const row = store.db
+    .prepare("SELECT * FROM projects WHERE (name = ? OR id = ?) AND removed_at IS NULL")
+    .get(ref, ref);
   if (row) return toProject(row);
   const absolute = resolve(ref);
   if (existsSync(absolute)) {
@@ -65,8 +89,10 @@ export function findProject(store: Store, ref: string): Project {
 }
 
 /**
- * Forgets a project. Refuses while it has active threads, whose worktrees would be orphaned;
- * archive them first. The repo itself and any `tenzo/*` branches are left as they are.
+ * Forgets a project: it leaves the lists, while its archived threads with their events and items
+ * stay as history (adding the repo again brings it back). Refuses while it has active threads,
+ * whose worktrees would be orphaned; archive them first. The repo and its `tenzo/*` branches are
+ * left as they are.
  */
 export function removeProject(store: Store, ref: string): Project {
   const project = findProject(store, ref);
@@ -81,13 +107,23 @@ export function removeProject(store: Store, ref: string): Project {
       `"${project.name}" has ${active.length} active thread(s): ${active.join(", ")}. Archive them first (\`tenzo thread archive <id>\`).`,
     );
   }
-  store.db.prepare("DELETE FROM projects WHERE id = ?").run(project.id);
+  store.db
+    .prepare("UPDATE projects SET removed_at = ? WHERE id = ?")
+    .run(new Date().toISOString(), project.id);
   return project;
 }
 
-function projectByPath(store: Store, path: string): Project | undefined {
+/** The project at `path`, removed or not. */
+function projectByPath(
+  store: Store,
+  path: string,
+): { project: Project; removedAt: string | null } | undefined {
   const row = store.db.prepare("SELECT * FROM projects WHERE path = ?").get(path);
-  return row ? toProject(row) : undefined;
+  if (!row) return undefined;
+  return {
+    project: toProject(row),
+    removedAt: row.removed_at === null ? null : String(row.removed_at),
+  };
 }
 
 export function toProject(row: Record<string, unknown>): Project {
@@ -97,5 +133,6 @@ export function toProject(row: Record<string, unknown>): Project {
     path: String(row.path),
     defaultBranch: String(row.default_branch),
     createdAt: String(row.created_at),
+    environmentId: String(row.environment_id) as EnvironmentId,
   };
 }

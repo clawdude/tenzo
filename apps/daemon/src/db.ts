@@ -48,6 +48,70 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE threads ADD COLUMN session_id TEXT;
     `,
   },
+  {
+    name: "event store, items and prompt queue",
+    sql: `
+      -- Every record says which machine it belongs to. NULL only in rows from before this step;
+      -- openStore fills them in (the id lives in a file, not in SQL).
+      ALTER TABLE projects ADD COLUMN environment_id TEXT;
+      -- Removing a project hides it; its threads, events and items stay as history.
+      ALTER TABLE projects ADD COLUMN removed_at TEXT;
+
+      ALTER TABLE threads ADD COLUMN environment_id TEXT;
+      -- The model the thread was started with; its later sessions resume with it.
+      ALTER TABLE threads ADD COLUMN model TEXT;
+      -- Projection of the thread's events (see fold.ts): an agent session is running, the open
+      -- turn, and what the agent said last (an item's context).
+      ALTER TABLE threads ADD COLUMN live INTEGER NOT NULL DEFAULT 0;
+      ALTER TABLE threads ADD COLUMN turn_id TEXT;
+      ALTER TABLE threads ADD COLUMN context TEXT NOT NULL DEFAULT '';
+
+      -- The log: every normalized runtime event, in order. Never updated, never deleted.
+      CREATE TABLE events (
+        seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+        id             TEXT NOT NULL UNIQUE,
+        environment_id TEXT NOT NULL,
+        thread_id      TEXT NOT NULL REFERENCES threads(id),
+        type           TEXT NOT NULL,
+        turn_id        TEXT,
+        request_id     TEXT,
+        created_at     TEXT NOT NULL,
+        body           TEXT NOT NULL          -- the RuntimeEvent as JSON
+      ) STRICT;
+      CREATE INDEX events_by_thread ON events (thread_id, seq);
+      CREATE TRIGGER events_no_update BEFORE UPDATE ON events
+        BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+      CREATE TRIGGER events_no_delete BEFORE DELETE ON events
+        BEGIN SELECT RAISE(ABORT, 'events are append-only'); END;
+
+      -- What threads need from the person: folded from events, one per pending request.
+      CREATE TABLE items (
+        id             TEXT PRIMARY KEY,
+        environment_id TEXT NOT NULL,
+        thread_id      TEXT NOT NULL REFERENCES threads(id),
+        request_id     TEXT NOT NULL UNIQUE,
+        kind           TEXT NOT NULL,         -- 'question' | 'permission'
+        lane           TEXT NOT NULL,         -- 'quick' | 'review'
+        status         TEXT NOT NULL,         -- 'open' | 'resolved'
+        created_at     TEXT NOT NULL,
+        resolved_at    TEXT,
+        body           TEXT NOT NULL          -- the QueueItem as JSON
+      ) STRICT;
+      CREATE INDEX items_by_status ON items (status, created_at);
+      CREATE INDEX items_by_thread ON items (thread_id, status);
+
+      -- Prompts waiting for their thread's running turn to end, oldest first.
+      CREATE TABLE prompts (
+        seq            INTEGER PRIMARY KEY AUTOINCREMENT,
+        environment_id TEXT NOT NULL,
+        thread_id      TEXT NOT NULL REFERENCES threads(id),
+        text           TEXT NOT NULL,
+        reply          TEXT,                  -- JSON: a standing answer for the turn (engine.ts)
+        created_at     TEXT NOT NULL
+      ) STRICT;
+      CREATE INDEX prompts_by_thread ON prompts (thread_id, seq);
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

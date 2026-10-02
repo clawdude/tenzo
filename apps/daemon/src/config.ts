@@ -14,6 +14,11 @@ export interface DaemonConfig {
   home: string;
   /** The built web app the daemon serves. `TENZO_WEB_DIR`, default `apps/web/build`. */
   webDir: string;
+  /**
+   * Host names besides loopback that clients may use to reach the daemon, such as the Tailscale
+   * Serve name. `TENZO_ALLOWED_HOSTS`, comma-separated. See access.ts.
+   */
+  allowedHosts: string[];
 }
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
@@ -25,6 +30,7 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     // inside the user's repo.
     home: resolve(env.TENZO_HOME || join(homedir(), ".tenzo")),
     webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
+    allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
   };
 }
 
@@ -35,4 +41,19 @@ function readPort(raw: string | undefined): number {
     throw new Error(`TENZO_PORT must be an integer between 1 and 65535, got "${raw}"`);
   }
   return port;
+}
+
+function readHosts(raw: string | undefined): string[] {
+  const hosts = (raw ?? "")
+    .split(",")
+    .map((h) => h.trim().toLowerCase())
+    .filter((h) => h !== "");
+  for (const host of hosts) {
+    if (!/^[a-z0-9.-]+$/.test(host)) {
+      throw new Error(
+        `TENZO_ALLOWED_HOSTS takes host names separated by commas (no scheme or port), got "${host}"`,
+      );
+    }
+  }
+  return hosts;
 }

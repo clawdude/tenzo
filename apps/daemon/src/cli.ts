@@ -1,54 +1,58 @@
 #!/usr/bin/env node
-import { createInterface } from "node:readline";
-import type { AgentSession } from "./agent/agent.ts";
-import { createClaudeAdapter } from "./agent/claude.ts";
+import { setTimeout as sleep } from "node:timers/promises";
+import type { Command, CommandResult, QueueItem } from "@tenzo/contracts";
+import { answerFromWords } from "./answers.ts";
 import { VERSION } from "./app.ts";
-import { readConfig } from "./config.ts";
 import { parseArgs } from "./args.ts";
+import { callDaemon } from "./client.ts";
+import { readConfig } from "./config.ts";
 import { TenzoError } from "./errors.ts";
-import { addProject, findProject, listProjects, removeProject } from "./projects.ts";
+import { formatEvent, formatItem } from "./format.ts";
+import { addProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
 import { openStore, type Store } from "./store.ts";
-import { runTurn, titleFrom } from "./thread-run.ts";
-import {
-  archiveThread,
-  createThread,
-  getThread,
-  listThreads,
-  setThreadSession,
-  type Thread,
-} from "./threads.ts";
 
 const USAGE = `tenzo ${VERSION}
 
 Usage:
-  tenzo serve                            start the daemon on 127.0.0.1 (TENZO_PORT, default 4780)
+  tenzo serve                            start the daemon on 127.0.0.1 (TENZO_PORT, default 4780);
+                                         it runs the threads' agents
   tenzo project add <path>               register the git repo at <path>
   tenzo project list                     list projects
-  tenzo project remove <name|path>       forget a project (its repo is left alone)
-  tenzo thread new <project> <title…>    new worktree on branch tenzo/<slug> from the default branch
-  tenzo thread start <project> <prompt…> new thread, then one Claude Code turn in its worktree:
-                                         prints its events, asks you its questions and
-                                         permission requests (--model <name>, --json)
-  tenzo thread send <id> <prompt…>       one more turn in a thread, resuming its Claude session
-                                         (--model <name>, --json)
+  tenzo project remove <name|path>       forget a project (its repo and thread history are kept)
+
+  Thread commands talk to the running daemon:
+  tenzo thread start <project> <prompt…> new thread, and Claude Code starts on the prompt in its
+                                         worktree (--model <name>)
+  tenzo thread send <id> <prompt…>       another prompt; waits its turn if one is running
+  tenzo thread new <project> <title…>    new thread (worktree on tenzo/<slug>) without a prompt
+  tenzo thread log <id> [--follow]       the thread's events so far (--follow: and as they come)
   tenzo thread list [<project>] [--all]  list active threads (--all: archived too)
-  tenzo thread archive <id> [--force]    remove the thread's worktree, keep its branch
+  tenzo thread archive <id> [--force]    stop its agent, remove its worktree, keep its branch
                                          (--force: discard uncommitted work, or forget a
                                          thread whose repo was moved or deleted)
+  tenzo items                            what the threads need from you, oldest first
+  tenzo answer <item> <choice|text…>     answer an item: an option's number or label, or your
+                                         own words; allow/deny for a permission request
   tenzo --version                        print the version
 
-Arguments after a bare -- are never options: tenzo thread new app -- --weird title
+start, send and answer then show the thread's events until it needs you or goes idle
+(--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
+options: tenzo thread new app -- --weird title
 
 Environment:
-  TENZO_PORT     port to listen on
-  TENZO_HOME     state directory (default ~/.tenzo)
-  TENZO_WEB_DIR  built web app to serve (default apps/web/build)
+  TENZO_PORT           port to listen on, and where the CLI finds the daemon
+  TENZO_HOME           state directory (default ~/.tenzo)
+  TENZO_WEB_DIR        built web app to serve (default apps/web/build)
+  TENZO_ALLOWED_HOSTS  host names besides localhost that may reach the daemon, comma-separated
+                       (e.g. its Tailscale Serve name)
+  TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
 `;
 
+const config = () => readConfig(process.env);
+
 async function serve(): Promise<void> {
-  const config = readConfig(process.env);
-  const daemon = await startDaemon(config);
+  const daemon = await startDaemon(config());
   console.log(`tenzo ${VERSION} · ${daemon.environmentId} · listening on ${daemon.url}`);
 
   let stopping = false;
@@ -68,9 +72,13 @@ async function serve(): Promise<void> {
   process.on("SIGTERM", () => stop("SIGTERM"));
 }
 
+function call<C extends Command>(command: C): Promise<CommandResult<C["type"]>> {
+  return callDaemon(config(), command);
+}
+
 /** Opens the store for one command and closes it afterwards. */
 async function withStore<T>(fn: (store: Store) => Promise<T> | T): Promise<T> {
-  const store = openStore(readConfig(process.env).home);
+  const store = openStore(config().home);
   try {
     return await fn(store);
   } finally {
@@ -114,16 +122,22 @@ async function project([sub, ...rest]: string[]): Promise<void> {
 }
 
 async function thread([sub, ...rest]: string[]): Promise<void> {
-  const runs = sub === "start" || sub === "send";
-  const allowed =
-    sub === "list" || sub === "ls"
-      ? ["--all"]
-      : sub === "archive"
-        ? ["--force"]
-        : runs
-          ? ["--json"]
-          : [];
-  const { flags, options, positional } = parseArgs(rest, allowed, runs ? ["--model"] : []);
+  const flagsFor: Record<string, string[]> = {
+    start: ["--json", "--detach"],
+    send: ["--json", "--detach"],
+    log: ["--json", "--follow"],
+    list: ["--all"],
+    ls: ["--all"],
+    archive: ["--force"],
+  };
+  const { flags, options, positional } = parseArgs(
+    rest,
+    flagsFor[sub ?? ""] ?? [],
+    sub === "start" ? ["--model"] : [],
+  );
+  const json = flags.has("--json");
+  // With --json, stdout is events only.
+  const say = json ? console.error : console.log;
   switch (sub) {
     case "start": {
       const [projectRef, ...words] = positional;
@@ -131,60 +145,77 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
       if (!projectRef || prompt === "") {
         usageError("tenzo thread start needs a project and a prompt.");
       }
-      return withStore(async (store) => {
-        const t = await createThread(store, projectRef, titleFrom(prompt));
-        // With --json, stdout is events only.
-        const say = flags.has("--json") ? console.error : console.log;
-        say(`Created ${t.id} on ${t.branch}\n${t.worktreePath}`);
-        await runThreadTurn(store, t, prompt, options.get("--model"), flags.has("--json"));
+      const model = options.get("--model");
+      const { thread: t } = await call({
+        type: "thread.create",
+        project: projectRef,
+        prompt,
+        ...(model ? { model } : {}),
       });
+      say(`Created ${t.id} on ${t.branch}\n${t.worktreePath}`);
+      if (!flags.has("--detach")) await follow(t.id, 0, json);
+      return;
     }
     case "send": {
       const [id, ...words] = positional;
       const prompt = words.join(" ").trim();
       if (!id || prompt === "") usageError("tenzo thread send needs a thread id and a prompt.");
-      return withStore(async (store) => {
-        const t = getThread(store, id);
-        if (t.status === "archived") throw new TenzoError(`${t.id} is archived.`);
-        await runThreadTurn(store, t, prompt, options.get("--model"), flags.has("--json"));
-      });
+      const { thread: t } = await call({ type: "thread.send", threadId: id, prompt });
+      if (t.queued > 0 && t.working) say(`Queued: ${t.id} is busy; your prompt goes next.`);
+      if (!flags.has("--detach")) await follow(t.id, t.lastSeq, json);
+      return;
     }
     case "new": {
       const [projectRef, ...words] = positional;
       if (!projectRef || words.length === 0)
         usageError("tenzo thread new needs a project and a title.");
-      const t = await withStore((store) => createThread(store, projectRef, words.join(" ")));
+      const { thread: t } = await call({
+        type: "thread.create",
+        project: projectRef,
+        title: words.join(" "),
+      });
       console.log(`Created ${t.id} on ${t.branch}\n${t.worktreePath}`);
+      return;
+    }
+    case "log": {
+      const [id] = positional;
+      if (!id) usageError("tenzo thread log needs a thread id.");
+      if (flags.has("--follow")) await follow(id, 0, json, { forever: true });
+      else {
+        const { events } = await call({ type: "thread.events", threadId: id });
+        for (const e of events) console.log(json ? JSON.stringify(e) : formatEvent(e.event));
+      }
       return;
     }
     case "list":
     case "ls": {
       const [projectRef] = positional;
-      const rows = await withStore((store) => {
-        const names = new Map(listProjects(store).map((p) => [p.id, p.name]));
-        const projectId = projectRef ? findProject(store, projectRef).id : undefined;
-        const threads = listThreads(store, {
-          ...(projectId ? { projectId } : {}),
-          includeArchived: flags.has("--all"),
-        });
-        return threads.map((t: Thread) => [
-          t.id,
-          names.get(t.projectId) ?? "?",
-          t.status,
-          t.branch,
-          t.worktreePath,
-        ]);
+      const { threads } = await call({
+        type: "thread.list",
+        ...(projectRef ? { project: projectRef } : {}),
+        includeArchived: flags.has("--all"),
       });
-      if (rows.length === 0) console.log("No threads.");
-      else printTable(rows);
+      if (threads.length === 0) console.log("No threads.");
+      else
+        printTable(
+          threads.map((t) => [
+            t.id,
+            t.projectName,
+            t.status === "archived" ? "archived" : t.activity,
+            t.branch,
+            t.title,
+          ]),
+        );
       return;
     }
     case "archive": {
       const [id] = positional;
       if (!id) usageError("tenzo thread archive needs a thread id.");
-      const t = await withStore((store) =>
-        archiveThread(store, id, { force: flags.has("--force") }),
-      );
+      const { thread: t } = await call({
+        type: "thread.archive",
+        threadId: id,
+        force: flags.has("--force"),
+      });
       console.log(`Archived ${t.id}. Worktree removed; branch ${t.branch} kept.`);
       return;
     }
@@ -193,84 +224,79 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
   }
 }
 
-async function runThreadTurn(
-  store: Store,
-  thread: Thread,
-  prompt: string,
-  model: string | undefined,
-  json: boolean,
-): Promise<void> {
-  const keyboard = stdinLines(json ? process.stderr : process.stdout);
-  let session: AgentSession | undefined;
-  let interrupts = 0;
-  // Ctrl-C once interrupts the turn, twice stops the session, a third time stops waiting.
-  const onSigint = () => {
-    interrupts++;
-    if (interrupts === 1) void session?.interrupt();
-    else if (interrupts === 2) void session?.stop();
-    else process.exit(130);
-  };
-  process.on("SIGINT", onSigint);
-  try {
-    const { state } = await runTurn({
-      adapter: createClaudeAdapter(),
-      thread,
-      prompt,
-      ...(model ? { model } : {}),
-      json,
-      onStarted: (started) => {
-        session = started;
-      },
-      onSession: (sessionId) => {
-        if (sessionId !== thread.sessionId) setThreadSession(store, thread.id, "claude", sessionId);
-      },
-      ask: keyboard.ask,
-      print: (line) => console.log(line),
-    });
-    if (state !== "completed" && state !== "interrupted") process.exitCode = 1;
-  } finally {
-    process.off("SIGINT", onSigint);
-    keyboard.close();
+async function items(args: string[]): Promise<void> {
+  const { flags } = parseArgs(args, ["--json"]);
+  const snapshot = await call({ type: "snapshot" });
+  if (flags.has("--json")) {
+    for (const item of snapshot.items) console.log(JSON.stringify(item));
+    return;
   }
+  if (snapshot.items.length === 0) {
+    console.log("Nothing needs you.");
+    return;
+  }
+  const titles = new Map(snapshot.threads.map((t) => [t.id, t.title]));
+  console.log(snapshot.items.map((i) => formatItem(i, titles.get(i.threadId))).join("\n\n"));
 }
 
-/** Lines typed on stdin, read only once asked for: a run that asks nothing never holds stdin. */
-function stdinLines(out: NodeJS.WritableStream) {
-  let reader: ReturnType<typeof createInterface> | undefined;
-  const lines: string[] = [];
-  const waiting: ((line: string | null) => void)[] = [];
-  let ended = false;
-  const open = () => {
-    if (reader) return;
-    reader = createInterface({ input: process.stdin, terminal: false });
-    reader.on("line", (line) => {
-      const next = waiting.shift();
-      if (next) next(line);
-      else lines.push(line);
-    });
-    reader.on("close", () => {
-      ended = true;
-      for (const next of waiting.splice(0)) next(null);
-    });
-  };
-  return {
-    async ask(prompt: string): Promise<string | null> {
-      out.write(prompt);
-      open();
-      const line =
-        lines.length > 0
-          ? (lines.shift() as string)
-          : ended
-            ? null
-            : await new Promise<string | null>((resolve) => waiting.push(resolve));
-      // A terminal echoes what was typed; piped input doesn't, so show it to keep the log readable.
-      if (!process.stdin.isTTY) out.write(line === null ? "(end of input)\n" : `${line}\n`);
-      return line;
-    },
-    close() {
-      reader?.close();
-    },
-  };
+async function answer(args: string[]): Promise<void> {
+  const { flags, positional } = parseArgs(args, ["--json", "--detach"]);
+  const [itemId, ...words] = positional;
+  if (!itemId || words.length === 0) usageError("tenzo answer needs an item and an answer.");
+  const json = flags.has("--json");
+  const say = json ? console.error : console.log;
+  const snapshot = await call({ type: "snapshot" });
+  const item = snapshot.items.find((i) => i.id === itemId);
+  if (!item) {
+    throw new TenzoError(`No open item "${itemId}". \`tenzo items\` lists the open ones.`);
+  }
+  const result = await call({
+    type: "item.answer",
+    itemId: item.id,
+    answer: answerFromWords(item, words),
+  });
+  say(
+    result.delivery === "live"
+      ? `Answered ${item.id}.`
+      : `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`,
+  );
+  if (!flags.has("--detach")) await follow(item.threadId, result.thread.lastSeq, json);
+}
+
+/**
+ * Prints a thread's events from `after` as they arrive, until it needs you (then shows what it
+ * asks) or has nothing left to do. With `forever`, until Ctrl-C.
+ */
+async function follow(
+  threadId: string,
+  after: number,
+  json: boolean,
+  { forever = false } = {},
+): Promise<void> {
+  let seq = after;
+  let asked = false;
+  for (;;) {
+    const { thread, events } = await call({ type: "thread.events", threadId, after: seq });
+    for (const { seq: s, event, environmentId } of events) {
+      console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
+      seq = s;
+      if (event.type === "user-input.requested" || event.type === "request.opened") asked = true;
+      if (event.type === "turn.completed" && event.payload.state === "failed") process.exitCode = 1;
+    }
+    if (!forever) {
+      if (asked && thread.activity === "needs-you") {
+        const { items: open } = await call({ type: "snapshot" });
+        const mine: QueueItem[] = open.filter((i) => i.threadId === thread.id);
+        const say = json ? console.error : console.log;
+        say(`\n${thread.title} needs you:\n`);
+        say(mine.map((i) => formatItem(i)).join("\n\n"));
+        say(`\nAnswer with \`tenzo answer ${mine[0]?.id ?? "<item>"} <choice|text>\`.`);
+        return;
+      }
+      if (!thread.working) return;
+    }
+    await sleep(250);
+  }
 }
 
 function printTable(rows: string[][]): void {
@@ -290,6 +316,10 @@ async function main([command, ...args]: string[]): Promise<void> {
       return project(args);
     case "thread":
       return thread(args);
+    case "items":
+      return items(args);
+    case "answer":
+      return answer(args);
     case "--version":
     case "-v":
       console.log(VERSION);

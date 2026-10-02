@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentKind, ThreadId } from "@tenzo/contracts";
+import type { AgentKind, EnvironmentId, ThreadId } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import {
   addWorktree,
@@ -15,9 +15,10 @@ import { findProject, type Project, toProject } from "./projects.ts";
 import { firstFree, slugify } from "./slug.ts";
 import { type Store, worktreePath } from "./store.ts";
 
-/** Threads proper (agent, lifecycle, items) arrive with the event store (#6); this is the git side. */
+/** A thread's record: its workspace and agent session. What it is doing lives in events (fold.ts). */
 export interface Thread {
   id: ThreadId;
+  environmentId: EnvironmentId;
   projectId: Project["id"];
   title: string;
   slug: string;
@@ -32,6 +33,8 @@ export interface Thread {
   agent: AgentKind | null;
   /** The agent's own session id: what resumes the conversation after a restart. */
   sessionId: string | null;
+  /** The model the thread runs, when one was picked; else the agent's default. */
+  model: string | null;
 }
 
 const BRANCH_PREFIX = "tenzo/";
@@ -45,6 +48,7 @@ export async function createThread(
   store: Store,
   projectRef: string,
   title: string,
+  options: { model?: string } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
   const base = await resolveBase(project.path, project.defaultBranch);
@@ -62,6 +66,7 @@ export async function createThread(
   const now = new Date().toISOString();
   const thread: Thread = {
     id,
+    environmentId: store.environmentId,
     projectId: project.id,
     title: title.trim(),
     slug,
@@ -73,6 +78,7 @@ export async function createThread(
     archivedAt: null,
     agent: null,
     sessionId: null,
+    model: options.model ?? null,
   };
 
   await addWorktree(project.path, thread.worktreePath, thread.branch, base);
@@ -80,8 +86,9 @@ export async function createThread(
     store.db
       .prepare(
         `INSERT INTO threads
-           (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at,
+            environment_id, model)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -93,6 +100,8 @@ export async function createThread(
         thread.status,
         now,
         now,
+        thread.environmentId,
+        thread.model,
       );
   } catch (error) {
     // Nobody has seen this worktree or branch yet: undo both rather than leave strays.
@@ -175,7 +184,8 @@ export function listThreads(
   return rows.map(toThread);
 }
 
-function projectOf(store: Store, thread: Thread): Project {
+/** The thread's project, even one that has been removed since. */
+export function projectOf(store: Store, thread: Thread): Project {
   const row = store.db.prepare("SELECT * FROM projects WHERE id = ?").get(thread.projectId);
   if (!row) throw new Error(`Thread ${thread.id} points at missing project ${thread.projectId}`);
   return toProject(row);
@@ -214,6 +224,7 @@ async function worktreeHasChanges(path: string): Promise<boolean> {
 function toThread(row: Record<string, unknown>): Thread {
   return {
     id: String(row.id) as ThreadId,
+    environmentId: String(row.environment_id) as EnvironmentId,
     projectId: String(row.project_id) as Project["id"],
     title: String(row.title),
     slug: String(row.slug),
@@ -226,5 +237,6 @@ function toThread(row: Record<string, unknown>): Thread {
     agent: row.agent === "claude" || row.agent === "codex" ? row.agent : null,
     sessionId:
       row.session_id === null || row.session_id === undefined ? null : String(row.session_id),
+    model: row.model === null || row.model === undefined ? null : String(row.model),
   };
 }

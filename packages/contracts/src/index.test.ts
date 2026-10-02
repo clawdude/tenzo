@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ClientFrame, EnvironmentId, ProjectId, ServerFrame, ThreadId } from "./index.ts";
+import { ClientFrame, Command, EnvironmentId, ProjectId, ServerFrame, ThreadId } from "./index.ts";
 
 describe("contracts", () => {
   it("accepts a well-formed environment id and rejects others", () => {
@@ -24,6 +24,26 @@ describe("contracts", () => {
     });
     expect(hello.type).toBe("hello");
     expect(ServerFrame.safeParse({ type: "nope" }).success).toBe(false);
+  });
+
+  it("parses commands, and an answer's shape by its kind", () => {
+    expect(Command.parse({ type: "snapshot" }).type).toBe("snapshot");
+    const answer = {
+      type: "item.answer",
+      itemId: "itm_abcdefghij0123456789",
+      answer: { kind: "permission", decision: "allow" },
+    };
+    expect(Command.safeParse(answer).success).toBe(true);
+    expect(
+      Command.safeParse({ ...answer, answer: { kind: "permission", decision: "maybe" } }).success,
+    ).toBe(false);
+    expect(
+      Command.safeParse({ ...answer, answer: { kind: "question", answers: { q: "a" } } }).success,
+    ).toBe(true);
+    expect(Command.safeParse({ type: "thread.send", threadId: "thr_x", prompt: "" }).success).toBe(
+      false,
+    );
+    expect(Command.safeParse({ type: "thread.delete" }).success).toBe(false);
   });
 
   it("parses client frames by type", () => {
