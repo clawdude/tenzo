@@ -21,8 +21,10 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
   return {
     host: "127.0.0.1",
     port: readPort(env.TENZO_PORT),
-    home: env.TENZO_HOME || join(homedir(), ".tenzo"),
-    webDir: env.TENZO_WEB_DIR || DEFAULT_WEB_DIR,
+    // Absolute, always: git runs with the repo as cwd, so a relative home would put worktrees
+    // inside the user's repo.
+    home: resolve(env.TENZO_HOME || join(homedir(), ".tenzo")),
+    webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
   };
 }
 

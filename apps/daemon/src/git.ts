@@ -1,13 +1,13 @@
 import { execFile } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { isAbsolute, resolve } from "node:path";
 import { TenzoError } from "./errors.ts";
 
 /**
  * Variables that point git at a different repository than `cwd`. Git hooks export them, so a
  * tenzo run from inside a hook would otherwise operate on the hook's repo.
  */
-const REDIRECTING_ENV = [
+export const REDIRECTING_ENV = [
   "GIT_DIR",
   "GIT_WORK_TREE",
   "GIT_INDEX_FILE",
@@ -123,8 +123,11 @@ export async function addWorktree(
   branch: string,
   base: string,
 ): Promise<void> {
+  // Git runs in the repo, so a relative path would land the worktree inside the user's checkout.
+  if (!isAbsolute(path)) throw new Error(`Worktree path must be absolute, got "${path}"`);
   // --no-track: a thread's branch must not push to the default branch's upstream by accident.
-  await git(root, ["worktree", "add", "--no-track", "-b", branch, path, base]);
+  // `--`: nothing after it can be read as an option.
+  await git(root, ["worktree", "add", "--no-track", "-b", branch, "--", path, base]);
 }
 
 /** True when the worktree at `path` has uncommitted or untracked changes. */
@@ -141,7 +144,7 @@ export async function removeWorktree(root: string, path: string, force: boolean)
     await git(root, ["worktree", "prune"]);
     return;
   }
-  await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), path]);
+  await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), "--", path]);
 }
 
 export async function deleteBranch(root: string, branch: string): Promise<void> {

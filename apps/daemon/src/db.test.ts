@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, describe, expect, it } from "vitest";
 import { MIGRATIONS, type Migration, openDatabase, schemaVersion } from "./db.ts";
 import { removeTempDirs, tempDir } from "./testing.ts";
@@ -50,6 +51,71 @@ describe("openDatabase", () => {
     const db = openDatabase(path, []);
     expect(schemaVersion(db)).toBe(0);
     expect(tables(db)).toEqual([]);
+    db.close();
+  });
+
+  it("doesn't take the write lock when the schema is already current", () => {
+    const path = join(tempDir(), "tenzo.db");
+    openDatabase(path).close();
+    const writer = new DatabaseSync(path);
+    writer.exec("PRAGMA busy_timeout = 0");
+    writer.exec("BEGIN IMMEDIATE"); // another process mid-write, e.g. the daemon
+    try {
+      const started = Date.now();
+      const db = openDatabase(path); // would wait out busy_timeout (5s) if it wanted the lock
+      expect(Date.now() - started).toBeLessThan(1000);
+      db.close();
+    } finally {
+      writer.exec("ROLLBACK");
+      writer.close();
+    }
+  });
+
+  it("rebuilds a parent table without cascading into its children", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const v1: Migration[] = [
+      {
+        name: "parent and child",
+        sql: `CREATE TABLE parent (id TEXT PRIMARY KEY) STRICT;
+              CREATE TABLE child (id TEXT PRIMARY KEY,
+                parent_id TEXT NOT NULL REFERENCES parent(id) ON DELETE CASCADE) STRICT;`,
+      },
+    ];
+    const first = openDatabase(path, v1);
+    first.exec("INSERT INTO parent VALUES ('p'); INSERT INTO child VALUES ('c', 'p');");
+    first.close();
+
+    // SQLite's 12-step rebuild: with foreign keys on, DROP TABLE parent would delete the child.
+    const rebuild: Migration = {
+      name: "add a column the hard way",
+      sql: `CREATE TABLE parent_new (id TEXT PRIMARY KEY, label TEXT) STRICT;
+            INSERT INTO parent_new (id) SELECT id FROM parent;
+            DROP TABLE parent;
+            ALTER TABLE parent_new RENAME TO parent;`,
+    };
+    const db = openDatabase(path, [...v1, rebuild]);
+    expect(db.prepare("SELECT id, parent_id FROM child").all()).toEqual([
+      { id: "c", parent_id: "p" },
+    ]);
+    expect(db.prepare("PRAGMA foreign_keys").get()?.foreign_keys).toBe(1);
+    db.close();
+  });
+
+  it("rolls back a migration that leaves broken foreign keys", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const v1: Migration[] = [
+      {
+        name: "parent and child",
+        sql: `CREATE TABLE parent (id TEXT PRIMARY KEY) STRICT;
+              CREATE TABLE child (id TEXT PRIMARY KEY, parent_id TEXT REFERENCES parent(id)) STRICT;`,
+      },
+    ];
+    openDatabase(path, v1).close();
+    const orphaning: Migration = { name: "orphan", sql: "INSERT INTO child VALUES ('c', 'nope')" };
+    expect(() => openDatabase(path, [...v1, orphaning])).toThrow(/broken foreign key/);
+    const db = openDatabase(path, v1);
+    expect(schemaVersion(db)).toBe(1);
+    expect(db.prepare("SELECT * FROM child").all()).toEqual([]);
     db.close();
   });
 

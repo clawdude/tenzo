@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { REDIRECTING_ENV } from "./git.ts";
 
 /**
  * Test-only helpers: throwaway directories and real git repos in them. Git runs with no global
@@ -12,8 +13,7 @@ const emptyConfig = join(sandbox, "empty.gitconfig");
 writeFileSync(emptyConfig, "");
 process.env.GIT_CONFIG_GLOBAL = emptyConfig;
 process.env.GIT_CONFIG_NOSYSTEM = "1";
-for (const key of ["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"])
-  delete process.env[key];
+for (const key of REDIRECTING_ENV) delete process.env[key];
 
 const IDENTITY = {
   GIT_AUTHOR_NAME: "Tenzo Test",

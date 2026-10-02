@@ -1,5 +1,5 @@
 import type { DatabaseSync } from "node:sqlite";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { openDatabase } from "./db.ts";
 import { ensureHome } from "./home.ts";
 
@@ -11,7 +11,9 @@ export interface Store {
   close(): void;
 }
 
-export function openStore(home: string): Store {
+export function openStore(homeDir: string): Store {
+  // Absolute: worktree paths are built from it and handed to git running in the repo.
+  const home = resolve(homeDir);
   ensureHome(home);
   const db = openDatabase(join(home, "tenzo.db"));
   return { db, home, close: () => db.close() };

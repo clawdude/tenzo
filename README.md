@@ -50,6 +50,7 @@ pnpm tenzo project list
 pnpm tenzo thread new app "Fix the login bug"  # worktree on branch tenzo/fix-the-login-bug
 pnpm tenzo thread list [app] [--all]
 pnpm tenzo thread archive <thread-id>          # refuses if the worktree has uncommitted changes; --force discards them
+                                               # (--force also lets go of a thread whose repo was moved or deleted)
 pnpm tenzo project remove app                  # refuses while the project has active threads; the repo is left alone
 ```
 
