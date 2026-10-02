@@ -2,6 +2,7 @@ import { z } from "zod";
 import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
   AgentKind,
+  Fingerprint,
   RequestId,
   RuntimeEvent,
   ToolKind,
@@ -34,7 +35,7 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("denied"), message: z.string().optional() }),
   /** The agent withdrew it: the turn was interrupted. */
   z.object({ kind: z.literal("cancelled") }),
-  /** Its thread was archived. */
+  /** Its thread was archived (`thread.archived`). */
   z.object({ kind: z.literal("dismissed") }),
 ]);
 export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
@@ -68,6 +69,8 @@ export const QueueItem = z.object({
       input: z.unknown(),
     })
     .optional(),
+  /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
+  fingerprint: Fingerprint.optional(),
   createdAt: z.iso.datetime(),
   status: z.enum(["open", "resolved"]),
   /**

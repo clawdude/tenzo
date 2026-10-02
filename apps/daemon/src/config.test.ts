@@ -38,6 +38,16 @@ describe("readConfig", () => {
     expect(() => readConfig({ TENZO_ALLOWED_HOSTS: "mac.ts.net:443" })).toThrow(/no scheme or port/);
   });
 
+  it("takes dev server origins from TENZO_DEV_ORIGIN, exact origins only", () => {
+    expect(readConfig({}).devOrigins).toEqual([]);
+    expect(
+      readConfig({ TENZO_DEV_ORIGIN: "http://localhost:5173, http://127.0.0.1:5173/" }).devOrigins,
+    ).toEqual(["http://localhost:5173", "http://127.0.0.1:5173"]);
+    for (const bad of ["localhost:5173", "http://localhost:5173/app", "file:///x", "*"]) {
+      expect(() => readConfig({ TENZO_DEV_ORIGIN: bad }), bad).toThrow(/TENZO_DEV_ORIGIN/);
+    }
+  });
+
   it("makes a relative TENZO_HOME absolute, so worktrees can't land inside a repo", () => {
     const config = readConfig({ TENZO_HOME: "relhome", TENZO_WEB_DIR: "web" });
     expect(config.home).toBe(join(process.cwd(), "relhome"));

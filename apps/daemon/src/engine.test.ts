@@ -1,3 +1,4 @@
+import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { QueueItem, StoredEvent, ThreadView, type UserInputQuestion } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -335,6 +336,54 @@ describe("Engine: when the agent that asked is gone", () => {
   });
 });
 
+describe("Engine: standing answers match the full request, never the shown copy", () => {
+  const long = "x".repeat(2100);
+  const approved = { command: `${long} && echo ok!` };
+  const other = { command: `${long} && rm -rf ~` };
+
+  async function allowDetached(d: ReturnType<typeof daemon>, reask: Record<string, unknown>) {
+    d.adapter.onStart = (s) => {
+      s.onPrompt = () => s.askPermission("Bash", approved);
+    };
+    await d.engine.createThread({ project: "app", prompt: "build" });
+    await settle();
+    d.adapter.last.crash();
+    await settle();
+    d.adapter.onStart = (s) => {
+      s.onPrompt = () => s.askPermission("Bash", reask);
+    };
+    const [item] = d.engine.snapshot().items;
+    await d.engine.answer(item?.id ?? "", { kind: "permission", decision: "allow" });
+    await settle();
+    return d.adapter.last;
+  }
+
+  it("asks again for a request that differs only beyond what events keep", async () => {
+    const d = daemon();
+    const resumed = await allowDetached(d, other);
+    expect(resumed.answered).toEqual([]); // not allowed for you
+    const [open] = d.engine.snapshot().items;
+    expect(open).toMatchObject({ kind: "permission", detached: false, status: "open" });
+    // Shown alike, asked differently.
+    const first = d.engine.events(open?.threadId ?? "").events.find(
+      (e) => e.event.type === "request.opened",
+    );
+    expect(first?.event.type === "request.opened" && first.event.payload.input).toEqual(
+      open?.permission?.input,
+    );
+  });
+
+  it("answers the identical request quietly: subscribers never see it open", async () => {
+    const d = daemon();
+    const resumed = await allowDetached(d, approved);
+    expect(resumed.answered).toEqual([{ requestId: expect.any(String), decision: "allow" }]);
+    const quietId = `itm_${resumed.answered[0]?.requestId.slice(4)}`;
+    const told = d.changes.filter((c) => c.type === "item" && c.change.item.id === quietId);
+    expect(told).toEqual([]);
+    expect(d.engine.snapshot().items).toEqual([]);
+  });
+});
+
 describe("Engine: restarts", () => {
   it("open items survive a kill; the next daemon detaches them and an answer resumes the agent", async () => {
     const first = daemon();
@@ -394,5 +443,17 @@ describe("Engine: archive", () => {
     const dismissed = d.changes.filter((c) => c.type === "item" && c.change.type === "resolved");
     expect(dismissed.at(-1)).toMatchObject({ change: { item: { resolution: { kind: "dismissed" } } } });
     expect(() => d.engine.send(thread.id, "x")).toThrow(/archived/);
+    const types = d.engine.events(thread.id).events.map((e) => e.event.type);
+    expect(types.at(-1)).toBe("thread.archived");
+  });
+
+  it("a refused archive leaves the running turn alone", async () => {
+    const d = daemon();
+    const thread = await threadAsking(d);
+    writeFileSync(join(thread.worktreePath, "work.txt"), "unsaved");
+    await expect(d.engine.archive(thread.id)).rejects.toThrow(/uncommitted changes/);
+    expect(d.adapter.last.stopped).toBe(false);
+    expect(d.engine.snapshot().items).toMatchObject([{ detached: false }]);
+    expect(d.engine.view(thread.id).status).toBe("active");
   });
 });

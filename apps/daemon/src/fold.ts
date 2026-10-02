@@ -132,6 +132,20 @@ export function foldEvent(
             : { kind: "cancelled" },
       );
     }
+    case "thread.archived": {
+      const changes = state.open.map(
+        (open): ItemChange => ({
+          type: "resolved",
+          item: {
+            ...open,
+            status: "resolved",
+            resolvedAt: event.createdAt,
+            resolution: { kind: "dismissed" },
+          },
+        }),
+      );
+      return { state: { runtime: { ...runtime, live: false, turnId: null }, open: [] }, changes };
+    }
     case "session.configured":
     case "item.started":
     case "runtime.error":
@@ -200,6 +214,7 @@ function openItem(
     requestId: event.requestId,
     ...(event.turnId ? { turnId: event.turnId } : {}),
     context,
+    ...(event.payload.fingerprint ? { fingerprint: event.payload.fingerprint } : {}),
     createdAt: event.createdAt,
     status: "open" as const,
     detached: false,

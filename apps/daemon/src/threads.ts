@@ -129,19 +129,10 @@ export async function archiveThread(
   const project = projectOf(store, thread);
   const force = options.force ?? false;
 
+  await checkArchivable(store, thread, { force });
   if (!existsSync(join(project.path, ".git"))) {
-    if (!force) {
-      throw new TenzoError(
-        `The repo ${project.path} is gone (moved or deleted). Archive with --force to forget this thread and delete ${thread.worktreePath}.`,
-      );
-    }
     deleteWorktreeFolder(store, project, thread);
   } else {
-    if (!force && (await worktreeHasChanges(thread.worktreePath))) {
-      throw new TenzoError(
-        `${thread.worktreePath} has uncommitted changes. Commit them to ${thread.branch}, or archive with --force to discard them.`,
-      );
-    }
     await removeWorktree(project.path, thread.worktreePath, force);
   }
 
@@ -150,6 +141,29 @@ export async function archiveThread(
     .prepare("UPDATE threads SET status = 'archived', archived_at = ?, updated_at = ? WHERE id = ?")
     .run(now, now, thread.id);
   return { ...thread, status: "archived", archivedAt: now, updatedAt: now };
+}
+
+/**
+ * Throws the TenzoError `archiveThread` would refuse with (uncommitted work, a gone repo) without
+ * touching anything, so a caller can ask before stopping the thread's agent.
+ */
+export async function checkArchivable(
+  store: Store,
+  thread: Thread,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  if (options.force || thread.status === "archived") return;
+  const project = projectOf(store, thread);
+  if (!existsSync(join(project.path, ".git"))) {
+    throw new TenzoError(
+      `The repo ${project.path} is gone (moved or deleted). Archive with --force to forget this thread and delete ${thread.worktreePath}.`,
+    );
+  }
+  if (await worktreeHasChanges(thread.worktreePath)) {
+    throw new TenzoError(
+      `${thread.worktreePath} has uncommitted changes. Commit them to ${thread.branch}, or archive with --force to discard them.`,
+    );
+  }
 }
 
 /** Records the agent session a thread runs in, so a later run can resume it. */

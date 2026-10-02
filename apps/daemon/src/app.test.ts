@@ -99,15 +99,25 @@ describe("who may call", () => {
   it("refuses API calls from another site's page", async () => {
     expect((await post({ Origin: "https://evil.example" })).status).toBe(403);
     expect((await post({ Origin: "null" })).status).toBe(403);
+    expect((await post({ Origin: "http://localhost:3000" })).status).toBe(403);
     // Ours (or no Origin at all: the CLI) get through to the API.
-    expect((await post({ Origin: "http://127.0.0.1:4780" })).status).toBe(503);
+    expect((await post({ Host: "127.0.0.1:4780", Origin: "http://127.0.0.1:4780" })).status).toBe(503);
     expect((await post({})).status).toBe(503);
+    const withDev = createApp({ environmentId, webDir, devOrigins: ["http://localhost:5173"] });
+    const res = await withDev.request("/api/commands", {
+      method: "POST",
+      headers: { "content-type": "application/json", Origin: "http://localhost:5173" },
+      body: '{"type":"snapshot"}',
+    });
+    expect(res.status).toBe(503);
   });
 
   it("takes commands as JSON only", async () => {
     const res = await post({ "content-type": "text/plain" });
     expect(res.status).toBe(415);
     expect(await res.json()).toEqual({ ok: false, error: "Send the command as application/json." });
+    expect((await post({ "content-type": "application/jsonx" })).status).toBe(415);
+    expect((await post({ "content-type": "application/json; charset=utf-8" })).status).toBe(503);
   });
 
   it("answers unknown API paths with JSON, not the web app", async () => {

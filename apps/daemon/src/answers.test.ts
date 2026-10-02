@@ -1,11 +1,12 @@
-import type { QueueItem, UserInputQuestion } from "@tenzo/contracts";
+import type { QueueItem, RuntimeEventOf, UserInputQuestion } from "@tenzo/contracts";
 import { describe, expect, it } from "vitest";
+import { boundedInput } from "./agent/claude-events.ts";
+import { fingerprintOf } from "./agent/fingerprint.ts";
 import {
   answerFromWords,
   checkAnswer,
   deliveryPrompt,
-  itemFingerprint,
-  requestFingerprint,
+  matchReply,
   standingReply,
 } from "./answers.ts";
 
@@ -62,6 +63,7 @@ const permission: QueueItem = {
     detail: "Bash: rm -rf build",
     input: { command: "rm -rf build" },
   },
+  fingerprint: fingerprintOf("Bash", { command: "rm -rf build" }),
 };
 
 describe("answerFromWords", () => {
@@ -165,26 +167,69 @@ describe("delivering an answer to a resumed agent", () => {
     ).toMatch(/I don't allow it: use git clean\nDon't do it/);
   });
 
-  it("recognizes the same ask when the resumed agent repeats it", () => {
+  it("recognizes the same ask only by its fingerprint, and only of the same kind", () => {
     const reply = standingReply(permission, { kind: "permission", decision: "allow" });
-    const again = {
-      eventId: "evt_abcdefghij0123456789",
-      threadId: base.threadId,
-      agent: "claude",
-      createdAt: base.createdAt,
-      type: "request.opened",
-      requestId: "req_zzzzzzzzzzzzzzzzzzzz",
-      payload: {
-        toolKind: "command",
-        toolName: "Bash",
-        detail: "Bash: rm -rf build",
-        input: { command: "rm -rf build" },
-      },
-    } as const;
-    expect(requestFingerprint(again)).toBe(reply.fingerprint);
-    expect(
-      requestFingerprint({ ...again, payload: { ...again.payload, input: { command: "rm -rf /" } } }),
-    ).not.toBe(reply.fingerprint);
-    expect(itemFingerprint(question())).not.toBe(itemFingerprint(permission));
+    expect(reply).toMatchObject({ fingerprint: permission.fingerprint, decision: "allow" });
+    const again = (fingerprint?: string) =>
+      ({
+        eventId: "evt_abcdefghij0123456789",
+        threadId: base.threadId,
+        agent: "claude",
+        createdAt: base.createdAt,
+        type: "request.opened",
+        requestId: "req_zzzzzzzzzzzzzzzzzzzz",
+        payload: {
+          toolKind: "command",
+          toolName: "Bash",
+          detail: "Bash: rm -rf build",
+          input: { command: "rm -rf build" }, // the same shown input every time
+          ...(fingerprint ? { fingerprint } : {}),
+        },
+      }) as const;
+    const replies = reply ? [reply] : [];
+    expect(matchReply(replies, again(permission.fingerprint))).toBe(0);
+    expect(matchReply(replies, again(fingerprintOf("Bash", { command: "rm -rf /" })))).toBe(-1);
+    expect(matchReply(replies, again())).toBe(-1); // no fingerprint: never answered for you
+    const { payload: _, ...head } = again(permission.fingerprint);
+    const asked: RuntimeEventOf<"user-input.requested"> = {
+      ...head,
+      type: "user-input.requested",
+      payload: { questions: [], ...(permission.fingerprint ? { fingerprint: permission.fingerprint } : {}) },
+    };
+    expect(matchReply(replies, asked)).toBe(-1);
+  });
+
+  it("gives no standing reply for an item without a fingerprint", () => {
+    const { fingerprint: _, ...bare } = permission;
+    expect(standingReply(bare, { kind: "permission", decision: "allow" })).toBeNull();
+  });
+});
+
+describe("fingerprints", () => {
+  it("differ for inputs that differ only beyond everything an event keeps", () => {
+    const long = "x".repeat(2100);
+    const safe = { command: `${long} && echo ok!`, description: "build" };
+    const evil = { command: `${long} && rm -rf ~`, description: "build" };
+    // Equal as shown (cut to 2000 characters, the same length)...
+    expect(boundedInput(safe)).toEqual(boundedInput(evil));
+    // ...but not as asked.
+    expect(fingerprintOf("Bash", safe)).not.toBe(fingerprintOf("Bash", evil));
+
+    const write = (tail: string) => ({ file_path: "/home/me/.zshrc", content: `${"#".repeat(300)}${tail}` });
+    expect(boundedInput(write("safe"))).toEqual(boundedInput(write("evil")));
+    expect(fingerprintOf("Write", write("safe"))).not.toBe(fingerprintOf("Write", write("evil")));
+
+    const keys = (last: string) =>
+      Object.fromEntries([...Array.from({ length: 20 }, (_, i) => [`k${i}`, 1]), ["z", last]]);
+    expect(boundedInput(keys("a"))).toEqual(boundedInput(keys("b")));
+    expect(fingerprintOf("T", keys("a"))).not.toBe(fingerprintOf("T", keys("b")));
+  });
+
+  it("ignore key order and include the tool name", () => {
+    expect(fingerprintOf("T", { a: 1, b: { c: 2, d: 3 } })).toBe(
+      fingerprintOf("T", { b: { d: 3, c: 2 }, a: 1 }),
+    );
+    expect(fingerprintOf("Read", { x: 1 })).not.toBe(fingerprintOf("Write", { x: 1 }));
+    expect(fingerprintOf("T", {})).toMatch(/^sha256:[0-9a-f]{64}$/);
   });
 });
