@@ -1,19 +1,11 @@
-import { randomBytes } from "node:crypto";
-import { linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { linkSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EnvironmentId } from "@tenzo/contracts";
-
-const ALPHABET = "abcdefghijklmnopqrstuvwxyz0123456789";
+import { ensureHome } from "./home.ts";
+import { randomId } from "./ids.ts";
 
 export function generateEnvironmentId(): EnvironmentId {
-  // 252 is the largest multiple of 36 below 256: rejecting bytes above it keeps the draw uniform.
-  let id = "env_";
-  while (id.length < 24) {
-    for (const byte of randomBytes(32)) {
-      if (byte < 252 && id.length < 24) id += ALPHABET[byte % 36];
-    }
-  }
-  return EnvironmentId.parse(id);
+  return EnvironmentId.parse(randomId("env"));
 }
 
 /**
@@ -25,12 +17,12 @@ export function loadEnvironmentId(home: string): EnvironmentId {
   const existing = readId(path);
   if (existing !== null) return existing;
 
-  mkdirSync(home, { recursive: true });
+  ensureHome(home);
   // Write a temp file, then hard-link it into place: the link is atomic and fails if another
   // daemon got there first, so nobody ever reads a half-written id or overwrites a winner.
   const temp = join(home, `.environment-id-${process.pid}-${Date.now()}`);
-  writeFileSync(temp, `${generateEnvironmentId()}\n`);
   try {
+    writeFileSync(temp, `${generateEnvironmentId()}\n`);
     linkSync(temp, path);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
