@@ -1,10 +1,15 @@
+import { homedir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { createApp, VERSION } from "./app.ts";
 import { DEFAULT_PORT, readConfig } from "./config.ts";
 
 describe("readConfig", () => {
-  it("defaults to loopback on the default port", () => {
-    expect(readConfig({})).toEqual({ host: "127.0.0.1", port: DEFAULT_PORT });
+  it("defaults to loopback, the default port, ~/.tenzo and the web build", () => {
+    const config = readConfig({});
+    expect(config.host).toBe("127.0.0.1");
+    expect(config.port).toBe(DEFAULT_PORT);
+    expect(config.home).toBe(join(homedir(), ".tenzo"));
+    expect(config.webDir).toMatch(/apps[/\\]web[/\\]build$/);
     expect(readConfig({ TENZO_PORT: "" }).port).toBe(DEFAULT_PORT);
   });
 
@@ -15,16 +20,10 @@ describe("readConfig", () => {
     expect(() => readConfig({ TENZO_PORT: "70000" })).toThrow(/TENZO_PORT/);
     expect(() => readConfig({ TENZO_PORT: "80.5" })).toThrow(/TENZO_PORT/);
   });
-});
 
-describe("createApp", () => {
-  it("answers on / with its name and version", async () => {
-    const res = await createApp().request("/");
-    expect(res.status).toBe(200);
-    expect(await res.text()).toBe(`tenzo daemon ${VERSION}\n`);
-  });
-
-  it("returns 404 for unknown routes", async () => {
-    expect((await createApp().request("/nope")).status).toBe(404);
+  it("takes TENZO_HOME and TENZO_WEB_DIR", () => {
+    const config = readConfig({ TENZO_HOME: "/tmp/th", TENZO_WEB_DIR: "/tmp/web" });
+    expect(config.home).toBe("/tmp/th");
+    expect(config.webDir).toBe("/tmp/web");
   });
 });

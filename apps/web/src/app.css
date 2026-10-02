@@ -1,1 +1,8 @@
 @import 'tailwindcss';
+
+/* Black all the way out, so iOS overscroll and the safe areas never flash white. */
+html,
+body {
+	@apply bg-black;
+	color-scheme: dark;
+}

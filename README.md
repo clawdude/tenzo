@@ -21,3 +21,22 @@ pnpm install
 pnpm dev     # daemon on 127.0.0.1:4780 (TENZO_PORT to change), web on localhost:5173
 pnpm check   # typecheck + tests in every package; CI runs the same
 ```
+
+In `pnpm dev`, Vite proxies `/ws` and `/health` to the daemon, so the page always talks to its own origin.
+
+## Run
+
+```bash
+pnpm build          # builds the web app into apps/web/build
+pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
+```
+
+`pnpm tenzo <command>` runs `apps/daemon/src/cli.ts` on Node's type stripping, with no build step. The file is executable and is the package's `tenzo` bin, so a symlink to it on your PATH gives you a bare `tenzo`.
+
+The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS.
+
+| Variable | Default | |
+|---|---|---|
+| `TENZO_PORT` | `4780` | port to listen on |
+| `TENZO_HOME` | `~/.tenzo` | Tenzo's state; holds `environment-id`, this machine's stable identity |
+| `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |

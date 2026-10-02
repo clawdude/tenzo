@@ -6,18 +6,24 @@
   "engines": {
     "node": ">=22.18"
   },
+  "bin": {
+    "tenzo": "./src/cli.ts"
+  },
   "scripts": {
-    "dev": "node --watch src/main.ts",
-    "start": "node src/main.ts",
+    "dev": "node --watch src/cli.ts serve",
+    "start": "node src/cli.ts serve",
     "typecheck": "tsc -p tsconfig.json",
     "test": "vitest run"
   },
   "dependencies": {
     "@hono/node-server": "^2.1.3",
-    "hono": "^4.13.12"
+    "@tenzo/contracts": "workspace:*",
+    "hono": "^4.13.12",
+    "ws": "^8.22.0"
   },
   "devDependencies": {
     "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"
   }

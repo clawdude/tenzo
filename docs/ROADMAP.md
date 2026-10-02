@@ -5,7 +5,7 @@ Progress lives here and in [GitHub issues](https://github.com/clawdude/tenzo/iss
 ## M0 · Scaffold
 
 - [x] #1 pnpm monorepo: `apps/daemon`, `apps/web`, `packages/contracts`, `packages/client-runtime`; typecheck + tests run with one command
-- [ ] #2 Daemon starts, serves a health endpoint and a WebSocket; web shell loads and connects
+- [x] #2 Daemon starts, serves a health endpoint and a WebSocket; web shell loads and connects
 
 ## M1 · Tracer bullet: one thread, one question, one answer
 
