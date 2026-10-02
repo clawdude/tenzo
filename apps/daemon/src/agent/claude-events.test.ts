@@ -3,7 +3,9 @@ import { RuntimeEvent } from "@tenzo/contracts";
 import { describe, expect, it } from "vitest";
 import type { EventDraft } from "./agent.ts";
 import {
+  boundedInput,
   type ClaudeTranslation,
+  INPUT_STRING_LIMIT,
   initialTranslation,
   OUTPUT_LIMIT,
   startTurn,
@@ -205,6 +207,79 @@ describe("turns", () => {
     expect(out.state.turnId).toBe(TURN);
   });
 
+  it("doesn't let a turn Claude runs by itself close ours (resume with background work)", () => {
+    // Our prompt waits in Claude's queue while it reports a background task from the last run.
+    const own = assistant([text("The dev server you started earlier exited.")]);
+    const reply = assistant([text("Here is my answer.")], { user_message_uuid: TURN });
+    const { state, events } = run(
+      [
+        own,
+        result({ origin: { kind: "peer", from: "background" }, result: "noted" } as never),
+        reply,
+        result({ user_message_uuids: [TURN], result: "Here is my answer." }),
+      ],
+      inTurn(),
+    );
+    expect(events.filter((e) => e.type.startsWith("turn."))).toEqual([
+      expect.objectContaining({
+        type: "turn.completed",
+        turnId: TURN,
+        payload: expect.objectContaining({ result: "Here is my answer." }),
+      }),
+    ]);
+    expect(events.every((e) => e.turnId === TURN)).toBe(true); // no synthetic turn opened
+    expect(state.turnId).toBeNull();
+  });
+
+  it("still closes our turn on a result that echoes nothing from a human (older CLIs)", () => {
+    for (const message of [result(), result({ origin: { kind: "human" } } as never)]) {
+      expect(run([message], inTurn()).events.map((e) => e.type)).toEqual(["turn.completed"]);
+    }
+  });
+
+  it("closes a turn Claude started by itself on any result", () => {
+    for (const end of [
+      result({ origin: { kind: "peer", from: "x" } } as never),
+      result({ user_message_uuids: ["33333333-3333-4333-8333-333333333333"] }),
+    ]) {
+      const own = assistant([text("Background task finished.")]);
+      const { state, events } = run([own, end]);
+      const turnId = (own as { uuid: string }).uuid;
+      expect(events.map((e) => [e.type, e.turnId])).toEqual([
+        ["turn.started", turnId],
+        ["item.completed", turnId],
+        ["turn.completed", turnId],
+      ]);
+      expect(state).toMatchObject({ turnId: null, synthetic: false });
+    }
+  });
+
+  it("closes a turn Claude started by itself when we send a prompt; its late result is ignored", () => {
+    const own = assistant([text("Watching the tests…")]);
+    const ownTurn = (own as { uuid: string }).uuid;
+    const before = run([own]).state;
+    expect(before).toMatchObject({ turnId: ownTurn, synthetic: true });
+
+    const started = startTurn(before, TURN, "next");
+    expect(started.events.map((e) => [e.type, e.turnId])).toEqual([
+      ["turn.completed", ownTurn],
+      ["turn.started", TURN],
+      ["item.completed", TURN],
+    ]);
+    expect(started.state).toMatchObject({ turnId: TURN, synthetic: false });
+    expectValid(started.events);
+
+    const { state, events } = run(
+      [
+        result({ origin: { kind: "peer", from: "x" } } as never), // Claude's own turn ending
+        result({ user_message_uuids: [TURN] }),
+      ],
+      started.state,
+    );
+    expect(events.map((e) => [e.type, e.turnId])).toEqual([["turn.completed", TURN]]);
+    expect(state.turnId).toBeNull();
+  });
+
   it("ignores a result with no turn open (the resume handshake)", () => {
     expect(run([result({ num_turns: 0 })]).events).toEqual([]);
   });
@@ -363,6 +438,45 @@ describe("items", () => {
       inTurn(),
     );
     expect(state.tools.size).toBe(0);
+  });
+});
+
+describe("boundedInput", () => {
+  it("keeps what a card needs and cuts the bulk", () => {
+    const content = "x".repeat(10_000);
+    const bounded = boundedInput({
+      file_path: "/w/big.txt",
+      content,
+      replace_all: false,
+      count: 3,
+      edits: Array.from({ length: 100 }, (_, i) => ({ old_string: `a${i}`, new_string: `b${i}` })),
+      small: { a: 1 },
+    }) as Record<string, unknown>;
+    expect(bounded.file_path).toBe("/w/big.txt");
+    expect(bounded.content).toBe(`${"x".repeat(INPUT_STRING_LIMIT)}… (9700 more characters)`);
+    expect(bounded).toMatchObject({ replace_all: false, count: 3, small: { a: 1 } });
+    expect(typeof bounded.edits).toBe("string");
+    expect((bounded.edits as string).startsWith('[{"old_string":"a0"')).toBe(true);
+    expect(JSON.stringify(bounded).length).toBeLessThan(1000);
+  });
+
+  it("gives a command more room, and caps the number of fields", () => {
+    const command = `echo ${"y".repeat(1500)}`;
+    expect(boundedInput({ command })).toEqual({ command });
+    const many = Object.fromEntries(Array.from({ length: 50 }, (_, i) => [`k${i}`, i]));
+    expect(Object.keys(boundedInput(many) as object)).toHaveLength(20);
+    expect(boundedInput("plain")).toBe("plain");
+  });
+
+  it("is what lands on item.started; the summary still reads the full input", () => {
+    const content = "z".repeat(5000);
+    const { events } = run(
+      [assistant([toolUse("toolu_w", "Write", { file_path: "/w/a.txt", content })])],
+      inTurn(),
+    );
+    const payload = events[0]?.payload as { input: { content: string }; text: string };
+    expect(payload.input.content.length).toBeLessThan(400);
+    expect(payload.text).toBe("Write: /w/a.txt");
   });
 });
 

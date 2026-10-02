@@ -19,6 +19,8 @@ export interface ClaudeTranslation {
   readonly configured: boolean;
   /** The turn in progress, if any. */
   readonly turnId: TurnId | null;
+  /** The open turn is one Claude started by itself, not one of our prompts. */
+  readonly synthetic: boolean;
   /** Tool calls that started and haven't reported a result yet, by tool-use id. */
   readonly tools: ReadonlyMap<string, ToolCall>;
 }
@@ -44,15 +46,24 @@ export function initialTranslation(options: { resumed: boolean }): ClaudeTransla
     sessionStarted: false,
     configured: false,
     turnId: null,
+    synthetic: false,
     tools: new Map(),
   };
 }
 
-/** A prompt was sent: the turn starts, and the prompt is its first item. */
+/**
+ * A prompt was sent: the turn starts, and the prompt is its first item. A turn Claude started by
+ * itself is closed first: what follows answers this prompt (as T3 Code does).
+ */
 export function startTurn(state: ClaudeTranslation, turnId: TurnId, prompt: string): Translated {
+  const closing: EventDraft[] =
+    state.turnId !== null && state.synthetic
+      ? [{ type: "turn.completed", turnId: state.turnId, payload: { state: "completed" } }]
+      : [];
   return {
-    state: { ...state, turnId },
+    state: { ...state, turnId, synthetic: false },
     events: [
+      ...closing,
       { type: "turn.started", turnId, payload: { prompt } },
       {
         type: "item.completed",
@@ -132,7 +143,7 @@ function onAssistant(state: ClaudeTranslation, message: SDKAssistantMessage): Tr
   // up). Give its work a turn of its own rather than pinning it on nothing.
   if (next.turnId === null && parentItemId === null) {
     const turnId = message.uuid;
-    next = { ...next, turnId };
+    next = { ...next, turnId, synthetic: true };
     events.push({ type: "turn.started", turnId, payload: {} });
   }
 
@@ -174,7 +185,7 @@ function onAssistant(state: ClaudeTranslation, message: SDKAssistantMessage): Tr
         withTurn(next, {
           type: "item.started",
           itemId: block.id,
-          payload: { ...toolPayload(call, "in_progress"), input: block.input },
+          payload: { ...toolPayload(call, "in_progress"), input: boundedInput(block.input) },
         }),
       );
     }
@@ -215,10 +226,7 @@ function onResult(state: ClaudeTranslation, message: SDKResultMessage): Translat
   const turnId = state.turnId;
   // No turn open: the resume handshake's empty result, or a stray one. Nothing to close.
   if (turnId === null) return same(state);
-  // A result for a turn Claude ran on its own while ours waits in its queue: not ours to close.
-  const echoed =
-    message.user_message_uuids ?? (message.user_message_uuid ? [message.user_message_uuid] : []);
-  if (echoed.length > 0 && !echoed.includes(turnId)) return same(state);
+  if (isForAnotherTurn(state, turnId, message)) return same(state);
 
   const { state: turnState, errorMessage } = outcome(message);
   const events: EventDraft[] = [];
@@ -243,7 +251,27 @@ function onResult(state: ClaudeTranslation, message: SDKResultMessage): Translat
     },
   });
   // Tools still "in flight" when the turn ends never got a result (interrupted): forget them.
-  return { state: { ...state, turnId: null, tools: new Map() }, events };
+  return { state: { ...state, turnId: null, synthetic: false, tools: new Map() }, events };
+}
+
+/**
+ * True when a result answers a turn other than the open one, so it must not close it. Claude runs
+ * turns of its own between our prompts (a resumed session reporting background tasks the last
+ * process left behind, a background command finishing) and our prompt waits behind them. Our
+ * prompts carry the turn id as their uuid, which Claude echoes on the result; its own turns echo
+ * nothing and carry a non-human `origin`. A turn Claude started itself takes any result.
+ * After T3 Code's `isResultForOtherTurn`.
+ */
+function isForAnotherTurn(
+  state: ClaudeTranslation,
+  turnId: TurnId,
+  message: SDKResultMessage,
+): boolean {
+  if (state.synthetic) return false;
+  const echoed =
+    message.user_message_uuids ?? (message.user_message_uuid ? [message.user_message_uuid] : []);
+  if (echoed.length > 0) return !echoed.includes(turnId);
+  return message.origin !== undefined && message.origin.kind !== "human";
 }
 
 function outcome(message: SDKResultMessage): { state: TurnState; errorMessage?: string } {
@@ -323,6 +351,42 @@ export function summarizeTool(name: string, input: Record<string, unknown>): str
     (typeof firstQuestion === "string" ? firstQuestion : undefined) ??
     (Object.keys(input).length > 0 ? JSON.stringify(input) : "");
   return trim(what === "" ? name : `${name}: ${what.replaceAll(/\s+/g, " ")}`, 300);
+}
+
+/** A string field of a tool's input kept on an event; a command gets more room than the rest. */
+export const INPUT_STRING_LIMIT = 300;
+const COMMAND_LIMIT = 2000;
+const INPUT_KEY_LIMIT = 20;
+
+/**
+ * A tool's input as copied onto an event: enough for a card (the command, the file path, a short
+ * description), not a file's whole new content. Long strings are cut with a note of how much was
+ * left out; a large nested value becomes its JSON, cut the same way. Claude still gets the full
+ * input; this is only what Tenzo keeps.
+ */
+export function boundedInput(input: unknown): unknown {
+  if (!isRecord(input)) return capJson(input);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(input).slice(0, INPUT_KEY_LIMIT)) {
+    if (typeof value === "string") {
+      out[key] = cap(value, key === "command" ? COMMAND_LIMIT : INPUT_STRING_LIMIT);
+    } else {
+      out[key] = capJson(value);
+    }
+  }
+  return out;
+}
+
+function capJson(value: unknown): unknown {
+  if (value === null || typeof value !== "object") return value;
+  const json = JSON.stringify(value);
+  return json.length <= INPUT_STRING_LIMIT ? value : cap(json, INPUT_STRING_LIMIT);
+}
+
+function cap(text: string, limit: number): string {
+  return text.length <= limit
+    ? text
+    : `${text.slice(0, limit)}… (${text.length - limit} more characters)`;
 }
 
 function toolPayload(call: ToolCall, status: ItemPayload["status"]): ItemPayload {

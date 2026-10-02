@@ -120,7 +120,8 @@ export async function askQuestions(
     const lines = [
       `? ${q.question}${q.header ? `  [${q.header}]` : ""}`,
       ...q.options.map(
-        (o, i) => `  ${i + 1}. ${o.label}${o.description ? ` — ${o.description}` : ""}`,
+        (o, i) =>
+          `  ${i + 1}. ${o.label}${o.recommended ? " (recommended)" : ""}${o.description ? ` — ${o.description}` : ""}`,
       ),
       q.multiSelect
         ? "  Numbers separated by commas, or type your own answer: "

@@ -55,6 +55,10 @@ export type RequestDecision = z.infer<typeof RequestDecision>;
 export const UserInputOption = z.object({
   label: z.string(),
   description: z.string(),
+  /** The agent's suggested answer: the card's filled button. */
+  recommended: z.boolean(),
+  /** Content to show while the option is focused (a mockup, a snippet), when the agent gave one. */
+  preview: z.string().optional(),
 });
 export type UserInputOption = z.infer<typeof UserInputOption>;
 

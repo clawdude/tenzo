@@ -35,8 +35,8 @@ const color: UserInputQuestion = {
   header: "Color",
   question: "Which color?",
   options: [
-    { label: "Red", description: "Warm" },
-    { label: "Blue", description: "Cool" },
+    { label: "Red", description: "Warm", recommended: false },
+    { label: "Blue", description: "Cool", recommended: true },
   ],
   multiSelect: false,
 };
@@ -174,7 +174,7 @@ describe("askQuestions", () => {
     expect(await askQuestions([color], keys.ask)).toEqual({ "Which color?": "Red" });
     expect(keys.asked).toHaveLength(3);
     expect(keys.asked[0]).toBe(
-      "? Which color?  [Color]\n  1. Red — Warm\n  2. Blue — Cool\n  A number, or type your own answer: ",
+      "? Which color?  [Color]\n  1. Red — Warm\n  2. Blue (recommended) — Cool\n  A number, or type your own answer: ",
     );
     expect(await askQuestions([color], keyboard("Green, please").ask)).toEqual({
       "Which color?": "Green, please",
