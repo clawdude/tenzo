@@ -2,7 +2,7 @@ import type { RuntimeEvent, RuntimeEventOf } from "@tenzo/contracts";
 
 /**
  * The parity check's verdicts, as pure functions over what a run left behind: the thread's
- * runtime events (`tenzo thread start --json`) and the hook's log in the worktree. `parity.ts`
+ * runtime events (as the daemon stored them) and the hook's log in the worktree. `parity.ts`
  * does the running; everything here is unit-tested.
  */
 
@@ -68,7 +68,7 @@ export function parseHookLog(text: string | null): HookRecord[] | null {
   return records;
 }
 
-/** `tenzo thread start --json` output: one event per line. Lines that aren't JSON are skipped. */
+/** A run's `events.jsonl`: one event per line. Lines that aren't JSON are skipped. */
 export function parseEvents(stdout: string): RuntimeEvent[] {
   const events: RuntimeEvent[] = [];
   for (const line of stdout.split("\n")) {
@@ -280,9 +280,10 @@ function checkMcp(configured: Configured | undefined, calls: ToolCall[], word: s
 }
 
 /**
- * What the run types at tenzo's prompts: `y` for the fixture's MCP tool (the only prompt a
- * fresh, untrusted copy of the fixture gets, exactly as in a terminal), a reason to deny
- * anything else, and end of input for a question. Undefined: the event asks nothing.
+ * How the run answers the thread's items (`tenzo answer`): `y` (allow) for the fixture's MCP
+ * tool (the only prompt a fresh, untrusted copy of the fixture gets, exactly as in a
+ * terminal), a reason to deny anything else, and null for a question: the run ends there.
+ * Undefined: the event asks nothing.
  */
 export function answerFor(event: RuntimeEvent): string | null | undefined {
   if (event.type === "request.opened") {

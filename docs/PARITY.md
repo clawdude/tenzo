@@ -1,6 +1,6 @@
 # Feature-parity check
 
-Tenzo must never reduce what Claude Code can do (PRODUCT.md). This check proves it for the four things people configure most: a **subagent**, a **skill**, a **hook** and an **MCP server**, each defined in a project's `.claude/` folder the way a user would. One real thread runs through the real `tenzo` CLI and has to use all four.
+Tenzo must never reduce what Claude Code can do (PRODUCT.md). This check proves it for the four things people configure most: a **subagent**, a **skill**, a **hook** and an **MCP server**, each defined in a project's `.claude/` folder the way a user would. One real thread runs in a scratch `tenzo` daemon, driven through the real `tenzo` CLI, and has to use all four.
 
 Re-run it after every change to the Claude adapter (`apps/daemon/src/agent/`), the thread runner, or the Agent SDK version.
 
@@ -18,10 +18,9 @@ It needs your `claude` signed in (found as `tenzo` finds it; `TENZO_CLAUDE_PATH`
 What it does:
 
 1. Copies `tools/parity/fixture` to a fresh temp directory, renames its inert `dot-claude/` and `dot-mcp.json` to `.claude/` and `.mcp.json`, then `git init`s and commits it.
-2. Points `TENZO_HOME` at the same temp directory, so `~/.tenzo` is never touched, and runs
-   `tenzo project add <copy>` and `tenzo thread start <copy> --model haiku --json -- <prompt>`.
-3. Watches the events as they stream and answers tenzo's prompts on stdin the way you would: `y` to the fixture's MCP tool, a denial to anything else, end of input to a question.
-4. Reads the events and the hook's log in the thread's worktree, prints the table, and exits 0 on a pass. On a pass the temp directory is deleted; on a failure it's kept with `events.jsonl` (every event) and `tenzo.stderr`.
+2. Points `TENZO_HOME` at the same temp directory and `TENZO_PORT` at a free port, so `~/.tenzo` and a daemon you have running are never touched. Runs `tenzo project add <copy>`, starts a scratch `tenzo serve`, and starts the thread through it: `tenzo thread start <copy> --model haiku --detach -- <prompt>`.
+3. Follows the thread's events from the daemon (`thread.events` on `POST /api/commands`) and answers its items with `tenzo answer` the way you would: `allow` for the fixture's MCP tool, a denial with a reason for anything else. A question ends the run (the Turn check then fails).
+4. Stops at the end of the first turn, stops the daemon (always, also on a failure; it stops the thread's `claude`), reads the events and the hook's log in the thread's worktree, prints the table, and exits 0 on a pass. On a pass the temp directory is deleted; on a failure it's kept with `events.jsonl` (every event) and `tenzo.stderr` (the daemon's and the CLI's output).
 
 ```
 Check       Result  Detail
@@ -65,6 +64,6 @@ The checks are pure functions over the events (`tools/parity/src/checks.ts`), un
 
 - **Workspace trust.** Claude Code ignores a project's `permissions.allow` until the workspace is trusted (the terminal prints *"Ignoring N permissions.allow entries … this workspace has not been trusted"*). A fresh temp copy is never trusted, so the MCP tool asks for permission, in the terminal and in Tenzo alike. That's why the fixture has no allow rules and the script answers the prompt: it also exercises Tenzo's permission round-trip. Trust is keyed by the main repo's path, not the worktree's (the warning names the repo), so a repo you trusted in the terminal stays trusted in Tenzo's worktrees.
 - **MCP approval.** Without a person to ask, Claude Code (the SDK, `claude -p`) starts `.mcp.json` servers without approval. `enabledMcpjsonServers` is in the fixture so an interactive `claude` in the copy behaves the same, for comparison.
-- **Background subagents.** Claude Code 2.1 runs `Agent` calls in the background by default: the tool result is "Async agent launched", and the subagent's answer arrives as its own messages. The check accepts that as well as a foreground result. `tenzo thread start/send` stop the session when the turn ends, so a background subagent still running then is stopped with it. Here it finishes first; the daemon (#6) keeps sessions alive.
+- **Background subagents.** Claude Code 2.1 runs `Agent` calls in the background by default: the tool result is "Async agent launched", and the subagent's answer arrives as its own messages. The check accepts that as well as a foreground result. The daemon keeps a thread's session up after its turn ends, so background work keeps reporting; the check itself reads only up to the end of the first turn and then stops its scratch daemon. Here the subagent finishes first.
 - **Your config loads too.** The thread gets your user settings, plugins, skills and MCP connectors, as a real thread does. A user-level hook or permission rule can change the outcome; the table says which check it broke. Claude keeps its transcript of the run under `~/.claude/projects/`, as for any session.
 - **The model can wander.** The prompt is explicit, but a small model can still skip a step or drop a codeword. A single failure where Claude didn't do what it was asked is the model, not Tenzo: re-run, or try `--model sonnet`. The same failure twice is a finding.
