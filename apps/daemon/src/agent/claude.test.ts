@@ -11,7 +11,7 @@ import {
 import { afterAll, describe, expect, it } from "vitest";
 import { removeTempDirs, tempDir } from "../testing.ts";
 import type { AgentSession } from "./agent.ts";
-import { createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
+import { claudeEnv, createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
 import {
   assistant,
   fakeQuery,
@@ -96,7 +96,9 @@ describe("Claude adapter: starting", () => {
     expect(TurnId.safeParse(session.sessionId).success).toBe(true); // a UUID, as Claude wants
     expect(options?.resume).toBeUndefined();
     // Nothing that would narrow what Claude Code can do: no tool lists, no replaced MCP servers,
-    // agents, plugins, skills or settings, no custom environment, no append to its prompt.
+    // agents, plugins, skills or settings, no append to its prompt. The environment is ours, only
+    // scrubbed of a parent Claude Code session's variables.
+    expect(options?.env).toEqual(claudeEnv(process.env));
     for (const key of [
       "tools",
       "allowedTools",
@@ -109,12 +111,42 @@ describe("Claude adapter: starting", () => {
       "settings",
       "managedSettings",
       "hooks",
-      "env",
       "model",
     ]) {
       expect(options, key).not.toHaveProperty(key);
     }
     expect(options?.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+  });
+
+  it("drops a parent Claude Code session's variables and keeps the user's configuration", () => {
+    const parent = {
+      CLAUDECODE: "1",
+      CLAUDE_CODE_ENTRYPOINT: "cli",
+      CLAUDE_CODE_SSE_PORT: "51234",
+      CLAUDE_CODE_SESSION_ID: "s",
+      CLAUDE_CODE_CHILD_SESSION: "1",
+      CLAUDE_CODE_SESSION_ATTENDED: "1",
+      CLAUDE_PID: "42",
+      CLAUDE_CODE_MESSAGING_SOCKET: "/tmp/sock",
+      CLAUDE_CODE_MESSAGING_TOKEN: "t",
+      CLAUDE_CODE_BRIDGE_OWNER_ACCOUNT_UUID: "a",
+      CLAUDE_CODE_BRIDGE_MCP_CARRIER: "c",
+      CLAUDE_CODE_WORKER_EPOCH: "3",
+      CLAUDE_CODE_EXECPATH: "/x/claude",
+    };
+    const user = {
+      PATH: "/usr/bin",
+      HOME: "/Users/me",
+      CLAUDE_CONFIG_DIR: "/Users/me/.claude-work",
+      ANTHROPIC_API_KEY: "sk-ant",
+      ANTHROPIC_BASE_URL: "https://gw",
+      CLAUDE_CODE_USE_BEDROCK: "1",
+      CLAUDE_CODE_USE_VERTEX: "1",
+      HTTPS_PROXY: "http://proxy:8080",
+      NO_PROXY: "localhost",
+      CLAUDE_CODE_MAX_OUTPUT_TOKENS: "64000",
+    };
+    expect(claudeEnv({ ...parent, ...user, UNSET: undefined })).toEqual(user);
   });
 
   it("resumes a stored session instead of starting a new one", async () => {
@@ -133,14 +165,43 @@ describe("Claude adapter: starting", () => {
     await session.stop();
   });
 
-  it("finds claude on PATH, and says so when it isn't there", () => {
+  function fakeClaude(dir: string): string {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, "claude"), "#!/bin/sh\n");
+    chmodSync(join(dir, "claude"), 0o755);
+    return join(dir, "claude");
+  }
+
+  it("finds claude on PATH, and says so when it isn't anywhere", () => {
     const empty = tempDir("bin-empty");
-    const bin = tempDir("bin");
+    const home = tempDir("home");
     mkdirSync(join(empty, "claude")); // a directory called claude is not the binary
-    writeFileSync(join(bin, "claude"), "#!/bin/sh\n");
-    chmodSync(join(bin, "claude"), 0o755);
-    expect(findClaude(`${empty}:${bin}`)).toBe(join(bin, "claude"));
-    expect(() => findClaude(empty)).toThrow(/Can't find `claude` on PATH/);
+    const onPath = fakeClaude(tempDir("bin"));
+    expect(findClaude({ PATH: `${empty}:${onPath.slice(0, -7)}` }, home, [])).toBe(onPath);
+    expect(() => findClaude({ PATH: empty }, home, [])).toThrow(
+      /Can't find `claude` on PATH .* or set TENZO_CLAUDE_PATH/,
+    );
+  });
+
+  it("falls back to where Claude Code installs itself when PATH lacks it (launchd)", () => {
+    const home = tempDir("home");
+    const system = tempDir("system");
+    const inSystem = fakeClaude(system);
+    expect(findClaude({ PATH: "/nowhere" }, home, [system])).toBe(inSystem);
+    const local = fakeClaude(join(home, ".claude", "local"));
+    expect(findClaude({}, home, [system])).toBe(local);
+    const native = fakeClaude(join(home, ".local", "bin"));
+    expect(findClaude({}, home, [system])).toBe(native);
+  });
+
+  it("uses TENZO_CLAUDE_PATH when set, and refuses a bad one", () => {
+    const home = tempDir("home");
+    fakeClaude(join(home, ".local", "bin"));
+    const chosen = fakeClaude(tempDir("chosen"));
+    expect(findClaude({ TENZO_CLAUDE_PATH: chosen }, home, [])).toBe(chosen);
+    expect(() => findClaude({ TENZO_CLAUDE_PATH: "/no/claude" }, home, [])).toThrow(
+      "TENZO_CLAUDE_PATH is /no/claude, which is not an executable file.",
+    );
   });
 });
 
@@ -197,6 +258,25 @@ describe("Claude adapter: a turn", () => {
     expect(() => session.sendTurn("fourth")).toThrow(/ended/);
   });
 
+  it("takes a prompt while Claude runs a turn of its own, closing that turn", async () => {
+    let prompts = 0;
+    const own = assistant([text("Background task finished.")]);
+    const { session, events } = start(function* () {
+      prompts++;
+      yield result();
+      if (prompts === 1) yield own; // Claude goes on by itself after our turn
+    });
+    session.sendTurn("first");
+    await events.until("turn.completed");
+    const ownTurn = (await events.until("turn.started")).turnId;
+    await events.until("item.completed");
+    const second = session.sendTurn("second");
+    expect(await events.next()).toMatchObject({ type: "turn.completed", turnId: ownTurn });
+    expect(await events.next()).toMatchObject({ type: "turn.started", turnId: second });
+    expect((await events.until("turn.completed")).turnId).toBe(second);
+    await session.stop();
+  });
+
   it("reports a crash as an error and ends the session", async () => {
     const { session, events } = start(function* () {
       yield init();
@@ -235,7 +315,7 @@ describe("Claude adapter: questions", () => {
         header: "Color",
         options: [
           { label: "Red", description: "Warm" },
-          { label: "Blue", description: "Cool" },
+          { label: "Blue (Recommended)", description: "Cool", preview: "#0000ff" },
         ],
         multiSelect: false,
       },
@@ -268,14 +348,15 @@ describe("Claude adapter: questions", () => {
             header: "Color",
             question: "Which color do you prefer?",
             options: [
-              { label: "Red", description: "Warm" },
-              { label: "Blue", description: "Cool" },
+              { label: "Red", description: "Warm", recommended: false },
+              { label: "Blue", description: "Cool", recommended: true, preview: "#0000ff" },
             ],
             multiSelect: false,
           },
         ],
       },
     });
+    expect(asked.payload.questions[0]?.options[0]).not.toHaveProperty("preview");
     expect(() => session.respondToRequest(asked.requestId, "allow")).toThrow(/No open permission/);
 
     session.respondToUserInput(asked.requestId, { "Which color do you prefer?": "Blue" });
@@ -313,13 +394,24 @@ describe("Claude adapter: questions", () => {
   it("reads AskUserQuestion input defensively", () => {
     expect(parseQuestions({})).toEqual([]);
     expect(
-      parseQuestions({ questions: [{ options: [{ label: "A" }, "junk"], multiSelect: "yes" }, 7] }),
+      parseQuestions({
+        questions: [
+          {
+            options: [{ label: "A" }, "junk", { label: "(recommended) B", preview: "" }],
+            multiSelect: "yes",
+          },
+          7,
+        ],
+      }),
     ).toEqual([
       {
         id: "q1",
         header: "",
         question: "",
-        options: [{ label: "A", description: "" }],
+        options: [
+          { label: "A", description: "", recommended: false },
+          { label: "B", description: "", recommended: true },
+        ],
         multiSelect: false,
       },
       { id: "q2", header: "", question: "", options: [], multiSelect: false },
@@ -390,6 +482,24 @@ describe("Claude adapter: permission requests", () => {
     });
     expect(rest.at(-1)?.type).toBe("session.exited");
     expect(outcome.result).toEqual({ behavior: "deny", message: "Cancelled." });
+  });
+
+  it("keeps a bounded copy of the input on the event; Claude gets the full input back", async () => {
+    const big = { file_path: "/etc/hosts", content: "1.2.3.4 x\n".repeat(1000) };
+    let answer: PermissionResult | null = null;
+    const { session, events } = start(async function* (turn) {
+      answer = await turn.canUseTool("Write", big, "toolu_w");
+      yield result();
+    });
+    session.sendTurn("edit hosts");
+    const opened = await events.until("request.opened");
+    expect(opened.payload.toolKind).toBe("file_change");
+    expect(JSON.stringify(opened.payload.input).length).toBeLessThan(500);
+    expect(opened.payload.input).toMatchObject({ file_path: "/etc/hosts" });
+    session.respondToRequest(opened.requestId, "allow");
+    await events.until("turn.completed");
+    expect(answer).toEqual({ behavior: "allow", updatedInput: big });
+    await session.stop();
   });
 
   it("refuses an answer to a request that isn't open", () => {

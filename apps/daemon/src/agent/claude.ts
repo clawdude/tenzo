@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { accessSync, constants, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
   type CanUseTool,
@@ -19,6 +20,7 @@ import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
+  boundedInput,
   type ClaudeTranslation,
   initialTranslation,
   startTurn,
@@ -152,7 +154,7 @@ function startSession(
         detail: summarizeTool(toolName, toolInput),
         ...(context.title ? { title: context.title } : {}),
         ...(context.decisionReason ? { reason: context.decisionReason } : {}),
-        input: toolInput,
+        input: boundedInput(toolInput), // Claude gets the full input back below
         itemId: context.toolUseID,
       },
     });
@@ -180,6 +182,7 @@ function startSession(
     systemPrompt: { type: "preset", preset: "claude_code" },
     permissionMode: "acceptEdits",
     canUseTool,
+    env: claudeEnv(process.env),
     ...(resumed ? { resume: sessionId } : { sessionId }),
     ...(input.model ? { model: input.model } : {}),
   };
@@ -234,7 +237,10 @@ function startSession(
     events,
     sendTurn(prompt) {
       if (prompts.closed) throw new TenzoError("This session has ended.");
-      if (state.turnId !== null) throw new TenzoError("A turn is already running.");
+      // A turn Claude started by itself doesn't block a prompt: startTurn closes it.
+      if (state.turnId !== null && !state.synthetic) {
+        throw new TenzoError("A turn is already running.");
+      }
       const turnId: TurnId = randomUUID();
       apply(startTurn(state, turnId, prompt));
       // The prompt's uuid is the turn id: Claude echoes it on the turn's replies and result.
@@ -274,6 +280,43 @@ function startSession(
   };
 }
 
+/**
+ * Variables a running Claude Code session exports to its children. They describe that session
+ * (its id, IDE connection, bridge wiring), not the user's configuration, so a daemon started from
+ * inside Claude Code must not hand them to its threads.
+ */
+const PARENT_SESSION_VARS = new Set([
+  "CLAUDECODE",
+  "CLAUDE_CODE_ENTRYPOINT", // unset, the SDK stamps its own
+  "CLAUDE_CODE_SSE_PORT", // the parent's IDE connection
+  "CLAUDE_CODE_SESSION_ID",
+  "CLAUDE_CODE_CHILD_SESSION",
+  "CLAUDE_CODE_SESSION_ATTENDED",
+  "CLAUDE_PID",
+  "CLAUDE_CODE_MESSAGING_SOCKET",
+  "CLAUDE_CODE_MESSAGING_TOKEN",
+  "CLAUDE_CODE_WORKER_EPOCH",
+  "CLAUDE_CODE_EXECPATH",
+]);
+const PARENT_SESSION_PREFIXES = ["CLAUDE_CODE_BRIDGE_"];
+
+/**
+ * The environment a thread's Claude runs with: ours, minus what belongs to a parent Claude Code
+ * session. Everything that is the user's configuration stays: `CLAUDE_CONFIG_DIR`,
+ * `ANTHROPIC_*`, Bedrock/Vertex switches, proxies, PATH, HOME, …
+ */
+export function claudeEnv(env: NodeJS.ProcessEnv): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(env)) {
+    if (value === undefined || PARENT_SESSION_VARS.has(key)) continue;
+    if (PARENT_SESSION_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    out[key] = value;
+  }
+  return out;
+}
+
+const RECOMMENDED = /\s*\(recommended\)\s*/i;
+
 /** `AskUserQuestion`'s input as Tenzo questions. Claude keys each answer by its question text. */
 export function parseQuestions(input: Record<string, unknown>): UserInputQuestion[] {
   const raw = Array.isArray(input.questions) ? input.questions : [];
@@ -285,30 +328,61 @@ export function parseQuestions(input: Record<string, unknown>): UserInputQuestio
       id: question || `q${index + 1}`,
       header: typeof r.header === "string" ? r.header : "",
       question,
-      options: options.filter(isRecord).map((o) => ({
-        label: typeof o.label === "string" ? o.label : "",
-        description: typeof o.description === "string" ? o.description : "",
-      })),
+      options: options.filter(isRecord).map((o) => {
+        const raw = typeof o.label === "string" ? o.label : "";
+        // Claude marks its suggestion in the label: "Blue (Recommended)".
+        const label = raw.replace(RECOMMENDED, " ").trim();
+        return {
+          label,
+          description: typeof o.description === "string" ? o.description : "",
+          recommended: label !== raw.trim(),
+          ...(typeof o.preview === "string" && o.preview !== "" ? { preview: o.preview } : {}),
+        };
+      }),
       multiSelect: r.multiSelect === true,
     };
   });
 }
 
-/** The first executable `claude` on PATH: the user's own install, with the user's own login. */
-export function findClaude(path = process.env.PATH ?? ""): string {
-  for (const dir of path.split(delimiter)) {
-    if (dir === "") continue;
+/** Where Claude Code's installers put `claude`, for a daemon whose PATH lacks it (launchd). */
+export const SYSTEM_CLAUDE_DIRS = ["/opt/homebrew/bin", "/usr/local/bin"];
+
+/**
+ * The user's own `claude`: `TENZO_CLAUDE_PATH` if set, else the first on PATH, else the usual
+ * install locations (`~/.local/bin`, `~/.claude/local`, Homebrew, `/usr/local/bin`).
+ */
+export function findClaude(
+  env: NodeJS.ProcessEnv = process.env,
+  home: string = homedir(),
+  systemDirs: readonly string[] = SYSTEM_CLAUDE_DIRS,
+): string {
+  const override = env.TENZO_CLAUDE_PATH;
+  if (override) {
+    if (isExecutableFile(override)) return override;
+    throw new TenzoError(`TENZO_CLAUDE_PATH is ${override}, which is not an executable file.`);
+  }
+  const dirs = [
+    ...(env.PATH ?? "").split(delimiter).filter((dir) => dir !== ""),
+    join(home, ".local", "bin"),
+    join(home, ".claude", "local"),
+    ...systemDirs,
+  ];
+  for (const dir of dirs) {
     const candidate = join(dir, "claude");
-    try {
-      accessSync(candidate, constants.X_OK);
-      if (statSync(candidate).isFile()) return candidate;
-    } catch {
-      // not here
-    }
+    if (isExecutableFile(candidate)) return candidate;
   }
   throw new TenzoError(
-    "Can't find `claude` on PATH. Install Claude Code and sign in (`claude`), then try again.",
+    "Can't find `claude` on PATH or where Claude Code installs it. Install it and sign in (`claude`), or set TENZO_CLAUDE_PATH.",
   );
+}
+
+function isExecutableFile(path: string): boolean {
+  try {
+    accessSync(path, constants.X_OK);
+    return statSync(path).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

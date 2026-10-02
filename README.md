@@ -40,6 +40,7 @@ The daemon serves the web app, `GET /health` (version and environment id) and th
 | `TENZO_PORT` | `4780` | port to listen on |
 | `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
+| `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 
 ## Projects and threads
 
@@ -70,7 +71,7 @@ pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try
 
 ## Running Claude Code in a thread
 
-Threads run your own `claude` (the first one on `PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo only sets the permission mode to accept edits and catches questions and permission prompts so they can come to you.
+Threads run your own `claude` (see `TENZO_CLAUDE_PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo only sets the permission mode to accept edits and catches questions and permission prompts so they can come to you. Threads get Tenzo's environment minus the variables a parent Claude Code session exports (`CLAUDECODE`, its session id, IDE port, bridge wiring), so running Tenzo from inside Claude Code doesn't tie its threads to that session; your configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, Bedrock/Vertex, proxies) passes through.
 
 ```bash
 pnpm tenzo thread start scratch "create hello.txt containing hi"   # new thread + one turn
