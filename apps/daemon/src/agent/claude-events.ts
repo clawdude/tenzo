@@ -56,6 +56,8 @@ export function initialTranslation(options: { resumed: boolean }): ClaudeTransla
  * itself is closed first: what follows answers this prompt (as T3 Code does).
  */
 export function startTurn(state: ClaudeTranslation, turnId: TurnId, prompt: string): Translated {
+  // Note for #6: this reports Claude's own turn completed (no cost, no duration) while Claude may
+  // still be running it; its remaining items and its result land on, or are ignored by, our turn.
   const closing: EventDraft[] =
     state.turnId !== null && state.synthetic
       ? [{ type: "turn.completed", turnId: state.turnId, payload: { state: "completed" } }]

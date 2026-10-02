@@ -25,8 +25,14 @@ describe("RuntimeEvent", () => {
             header: "Color",
             question: "Which color?",
             options: [
-              { label: "Red", description: "Warm", recommended: false },
-              { label: "Blue", description: "Cool", recommended: true, preview: "#00f" },
+              { label: "Red", value: "Red", description: "Warm", recommended: false },
+              {
+                label: "Blue",
+                value: "Blue (Recommended)",
+                description: "Cool",
+                recommended: true,
+                preview: "#00f",
+              },
             ],
             multiSelect: false,
           },
