@@ -80,4 +80,6 @@ pnpm tenzo thread send <thread-id> "now make it say hello"         # another tur
 
 Both print the thread's events as they happen (`--json` for JSON lines), ask you on the terminal when Claude uses `AskUserQuestion` or wants permission for something accept-edits doesn't cover (`y`, `n`, or a reason to deny), and exit when the turn ends. `--model haiku` picks a model. Claude's session id is stored on the thread, so `send` resumes the conversation even after a restart. Until the daemon and the Pass take over (#6–#9), this is how a thread runs.
 
+`pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
+
 The events are Tenzo's own vocabulary (`packages/contracts/src/runtime.ts`): `session.*`, `turn.*`, `item.*`, `request.opened/resolved`, `user-input.requested/resolved`, `runtime.error`. Nothing above the agent adapter (`apps/daemon/src/agent/`) knows it is talking to Claude.
