@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "types": ["node"],
+    // The daemon runs on Node's built-in type stripping: only erasable TS syntax.
+    "erasableSyntaxOnly": true
+  },
+  "include": ["src"]
+}
