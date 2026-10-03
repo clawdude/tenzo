@@ -2,20 +2,13 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { upgradeWebSocket } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import {
-  ClientFrame,
-  Command,
-  type CommandResponse,
-  type EnvironmentId,
-  type Health,
-  type ServerFrame,
-} from "@tenzo/contracts";
+import { Command, type CommandResponse, type EnvironmentId, type Health } from "@tenzo/contracts";
 import { Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
 import { accessGuard } from "./access.ts";
-import { runCommand } from "./commands.ts";
+import { executeCommand } from "./commands.ts";
 import type { Engine } from "./engine.ts";
-import { TenzoError } from "./errors.ts";
+import { socketHandlers } from "./socket.ts";
 
 export const VERSION: string = pkg.version;
 
@@ -23,7 +16,7 @@ export interface AppOptions {
   environmentId: EnvironmentId;
   /** The built web app. Served from the same origin so Tailscale Serve needs one proxy. */
   webDir: string;
-  /** Runs `/api/commands`. Without one, the API answers 503. */
+  /** Runs `/api/commands` and feeds `/ws`. Without one, the API answers 503. */
   engine?: Engine;
   /** Host names besides loopback that may reach the daemon (access.ts). */
   allowedHosts?: readonly string[];
@@ -75,33 +68,16 @@ export function createApp({
       const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`);
       return fail(`Not a command: ${issues.join("; ")}`, 400);
     }
-    try {
-      const result = await runCommand(engine, parsed.data);
-      return c.json({ ok: true, result } satisfies CommandResponse);
-    } catch (error) {
-      if (error instanceof TenzoError) return fail(error.message, 400);
-      console.error(`tenzo: ${parsed.data.type} failed:`, error);
-      return fail(`${parsed.data.type} failed: ${String(error)}`, 500);
-    }
+    const outcome = await executeCommand(engine, parsed.data);
+    if (outcome.ok) return c.json({ ok: true, result: outcome.result } satisfies CommandResponse);
+    return fail(outcome.error, outcome.fault === "client" ? 400 : 500);
   });
   app.all("/api/*", (c) => c.json({ ok: false, error: "No such API." } satisfies CommandResponse, 404));
 
+  // The access guard above has already refused a foreign Host or Origin before any upgrade.
   app.get(
     "/ws",
-    upgradeWebSocket(() => ({
-      onOpen(_event, ws) {
-        send(ws, {
-          type: "hello",
-          environmentId,
-          version: VERSION,
-          serverTime: new Date().toISOString(),
-        });
-      },
-      onMessage(event, ws) {
-        const frame = parseClientFrame(event.data);
-        if (frame?.type === "ping") send(ws, { type: "pong", at: new Date().toISOString() });
-      },
-    })),
+    upgradeWebSocket(() => socketHandlers({ environmentId, version: VERSION, engine })),
   );
 
   // SvelteKit content-hashes everything under _app/immutable; everything else must revalidate.
@@ -129,18 +105,4 @@ export function createApp({
   });
 
   return app;
-}
-
-function send(ws: { send(data: string): void }, frame: ServerFrame): void {
-  ws.send(JSON.stringify(frame));
-}
-
-function parseClientFrame(data: unknown): ClientFrame | null {
-  if (typeof data !== "string") return null;
-  try {
-    const parsed = ClientFrame.safeParse(JSON.parse(data));
-    return parsed.success ? parsed.data : null;
-  } catch {
-    return null;
-  }
 }

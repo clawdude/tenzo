@@ -35,6 +35,8 @@ pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
 
 The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS.
 
+On `/ws` the daemon sends a snapshot of active threads and open items, then every thread and item change as it happens; clients send the same commands as `POST /api/commands`, each answered by id. The frames are in `packages/contracts/src/frames.ts`; `packages/client-runtime` keeps the connection (reconnect, ping, wake-on-foreground) and a store the web app reads.
+
 | Variable | Default | |
 |---|---|---|
 | `TENZO_PORT` | `4780` | port to listen on |
