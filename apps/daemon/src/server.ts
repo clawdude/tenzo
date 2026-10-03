@@ -9,6 +9,7 @@ import type { DaemonConfig } from "./config.ts";
 import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
+import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
 
 export interface RunningDaemon {
@@ -23,6 +24,8 @@ export interface RunningDaemon {
 export interface DaemonDeps {
   /** The agents threads run. Default: Claude Code. Tests pass fakes. */
   adapters?: Partial<Record<"claude" | "codex", AgentAdapter>>;
+  /** How often silent WebSockets are pinged, and dropped if still silent next time (socket.ts). */
+  heartbeatMs?: number;
 }
 
 /**
@@ -50,7 +53,7 @@ export async function startDaemon(
     allowedHosts: config.allowedHosts,
     devOrigins: config.devOrigins,
   });
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.
   const websocket = { server: wss as unknown as WebSocketServerLike };
 
@@ -84,6 +87,7 @@ export async function startDaemon(
     throw error;
   }
   engine.start();
+  const stopHeartbeat = heartbeat(wss, deps.heartbeatMs);
   const { port } = server.address() as AddressInfo;
 
   let closing: Promise<void> | undefined;
@@ -94,6 +98,7 @@ export async function startDaemon(
     engine,
     close: () => {
       closing ??= (async () => {
+        stopHeartbeat();
         await engine.close();
         await new Promise<void>((resolve, reject) => {
           for (const client of wss.clients) client.terminate();

@@ -75,11 +75,11 @@ describe("startDaemon", () => {
 
   it("answers ping with pong", async () => {
     const daemon = await start();
-    const { ws, frames: got } = await frames(`ws://127.0.0.1:${daemon.port}/ws`, 2, (socket) =>
+    const { ws, frames: got } = await frames(`ws://127.0.0.1:${daemon.port}/ws`, 3, (socket) =>
       socket.send(JSON.stringify({ type: "ping", at: "now" })),
     );
     ws.close();
-    expect(got.map((f) => f.type)).toEqual(["hello", "pong"]);
+    expect(got.map((f) => f.type)).toEqual(["hello", "snapshot", "pong"]);
   });
 
   it("keeps the environment id across restarts", async () => {

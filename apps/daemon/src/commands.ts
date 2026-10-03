@@ -1,11 +1,35 @@
 import type { Command, CommandResult, CommandType } from "@tenzo/contracts";
 import type { Engine } from "./engine.ts";
+import { TenzoError } from "./errors.ts";
+
+/** How a command ended, ready for a transport to put on the wire. */
+export type Outcome =
+  | { ok: true; result: CommandResult<CommandType> }
+  /** `fault`: the client's mistake (unknown thread, wrong answer), or ours (a bug, git failing). */
+  | { ok: false; error: string; fault: "client" | "daemon" };
 
 /**
- * Runs one client command against the engine. Every transport goes through here: the CLI's
- * `POST /api/commands` now, the WebSocket (#7) next; they differ only in how bytes arrive.
- * A TenzoError is the client's mistake (unknown thread, wrong answer); anything else is ours.
+ * Runs a command for a transport and never throws. Both transports, the CLI's
+ * `POST /api/commands` and the WebSocket, come through here; they differ only in how bytes
+ * arrive. A TenzoError's message is the answer; anything else is logged and reported as ours.
  */
+export async function executeCommand(
+  engine: Engine | undefined,
+  command: Command,
+  log: (message: string, error: unknown) => void = (message, error) =>
+    console.error(`tenzo: ${message}`, error),
+): Promise<Outcome> {
+  if (!engine) return { ok: false, error: "This daemon runs no threads.", fault: "daemon" };
+  try {
+    return { ok: true, result: await runCommand(engine, command) };
+  } catch (error) {
+    if (error instanceof TenzoError) return { ok: false, error: error.message, fault: "client" };
+    log(`${command.type} failed:`, error);
+    return { ok: false, error: `${command.type} failed: ${String(error)}`, fault: "daemon" };
+  }
+}
+
+/** Runs one client command against the engine; throws what the engine throws. */
 export async function runCommand<C extends Command>(
   engine: Engine,
   command: C,

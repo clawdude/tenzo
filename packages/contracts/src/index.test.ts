@@ -46,7 +46,31 @@ describe("contracts", () => {
     expect(Command.safeParse({ type: "thread.delete" }).success).toBe(false);
   });
 
-  it("parses client frames by type", () => {
+  it("parses client frames by type, a command's shape included", () => {
     expect(ClientFrame.parse({ type: "ping", at: "x" }).type).toBe("ping");
+    const command = { type: "command", id: "1", command: { type: "snapshot" } };
+    expect(ClientFrame.safeParse(command).success).toBe(true);
+    expect(ClientFrame.safeParse({ ...command, id: "" }).success).toBe(false);
+    expect(ClientFrame.safeParse({ ...command, id: "x".repeat(65) }).success).toBe(false);
+    expect(ClientFrame.safeParse({ ...command, command: { type: "thread.delete" } }).success).toBe(
+      false,
+    );
+  });
+
+  it("parses command answers and change frames", () => {
+    expect(ServerFrame.safeParse({ type: "ok", id: "1", result: { anything: true } }).success).toBe(
+      true,
+    );
+    expect(ServerFrame.safeParse({ type: "error", id: null, error: "Not JSON." }).success).toBe(
+      true,
+    );
+    expect(ServerFrame.safeParse({ type: "error", error: "no id" }).success).toBe(false);
+    const snapshot = {
+      type: "snapshot",
+      snapshot: { environmentId: "env_abcdefghij0123456789", threads: [], items: [] },
+    };
+    expect(ServerFrame.safeParse(snapshot).success).toBe(true);
+    expect(ServerFrame.safeParse({ ...snapshot, snapshot: { threads: [] } }).success).toBe(false);
+    expect(ServerFrame.safeParse({ type: "item", change: "moved", item: {} }).success).toBe(false);
   });
 });
