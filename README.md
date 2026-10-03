@@ -104,7 +104,7 @@ The daemon folds the log into **items** (`apps/daemon/src/fold.ts`, a pure funct
 
 ### Who may call the daemon
 
-The daemon's commands (`POST /api/commands`, and `/ws`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding), and browser requests (WebSocket upgrades included, which get no CORS preflight) from any page but its own: the same host and port, an allowed host over https, or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
+The daemon's commands (`POST /api/commands`, and `/ws`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding), and browser requests (WebSocket upgrades included, which get no CORS preflight) from any page but its own: the same host and port it was reached at (for an allowed host, over https on any port, e.g. Tailscale Serve on `:8443`), or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
 
 ```bash
 TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net pnpm tenzo serve

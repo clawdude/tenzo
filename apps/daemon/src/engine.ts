@@ -203,7 +203,7 @@ export class Engine {
     return {
       environmentId: this.store.environmentId,
       threads: this.threads(),
-      items: openItems(this.store),
+      items: openItems(this.store).filter((i) => !this.#quiet.has(i.id)),
     };
   }
 
@@ -390,12 +390,15 @@ export class Engine {
       const [reply] = index === -1 ? [] : live.standing.splice(index, 1);
       if (reply) {
         // Answered for you from your earlier answer: logged, but never shown as a card.
-        this.#quiet.add(itemIdFor(event.requestId));
+        const itemId = itemIdFor(event.requestId);
+        this.#quiet.add(itemId);
         this.#append(event);
         try {
           respond(live.session, event.requestId, reply);
         } catch (error) {
           if (!(error instanceof TenzoError)) throw error;
+          // It didn't reach the agent: the item is yours after all, so show it.
+          this.#unquiet(itemId);
         }
         return;
       }
@@ -424,17 +427,35 @@ export class Engine {
   /** Tells subscribers what an appended event did, once it is stored. */
   #publish(event: RuntimeEvent, { seq, changes }: Appended): void {
     this.#emit({ type: "event", seq, environmentId: this.store.environmentId, event });
+    let announced = false;
     for (const change of changes) {
-      const quiet = this.#quiet.has(change.item.id);
-      if (quiet && change.type !== "opened") this.#quiet.delete(change.item.id);
-      if (!quiet) this.#emit({ type: "item", change });
+      if (this.#quiet.has(change.item.id)) {
+        // Being answered for you: silent while it opens and when it resolves. If it is left
+        // open instead (the agent ended first), it becomes an ordinary item and is shown.
+        if (change.type === "opened") continue;
+        this.#quiet.delete(change.item.id);
+        if (change.type === "resolved") continue;
+        this.#emit({ type: "item", change: { type: "opened", item: change.item } });
+      } else {
+        this.#emit({ type: "item", change });
+      }
+      announced = true;
       if (change.type === "resolved") {
         const waiter = this.#answering.get(change.item.id);
         this.#answering.delete(change.item.id);
         waiter?.(change.item);
       }
     }
-    if (changes.length > 0) this.#changed(event.threadId);
+    if (announced) this.#changed(event.threadId);
+  }
+
+  /** Shows an item that was being answered for you, as it now stands. */
+  #unquiet(itemId: QueueItemId): void {
+    if (!this.#quiet.delete(itemId)) return;
+    const item = getItem(this.store, itemId);
+    if (item?.status !== "open") return;
+    this.#emit({ type: "item", change: { type: "opened", item } });
+    this.#changed(item.threadId);
   }
 
   #waitForResolution(itemId: QueueItemId) {
@@ -476,7 +497,8 @@ export class Engine {
   #viewOf(thread: Thread): ThreadView {
     const runtime = loadFoldState(this.store, thread.id).runtime;
     const queued = queuedCount(this.store, thread.id);
-    const open = openItems(this.store, thread.id).length;
+    // An item being answered for you doesn't make the thread need you, not even for a moment.
+    const open = openItems(this.store, thread.id).filter((i) => !this.#quiet.has(i.id)).length;
     const live = this.#live.get(thread.id);
     const working =
       thread.status === "active" &&

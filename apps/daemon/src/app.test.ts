@@ -112,6 +112,25 @@ describe("who may call", () => {
     expect(res.status).toBe(503);
   });
 
+  it("serves the API behind Tailscale Serve on :8443 to that page only", async () => {
+    const ts = "andreas-mac-mini.tail6259b4.ts.net";
+    const behind = createApp({ environmentId, webDir, allowedHosts: [ts] });
+    const call = (origin: string) =>
+      behind.request("/api/commands", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          Host: `${ts}:8443`,
+          "X-Forwarded-Host": `${ts}:8443`,
+          Origin: origin,
+        },
+        body: '{"type":"snapshot"}',
+      });
+    expect((await call(`https://${ts}:8443`)).status).toBe(503); // through to the API
+    expect((await call(`https://${ts}:9443`)).status).toBe(403);
+    expect((await call(`http://${ts}:8443`)).status).toBe(403);
+  });
+
   it("takes commands as JSON only", async () => {
     const res = await post({ "content-type": "text/plain" });
     expect(res.status).toBe(415);

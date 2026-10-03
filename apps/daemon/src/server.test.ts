@@ -110,6 +110,30 @@ describe("startDaemon", () => {
     await expect(start()).rejects.toThrow(/Another tenzo daemon \(pid \d+\) is running/);
   });
 
+  it("upgrades /ws for the Tailscale Serve page on :8443, as Serve forwards it", async () => {
+    const ts = "andreas-mac-mini.tail6259b4.ts.net";
+    const daemon = await startDaemon(
+      { ...config(home), allowedHosts: [ts] },
+      { adapters: { claude: new FakeAdapter() } },
+    );
+    running.push(daemon);
+    const status = (origin: string) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}/ws`, {
+          headers: { Host: `${ts}:8443`, "X-Forwarded-Host": `${ts}:8443`, Origin: origin },
+        });
+        ws.on("open", () => {
+          ws.close();
+          resolve(101);
+        });
+        ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", reject);
+      });
+    expect(await status(`https://${ts}:8443`)).toBe(101);
+    expect(await status(`https://${ts}:9443`)).toBe(403);
+    expect(await status(`http://${ts}:8443`)).toBe(403);
+  });
+
   it("refuses WebSocket upgrades from another origin or host", async () => {
     const daemon = await start();
     const url = `ws://127.0.0.1:${daemon.port}/ws`;

@@ -11,7 +11,8 @@ import type { MiddlewareHandler } from "hono";
  *   the Tailscale Serve host (`TENZO_ALLOWED_HOSTS`);
  * - a request that carries an `Origin` (every browser request that matters does, WebSocket
  *   upgrades included) must come from the daemon's own pages: the very host and port it was
- *   reached at, a configured host over https (Tailscale Serve), or a dev server named in
+ *   reached at (over https for a configured host, e.g. Tailscale Serve on :8443), or a dev
+ *   server named in
  *   `TENZO_DEV_ORIGIN`. Not any other localhost port: that is someone else's dev server, a local
  *   tool's UI, or a package's page. Requests without an Origin are not from a web page: the
  *   CLI, curl.
@@ -55,8 +56,10 @@ export function originAllowed(
     // The daemon's own page: exactly the host and port this request came in on.
     return host !== undefined && url.host.toLowerCase() === host.toLowerCase();
   }
-  if (url.protocol === "https:" && url.port === "") {
-    return policy.allowedHosts.some((h) => normalize(h) === name);
+  if (url.protocol === "https:" && policy.allowedHosts.some((h) => normalize(h) === name)) {
+    // A configured host behind an https proxy (Tailscale Serve, any port): the page must be
+    // the one this request came in for, so its host and port equal the Host header exactly.
+    return host !== undefined && normalizeHost(url.host) === normalizeHost(host);
   }
   return false;
 }
@@ -104,6 +107,19 @@ function hostname(url: string): string | null {
     return normalize(new URL(url).hostname);
   } catch {
     return null;
+  }
+}
+
+/**
+ * A `host[:port]` compared as a browser would: lower case, no trailing dot on the name, and no
+ * `:443`, which an https Origin never spells out.
+ */
+function normalizeHost(hostPort: string): string {
+  try {
+    const url = new URL(`https://${hostPort}`);
+    return url.port === "" ? normalize(url.hostname) : `${normalize(url.hostname)}:${url.port}`;
+  } catch {
+    return hostPort.toLowerCase();
   }
 }
 
