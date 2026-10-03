@@ -34,6 +34,8 @@ export interface FoldState {
   readonly runtime: ThreadRuntime;
   /** The thread's open items, oldest first. */
   readonly open: readonly QueueItem[];
+  /** Every request the thread has opened an item for, open or not: a repeat opens nothing. */
+  readonly known: ReadonlySet<RequestId>;
 }
 
 /** Something that happened to an item; `item` is how it is now. */
@@ -54,7 +56,7 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   turnId: null,
   context: "",
 };
-export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [] };
+export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
 /** Context kept on an item: about two lines on a phone. */
 export const CONTEXT_LIMIT = 280;
@@ -87,7 +89,10 @@ export function foldEvent(
         changes.push({ type: "detached", item: detached });
         return detached;
       });
-      return { state: { runtime: { ...runtime, live: false, turnId: null }, open }, changes };
+      return {
+        state: { ...state, runtime: { ...runtime, live: false, turnId: null }, open },
+        changes,
+      };
     }
     case "turn.started":
       return same({ ...state, runtime: { ...runtime, turnId: event.turnId, context: "" } });
@@ -105,10 +110,15 @@ export function foldEvent(
     }
     case "user-input.requested":
     case "request.opened": {
-      if (state.open.some((item) => item.requestId === event.requestId)) return same(state);
+      // Seen before, even if long resolved: never a second item for it.
+      if (state.known.has(event.requestId)) return same(state);
       const item = openItem(event, runtime.context, environmentId);
       return {
-        state: { ...state, open: [...state.open, item] },
+        state: {
+          ...state,
+          open: [...state.open, item],
+          known: new Set([...state.known, event.requestId]),
+        },
         changes: [{ type: "opened", item }],
       };
     }
@@ -144,7 +154,10 @@ export function foldEvent(
           },
         }),
       );
-      return { state: { runtime: { ...runtime, live: false, turnId: null }, open: [] }, changes };
+      return {
+        state: { ...state, runtime: { ...runtime, live: false, turnId: null }, open: [] },
+        changes,
+      };
     }
     case "session.configured":
     case "item.started":

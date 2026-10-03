@@ -68,6 +68,22 @@ describe("originAllowed (cross-site requests, WebSockets included)", () => {
     expect(originAllowed(`https://${host}`, host, none)).toBe(false);
   });
 
+  it("allows Tailscale Serve on another port when Origin and Host name the same host:port", () => {
+    const host = "andreas-mac-mini.tail6259b4.ts.net";
+    expect(hostAllowed(`${host}:8443`, tailnet)).toBe(true);
+    expect(originAllowed(`https://${host}:8443`, `${host}:8443`, tailnet)).toBe(true);
+    expect(originAllowed(`https://${host.toUpperCase()}:8443`, `${host}:8443`, tailnet)).toBe(true);
+    expect(originAllowed(`https://${host}`, `${host}:443`, tailnet)).toBe(true);
+    // Mismatched ports are another page; http is refused at any port.
+    expect(originAllowed(`https://${host}:8444`, `${host}:8443`, tailnet)).toBe(false);
+    expect(originAllowed(`https://${host}`, `${host}:8443`, tailnet)).toBe(false);
+    expect(originAllowed(`https://${host}:8443`, host, tailnet)).toBe(false);
+    expect(originAllowed(`http://${host}:8443`, `${host}:8443`, tailnet)).toBe(false);
+    expect(originAllowed(`https://other.tail6259b4.ts.net:8443`, `${host}:8443`, tailnet)).toBe(
+      false,
+    );
+  });
+
   it("refuses other sites, null origins and other schemes", () => {
     for (const origin of [
       "https://evil.example",

@@ -236,6 +236,13 @@ describe("foldEvent: several requests", () => {
     expect(third.state.open).toEqual([]);
   });
 
+  it("never reopens a request id after it was resolved, as the store does", () => {
+    const { state, items } = fold(started(), asked(REQ1), answered(REQ1), asked(REQ1));
+    expect(state.open).toEqual([]);
+    expect(items).toHaveLength(1);
+    expect(items[0]?.status).toBe("resolved");
+  });
+
   it("ignores a repeated request and a resolution for nothing open", () => {
     const { state, items } = fold(started(), asked(REQ1), asked(REQ1), decided(REQ2), answered(REQ1), answered(REQ1));
     expect(items).toHaveLength(1);

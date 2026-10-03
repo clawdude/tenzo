@@ -353,6 +353,7 @@ describe("Engine: standing answers match the full request, never the shown copy"
       s.onPrompt = () => s.askPermission("Bash", reask);
     };
     const [item] = d.engine.snapshot().items;
+    d.changes.length = 0; // from here on: what clients see of the resumed turn
     await d.engine.answer(item?.id ?? "", { kind: "permission", decision: "allow" });
     await settle();
     return d.adapter.last;
@@ -380,7 +381,38 @@ describe("Engine: standing answers match the full request, never the shown copy"
     const quietId = `itm_${resumed.answered[0]?.requestId.slice(4)}`;
     const told = d.changes.filter((c) => c.type === "item" && c.change.item.id === quietId);
     expect(told).toEqual([]);
+    // Nor does the thread ever look like it needs you.
+    const needy = d.changes.filter((c) => c.type === "thread" && c.thread.activity === "needs-you");
+    expect(needy).toEqual([]);
     expect(d.engine.snapshot().items).toEqual([]);
+  });
+
+  it("shows the item after all when the answer can't reach the agent", async () => {
+    const d = daemon();
+    d.adapter.onStart = (s) => {
+      s.onPrompt = () => s.askPermission("Bash", approved);
+    };
+    await d.engine.createThread({ project: "app", prompt: "build" });
+    await settle();
+    d.adapter.last.crash();
+    await settle();
+    d.adapter.onStart = (s) => {
+      s.onPrompt = () => {
+        s.askPermission("Bash", approved);
+        s.crash(); // gone before the standing answer arrives
+      };
+    };
+    const [item] = d.engine.snapshot().items;
+    d.changes.length = 0;
+    await d.engine.answer(item?.id ?? "", { kind: "permission", decision: "allow" });
+    await settle();
+    const [left] = d.engine.snapshot().items;
+    expect(left).toMatchObject({ status: "open", detached: true });
+    const told = d.changes.flatMap((c) =>
+      c.type === "item" && c.change.item.id === left?.id ? [c.change.type] : [],
+    );
+    expect(told).toEqual(["opened", "detached"]);
+    expect(d.engine.view(left?.threadId ?? "").activity).toBe("needs-you");
   });
 });
 

@@ -2,6 +2,7 @@ import {
   type AgentKind,
   type QueueItem,
   QueueItem as QueueItemSchema,
+  type RequestId,
   RuntimeEvent,
   type StoredEvent,
   type ThreadId,
@@ -75,6 +76,12 @@ export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
       context: String(row.context ?? ""),
     },
     open: queryItems(store, "WHERE thread_id = ? AND status = 'open'", threadId),
+    known: new Set(
+      store.db
+        .prepare("SELECT request_id FROM items WHERE thread_id = ? ORDER BY created_at, rowid")
+        .all(threadId)
+        .map((row) => String(row.request_id) as RequestId),
+    ),
   };
 }
 
