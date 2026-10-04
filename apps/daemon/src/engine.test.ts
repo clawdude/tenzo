@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { FakeAdapter, type FakeSession } from "./agent/fake-agent.ts";
 import { carryOn, RESTART_PROMPT } from "./answers.ts";
 import { executeCommand } from "./commands.ts";
-import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, STILL_LANDED } from "./engine.ts";
+import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, sentence, STILL_LANDED } from "./engine.ts";
 import { STALLED_PROMPT } from "./prompts.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
@@ -1248,6 +1248,10 @@ describe("Engine: review actions and landing", () => {
     // The card says it still archives once a turn ends, whatever Retry gives it to do.
     expect(d.engine.snapshot().items[0]?.error?.message).toContain(STILL_LANDED);
     expect(STILL_LANDED).toMatch(/already marked landed, so it archives at its next turn end or when Tenzo restarts/);
+    expect(d.engine.snapshot().items[0]?.error?.message).toMatch(/[^.][.!?] It's already marked landed/);
+    // Git's errors mostly end without a period: the next sentence doesn't run into them.
+    expect(sentence("fatal: not a git repository\n")).toBe("fatal: not a git repository.");
+    expect(sentence("Commit them first.")).toBe("Commit them first.");
     expect(d.engine.view(thread.id)).toMatchObject({ status: "active", phase: "landing" });
     // Retry tells the agent what is in the way.
     const [card] = d.engine.snapshot().items;
