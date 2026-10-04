@@ -199,6 +199,10 @@ interface Live {
   switching: boolean;
   /** Let go of (it wouldn't end): nothing it still says reaches the log. */
   abandoned: boolean;
+  /** Started to change the thread's settings (`#restartSession`): never restarted for a timeout. */
+  restarted: boolean;
+  /** The next turn goes without asking the session to switch first (a switch timed out). */
+  asIs: boolean;
 }
 
 export class Engine {
@@ -1071,12 +1075,16 @@ export class Engine {
     // The thread's settings may have changed since its session started (its own model, its
     // project's config, Build it): the session takes them before the turn goes, or, when it
     // can't live, ends here at the turn boundary and the next one starts with them (#read pumps
-    // again). Not while it has work running in the background, which ending it would kill: the
-    // turn goes to it as it is, and the change waits for a turn boundary without, or for the
-    // session's natural end (the next one starts with the settings of the day).
-    if (live) {
+    // again). Not while it has work running in the background, or a turn of Claude's own (a
+    // background task reporting), which ending it would cut off: the turn goes to it as it is,
+    // and the change waits for a turn boundary without, or for the session's natural end (the
+    // next one starts with the settings of the day). After a switch that timed out, the turn
+    // goes as things are (`asIs`).
+    if (live?.asIs) {
+      live.asIs = false;
+    } else if (live) {
       const change = live.session.reconfigure(this.#settingsOf(thread));
-      if (change === "restart" && !live.session.backgroundWork) return this.#restartSession(live);
+      if (change === "restart" && this.#canRestart(live)) return this.#restartSession(live);
       if (change !== "unchanged" && change !== "restart") return this.#awaitSwitch(live, change);
     }
 
@@ -1124,9 +1132,18 @@ export class Engine {
   }
 
   /**
+   * Whether ending the session now would cut nothing short: no background work (it would die
+   * with the process) and no turn Claude started by itself (a background task reporting).
+   */
+  #canRestart(live: Live): boolean {
+    return !live.session.backgroundWork && loadFoldState(this.store, live.threadId).runtime.turnId === null;
+  }
+
+  /**
    * The next turn waits for a switch under way, up to `switchTimeoutMs`. Claude not answering
-   * by then, the session ends at this turn boundary instead (`#restartSession`), unless it has
-   * background work, which would die with it: then the turn goes as things are.
+   * by then, the session ends at this turn boundary instead (`#restartSession`), once: a
+   * session that is itself such a restart, or one that can't end now (`#canRestart`), sends the
+   * turn as things are, with a note, rather than restarting again and again.
    */
   #awaitSwitch(live: Live, change: Promise<void>): void {
     live.switching = true;
@@ -1143,10 +1160,15 @@ export class Engine {
         this.#append(
           draft(getThread(this.store, live.threadId), {
             type: "runtime.error",
-            payload: { message: "Claude didn't confirm the switch of model or thinking in time." },
+            payload: {
+              message: live.restarted
+                ? "Claude didn't confirm the switch of model or thinking in time; this turn runs on what it has."
+                : "Claude didn't confirm the switch of model or thinking in time.",
+            },
           }),
         );
-        if (!live.session.backgroundWork) return this.#restartSession(live);
+        if (!live.restarted && this.#canRestart(live)) return this.#restartSession(live);
+        live.asIs = true;
       }
       this.#pump(live.threadId);
     });
@@ -1246,6 +1268,8 @@ export class Engine {
       restarting: false,
       switching: false,
       abandoned: false,
+      restarted,
+      asIs: false,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);

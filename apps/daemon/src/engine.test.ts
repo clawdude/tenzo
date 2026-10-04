@@ -2184,6 +2184,47 @@ describe("Engine: project config", () => {
     ]);
   });
 
+  it("a switch that always hangs restarts the session once, then the turn goes as things are", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 20 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    d.adapter.onStart = (session) => {
+      session.reconfigureResult = new Promise<void>(() => {});
+    };
+    d.adapter.last.reconfigureResult = new Promise<void>(() => {});
+    d.adapter.last.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.sessions[0]?.prompts).toEqual(["Go"]);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    const notes = d.engine
+      .events(thread.id)
+      .events.flatMap((e) => (e.event.type === "runtime.error" ? [e.event.payload.message] : []));
+    expect(notes).toEqual([
+      "Claude didn't confirm the switch of model or thinking in time.",
+      "Claude didn't confirm the switch of model or thinking in time; this turn runs on what it has.",
+    ]);
+    expect(d.engine.snapshot().items).toEqual([]);
+  });
+
+  it("never restarts in the middle of a turn Claude started by itself", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.complete();
+    // A background task reports: Claude opens a turn of its own.
+    first.emit({ type: "turn.started", turnId: "33333333-3333-4333-8333-333333333333", payload: {} });
+    await settle();
+    first.reconfigureResult = "restart";
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+  });
+
   it("a session that won't end for a restart is let go of: its prompts go on a card, and Retry sends them", async () => {
     const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
