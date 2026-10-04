@@ -43,6 +43,32 @@ export interface StartSessionInput {
    * and an approved proposal carries the build prompt (prompts.ts). None: nothing is appended.
    */
   prompts?: ThreadPrompts;
+  /** The daemon, for the tools that need it (`start_thread`, phase checks). None: they refuse. */
+  host?: SessionHost;
+}
+
+/** What a session asks of the daemon while it runs. */
+export interface SessionHost {
+  /**
+   * Where the thread is now, by the daemon's log. It moves under a running session (Merge on
+   * the finished card makes it landing), so the session asks instead of keeping its own.
+   */
+  phase(): ThreadPhase;
+  /**
+   * Checks, with git alone, that the thread's work has landed before `landed` is believed:
+   * nothing uncommitted, and everything its branch changes is in the default branch on origin.
+   * Throws a TenzoError saying what isn't so.
+   */
+  checkLanded(): Promise<void>;
+  /**
+   * Starts a thread on this one's behalf (origin `agent`, this thread its parent). Refused for
+   * a thread an agent started, and past a few per thread: no fan-out.
+   */
+  startThread(input: {
+    prompt: string;
+    project?: string;
+    title?: string;
+  }): Promise<{ id: ThreadId; title: string; projectName: string; branch: string }>;
 }
 
 /** One running agent process for one thread. */

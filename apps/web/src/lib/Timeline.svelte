@@ -93,9 +93,13 @@
 			case 'question':
 			case 'permission':
 			case 'proposal':
+			case 'ready':
 				return row.answer === null ? 'asking' : 'quiet';
 			case 'report':
+			case 'landed':
 				return 'done';
+			case 'started':
+				return row.failed ? 'fail' : 'quiet';
 			case 'note':
 				return row.tone === 'fail' ? 'fail' : 'quiet';
 			default:
@@ -164,6 +168,11 @@
 							<span class={['min-w-0 text-[16px] break-words', strong ? 'font-semibold text-ink' : 'text-ink-soft']}>{title}</span>
 							<span class="shrink-0 text-[13px] text-faint tabular-nums">{clockOf(row.at)}</span>
 						</div>
+					{/snippet}
+					{#snippet link(url: string, text: string)}
+						{#if /^https?:\/\//i.test(url)}
+							<a href={url} target="_blank" rel="noopener noreferrer" class="self-start text-[14px] text-ink underline underline-offset-2">{text}</a>
+						{/if}
 					{/snippet}
 					{#snippet more(key: string, cut: boolean)}
 						{#if cut}
@@ -246,6 +255,27 @@
 						<div class="md text-[14px] leading-snug text-mute">{@html renderMarkdown(t.more ? `${t.head}…` : t.head)}</div>
 						{@render more(row.key, t.cut)}
 						{#if row.answer}<span class="text-[14px] text-mute">You: {row.answer}</span>{/if}
+					{:else if row.kind === 'ready'}
+						{@const t = shown(row.key, row.summary, OUTPUT)}
+						{@render head(`Ready to merge: ${row.headline}`, row.answer === null)}
+						<div class="md text-[14px] leading-snug text-mute">{@html renderMarkdown(t.more ? `${t.head}…` : t.head)}</div>
+						{@render more(row.key, t.cut)}
+						{@render link(row.url, 'Open the PR')}
+						<span class="text-[14px] text-mute">{row.answer === null ? 'Waiting for you' : `You: ${row.answer}`}</span>
+					{:else if row.kind === 'landed'}
+						{@render head('Landed', true)}
+						{#if row.summary}<p class="text-[14px] leading-snug text-mute">{row.summary}</p>{/if}
+						{@render link(row.url, 'The merged PR')}
+					{:else if row.kind === 'started'}
+						{#if row.childId}
+							<a href={`/threads/${row.childId}`} class="flex flex-col" data-testid="child-thread">
+								{@render head(`Started a thread: ${row.title}`)}
+								<span class="text-[14px] text-mute underline-offset-2">Open its timeline ›</span>
+							</a>
+						{:else}
+							{@render head(row.failed ? `Couldn't start a thread: ${row.title}` : `Starting a thread: ${row.title}`)}
+							{#if row.detail}<p class="text-[14px] leading-snug text-fail">{row.detail}</p>{/if}
+						{/if}
 					{:else if row.kind === 'note'}
 						<div class="flex items-baseline justify-between gap-3">
 							<span class={['min-w-0 text-[15px] break-words', row.tone === 'fail' ? 'text-fail' : 'text-mute']}>{row.text}</span>

@@ -127,6 +127,53 @@ describe('timelineOf', () => {
 		expect(tools.calls.map((c) => c.summary)).toEqual(['Read: src/a.ts', 'Bash: ls /home/wt/thr_1x /etc']);
 	});
 
+	it("reads landing: Merge or Open PR, the ready PR and your answer, wakes, landed, stuck", () => {
+		const rows = timelineOf([
+			stored(1, { type: 'report.submitted', requestId: 'req_dddddddddddddddddddd', payload: { summary: 'Done.', howToTest: '', checks: [] } }),
+			stored(2, { type: 'report.resolved', requestId: 'req_dddddddddddddddddddd', payload: { decision: 'pr' } }),
+			stored(3, { type: 'wake.scheduled', payload: { at: new Date(2026, 9, 4, 15, 30).toISOString(), why: 'CI' } }),
+			stored(4, { type: 'wake.fired', payload: { why: 'CI' } }),
+			stored(5, {
+				type: 'merge.ready',
+				requestId: 'req_eeeeeeeeeeeeeeeeeeee',
+				payload: { url: 'https://github.com/o/r/pull/3', summary: 'Green, approved.' }
+			}),
+			stored(6, { type: 'merge.resolved', requestId: 'req_eeeeeeeeeeeeeeeeeeee', payload: { decision: 'merge' } }),
+			stored(7, { type: 'landing.stuck', payload: { cause: 'unarchived', message: 'Work left over', prompts: [] } }),
+			stored(8, { type: 'thread.landed', payload: { url: 'https://github.com/o/r/pull/3', summary: 'Merged.' } })
+		]);
+		expect(rows.map((r) => [r.kind, 'answer' in r ? r.answer : 'text' in r ? r.text : ''])).toEqual([
+			['report', 'Open PR'],
+			['note', 'Landing: it opens the PR and sees it through review; you merge'],
+			['note', 'Asked to be woken at 15:30: CI'],
+			['note', 'Woke up: CI'],
+			['ready', 'Merge'],
+			['note', 'Landing: it opens the PR, sees it through CI and review, and merges'],
+			['note', 'Work left over'],
+			['landed', '']
+		]);
+		expect(rows[4]).toMatchObject({ url: 'https://github.com/o/r/pull/3', summary: 'Green, approved.' });
+		expect(rows[6]).toMatchObject({ tone: 'fail' });
+		expect(rows[7]).toMatchObject({ summary: 'Merged.' });
+	});
+
+	it('links a thread it started, by the id start_thread answered with', () => {
+		const call = { toolKind: 'mcp', toolName: 'mcp__tenzo__start_thread' };
+		const rows = timelineOf([
+			tool(1, 's1', 'started', { ...call, input: { prompt: 'Fix the docs\nin full', title: 'Docs' } }),
+			tool(2, 's1', 'completed', {
+				...call,
+				output: 'Started thr_bbbbbbbbbbbbbbbbbbbb ("Fix the docs") in app, on tenzo/fix-the-docs. It talks to the person on its own.'
+			}),
+			tool(3, 's2', 'started', { ...call, input: { prompt: 'Another' } }),
+			tool(4, 's2', 'completed', { ...call, status: 'failed', output: 'A thread can start 3 at most.' })
+		]);
+		expect(rows).toMatchObject([
+			{ kind: 'started', childId: 'thr_bbbbbbbbbbbbbbbbbbbb', title: 'Fix the docs', failed: false },
+			{ kind: 'started', childId: null, title: 'Another', failed: true, detail: 'A thread can start 3 at most.' }
+		]);
+	});
+
 	it('takes a prompt from its user message when the turn carried none', () => {
 		const rows = timelineOf([
 			stored(1, {

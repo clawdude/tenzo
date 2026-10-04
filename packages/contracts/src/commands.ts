@@ -133,7 +133,8 @@ export const CommandResults = {
     item: QueueItem,
     /**
      * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
-     * asked had stopped (or it is an error item), so the answer goes to it as its next prompt.
+     * asked had stopped, or nothing waits on the item (an error, finished work, a ready PR), so
+     * the answer goes to it as its next prompt.
      * `none`: nothing goes to the agent (finished work marked done). `archived`: an error item
      * answered with Archive; the thread is gone.
      */

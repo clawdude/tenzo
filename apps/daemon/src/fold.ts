@@ -33,16 +33,26 @@ export interface ThreadRuntime {
   readonly turnId: TurnId | null;
   /** What the agent said last in the current turn, trimmed: the context of its next item. */
   readonly context: string;
-  /** Discussing until a proposal is approved, then building; review once the agent reports. */
+  /**
+   * Discussing until a proposal is approved, then building; review once the agent reports;
+   * landing after Merge or Open PR, building again after Needs changes.
+   */
   readonly phase: ThreadPhase;
   /** Screenshots attached since the last report: they go on the next one. */
   readonly attachments: readonly Attachment[];
   /** The dev server the agent exposed last; the daemon forwards the thread's live base to it. */
   readonly preview: Preview | null;
+  /** When the agent asked to be woken next, and why (`wake_me`); null when it didn't. */
+  readonly wake: Wake | null;
   /** The current (or last) turn's prompt, when Tenzo sent it: what Retry sends again. */
   readonly prompt: string | null;
   /** The agent's last `runtime.error` in the current turn: why it failed, if it does. */
   readonly error: string | null;
+}
+
+export interface Wake {
+  at: string;
+  why: string;
 }
 
 export interface FoldState {
@@ -73,6 +83,7 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   phase: "discussing",
   attachments: [],
   preview: null,
+  wake: null,
   prompt: null,
   error: null,
 };
@@ -103,13 +114,40 @@ export const PROPOSAL_OPTIONS: readonly UserInputOption[] = [
   { label: "Build it", value: "build", description: "", recommended: true },
 ];
 
-/** Finished work's one button for now; Merge, Open PR and Needs changes come with #21. */
+/**
+ * Finished work's buttons (PRODUCT.md §4): Merge is the suggestion; Needs changes is the free
+ * text under them. Done (nothing to land) stays for work that was never meant to merge.
+ */
 export const FINISHED_OPTIONS: readonly UserInputOption[] = [
-  { label: "Done", value: "done", description: "", recommended: true },
+  { label: "Merge", value: "merge", description: "Open the PR, see it through, merge it", recommended: true },
+  { label: "Open PR", value: "pr", description: "Open the PR; ask me before merging", recommended: false },
+  { label: "Done", value: "done", description: "Nothing to land", recommended: false },
+];
+
+/** A ready PR's one button. Not yet is the free text under it. */
+export const READY_OPTIONS: readonly UserInputOption[] = [
+  { label: "Merge", value: "merge", description: "", recommended: true },
 ];
 
 /** What a finished item asks when the agent gave no headline. */
 export const FINISHED_ASK = "Ready for review";
+
+/** What a ready item asks when the agent gave no headline. */
+export const READY_ASK = "Ready to merge";
+
+/**
+ * The kinds of item an agent asks and then waits on, in its turn. Finished work, ready PRs and
+ * errors wait on you, not on the agent.
+ */
+const ASKS: ReadonlySet<QueueItem["kind"]> = new Set(["question", "permission", "proposal"]);
+
+/**
+ * The agent's turn is waiting on you: an open ask from its live session. A detached ask (from
+ * a session that has ended), finished work, a ready PR or an error card doesn't count.
+ */
+export function waitsOnYou(open: readonly QueueItem[]): boolean {
+  return open.some((item) => ASKS.has(item.kind) && !item.detached);
+}
 
 type Asking =
   | RuntimeEventOf<"user-input.requested">
@@ -131,10 +169,10 @@ export function foldEvent(
     case "session.exited": {
       // Nothing is waiting on the open requests any more, and the turn is over. The items stay:
       // what was asked still needs an answer, and answering resumes the session (engine.ts).
-      // Finished work waits on you, not on the agent: it never detaches.
+      // Finished work and ready PRs wait on you, not on the agent: they never detach.
       const changes: ItemChange[] = [];
       const open = state.open.map((item) => {
-        if (item.detached || item.kind === "finished" || item.kind === "error") return item;
+        if (item.detached || !ASKS.has(item.kind)) return item;
         const detached = { ...item, detached: true };
         changes.push({ type: "detached", item: detached });
         return detached;
@@ -150,7 +188,7 @@ export function foldEvent(
       if (
         event.payload.exitKind !== "error" ||
         runtime.turnId === null ||
-        state.open.length > 0
+        waitsOnYou(state.open)
       ) {
         return { state: ended, changes };
       }
@@ -325,8 +363,72 @@ export function foldEvent(
     case "report.submitted": {
       if (state.known.has(event.requestId)) return same(state);
       // A newer report replaces the one still waiting: one finished card per thread.
+      const superseded = supersede(state, "finished", event.createdAt);
+      const item = finishedItem(event, runtime, environmentId);
+      return {
+        state: {
+          // Only built work goes to review: a report before Build it (the adapter refuses one)
+          // must not skip the proposal, so the thread keeps discussing; nor does a report while
+          // landing (refused too) undo Merge or Open PR.
+          runtime: {
+            ...runtime,
+            phase: runtime.phase === "building" || runtime.phase === "review" ? "review" : runtime.phase,
+            attachments: [],
+          },
+          open: [...state.open.filter((open) => open.kind !== "finished"), item],
+          known: new Set([...state.known, event.requestId]),
+        },
+        changes: [...superseded, { type: "opened", item }],
+      };
+    }
+    case "report.resolved": {
+      const { decision, note } = event.payload;
+      // Like an approval, the answer moves the thread whether or not its card is still open.
+      const phase =
+        decision === "merge" || decision === "pr"
+          ? ("landing" as const)
+          : decision === "changes"
+            ? ("building" as const)
+            : runtime.phase;
+      return resolve(
+        { ...state, runtime: { ...runtime, phase } },
+        event,
+        decision === "changes" ? { kind: "changes", note: note ?? "" } : { kind: decision },
+      );
+    }
+    case "merge.ready": {
+      if (state.known.has(event.requestId)) return same(state);
+      // One ready card per thread: a newer one replaces it.
+      const superseded = supersede(state, "ready", event.createdAt);
+      const item = readyItem(event, runtime.context, environmentId);
+      return {
+        state: {
+          ...state,
+          open: [...state.open.filter((open) => open.kind !== "ready"), item],
+          known: new Set([...state.known, event.requestId]),
+        },
+        changes: [...superseded, { type: "opened", item }],
+      };
+    }
+    case "merge.resolved": {
+      const { decision, note } = event.payload;
+      return resolve(
+        state,
+        event,
+        decision === "merge" ? { kind: "merge" } : { kind: "changes", note: note ?? "" },
+      );
+    }
+    case "wake.scheduled":
+      return same({
+        ...state,
+        runtime: { ...runtime, wake: { at: event.payload.at, why: event.payload.why } },
+      });
+    case "wake.fired":
+      return same({ ...state, runtime: { ...runtime, wake: null } });
+    case "landing.stuck": {
+      // One landing card at a time: a newer one says what is wrong now.
       const superseded = state.open
-        .filter((open) => open.kind === "finished")
+        .filter((open) => open.kind === "error" && isLandingCause(open.error?.cause))
         .map(
           (open): ItemChange => ({
             type: "resolved",
@@ -338,24 +440,13 @@ export function foldEvent(
             },
           }),
         );
-      const item = finishedItem(event, runtime, environmentId);
-      return {
-        state: {
-          // Only built work goes to review: a report before Build it (the adapter refuses one)
-          // must not skip the proposal, so the thread keeps discussing.
-          runtime: {
-            ...runtime,
-            phase: runtime.phase === "discussing" ? "discussing" : "review",
-            attachments: [],
-          },
-          open: [...state.open.filter((open) => open.kind !== "finished"), item],
-          known: new Set([...state.known, event.requestId]),
-        },
-        changes: [...superseded, { type: "opened", item }],
+      const rest: FoldState = {
+        ...state,
+        open: state.open.filter((open) => !superseded.some((s) => s.item.id === open.id)),
       };
+      const { cause, message, prompts } = event.payload;
+      return withError(rest, superseded, event, runtime, environmentId, { cause, message, prompts });
     }
-    case "report.resolved":
-      return resolve(state, event, { kind: "done" });
     case "thread.archived": {
       const changes = state.open.map(
         (open): ItemChange => ({
@@ -371,7 +462,7 @@ export function foldEvent(
       return {
         state: {
           ...state,
-          runtime: { ...runtime, live: false, turnId: null, preview: null },
+          runtime: { ...runtime, live: false, turnId: null, preview: null, wake: null },
           open: [],
         },
         changes,
@@ -379,6 +470,8 @@ export function foldEvent(
     }
     case "session.configured":
     case "item.started":
+    // The engine archives the thread once the turn that landed it ends; the log says so then.
+    case "thread.landed":
       return same(state);
   }
 }
@@ -422,7 +515,16 @@ export function errorHeadline(cause: ItemError["cause"], agent: AgentKind): stri
       return `${name} stopped mid-turn`;
     case "start":
       return `${name} couldn't start`;
+    case "stalled":
+      return "Landing stalled";
+    case "unarchived":
+      return "Landed, but not archived";
   }
+}
+
+/** The error causes of landing cards (`landing.stuck`): Retry sends what they say. */
+export function isLandingCause(cause: ItemError["cause"] | undefined): boolean {
+  return cause === "stalled" || cause === "unarchived";
 }
 
 /** The last paragraphs of an assistant message that fit in `CONTEXT_LIMIT`, whitespace folded. */
@@ -534,7 +636,7 @@ function finishedItem(
     context: runtime.context,
     ask: headline || FINISHED_ASK,
     options: [...FINISHED_OPTIONS],
-    suggested: "done",
+    suggested: "merge",
     questions: [],
     finished: {
       ...(headline ? { headline } : {}),
@@ -551,6 +653,48 @@ function finishedItem(
     resolution: null,
     snoozedUntil: null,
   };
+}
+
+/** A ready PR, from `ready_to_merge`: quick lane, since the agent is waiting on your Merge. */
+function readyItem(
+  event: RuntimeEventOf<"merge.ready">,
+  context: string,
+  environmentId: EnvironmentId,
+): QueueItem {
+  const { url, summary, headline } = event.payload;
+  return {
+    id: itemIdFor(event.requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "quick",
+    kind: "ready",
+    requestId: event.requestId,
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    context,
+    ask: headline || READY_ASK,
+    options: [...READY_OPTIONS],
+    suggested: "merge",
+    questions: [],
+    ready: { url, summary },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  };
+}
+
+/** The thread's open items of `kind`, resolved as replaced by a newer one. */
+function supersede(state: FoldState, kind: QueueItem["kind"], at: string): ItemChange[] {
+  return state.open
+    .filter((open) => open.kind === kind)
+    .map(
+      (open): ItemChange => ({
+        type: "resolved",
+        item: { ...open, status: "resolved", resolvedAt: at, resolution: { kind: "superseded" } },
+      }),
+    );
 }
 
 /** `state` with an error item opened by `event`, added to `changes`. */
@@ -603,6 +747,7 @@ function resolve(
     | RuntimeEventOf<"request.resolved">
     | RuntimeEventOf<"proposal.resolved">
     | RuntimeEventOf<"report.resolved">
+    | RuntimeEventOf<"merge.resolved">
     | RuntimeEventOf<"error.resolved">,
   resolution: QueueItemResolution,
 ): Folded {

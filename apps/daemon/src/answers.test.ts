@@ -280,6 +280,45 @@ describe("checkAnswer", () => {
       checkAnswer(permission, { kind: "permission", decision: "deny", message: "  " }),
     ).toEqual({ kind: "permission", decision: "deny" });
   });
+
+  it("takes Merge, Open PR or Done on finished work, and wants a note for Needs changes", () => {
+    const finished = { ...permission, kind: "finished" as const, permission: undefined };
+    expect(checkAnswer(finished, { kind: "finished", decision: "merge", note: "x" })).toEqual({
+      kind: "finished",
+      decision: "merge",
+    });
+    expect(checkAnswer(finished, { kind: "finished", decision: "pr" })).toEqual({
+      kind: "finished",
+      decision: "pr",
+    });
+    expect(() => checkAnswer(finished, { kind: "finished", decision: "changes", note: " " })).toThrow(
+      /what needs changing/,
+    );
+    expect(checkAnswer(finished, { kind: "finished", decision: "changes", note: " Bigger " })).toEqual({
+      kind: "finished",
+      decision: "changes",
+      note: "Bigger",
+    });
+    expect(standingReply(finished, { kind: "finished", decision: "merge" })).toBeNull();
+  });
+
+  it("takes Merge on a ready PR, or what to do first", () => {
+    const ready = {
+      ...permission,
+      kind: "ready" as const,
+      permission: undefined,
+      ready: { url: "https://github.com/o/r/pull/1", summary: "Green." },
+    };
+    expect(checkAnswer(ready, { kind: "ready", decision: "merge" })).toEqual({
+      kind: "ready",
+      decision: "merge",
+    });
+    expect(() => checkAnswer(ready, { kind: "ready", decision: "changes" })).toThrow(/before merging/);
+    expect(() => checkAnswer(ready, { kind: "finished", decision: "merge" })).toThrow(
+      /a PR ready to merge; answer it with merge, or what to do first/,
+    );
+    expect(standingReply(ready, { kind: "ready", decision: "merge" })).toBeNull();
+  });
 });
 
 describe("delivering an answer to a resumed agent", () => {

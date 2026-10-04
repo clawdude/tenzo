@@ -31,6 +31,8 @@ export function backLabels(item: Pick<QueueItem, 'kind'>): BackLabels {
 			return { kind: 'why', pill: 'What it looked at', title: 'What it looked at' };
 		case 'finished':
 			return { kind: 'change', pill: 'See the change', title: 'The change' };
+		case 'ready':
+			return { kind: 'change', pill: 'See the change', title: 'The PR' };
 		case 'error':
 			return { kind: 'error', pill: 'What it was doing', title: 'What it was doing' };
 	}
@@ -237,13 +239,40 @@ function lineOf(file: DiffFile): ChangeLine {
 // What it was doing when it stopped.
 
 export interface ErrorBack {
-	/** What Retry sends again: the failed turn's prompt, or the prompts never sent. */
-	retry: string[];
+	/** What Retry does (the daemon's `errorPrompts`, answers.ts). */
+	retry: Retry;
 	/** The last thing the agent said before it stopped, if anything. */
 	lastSaid: string;
 	/** Its last few tool calls: what it was in the middle of. */
 	lastSteps: { summary: string; failed: boolean }[];
 	files: Files;
+}
+
+/**
+ * What Retry does, as the daemon does it. Prompts that never reached the agent (it couldn't
+ * start), or a landing card's instructions, go as they are (`resend`). A turn that failed or was
+ * cut short did part of its work, so the agent is told its last turn didn't finish and to check
+ * what's done before carrying on (`carry-on`): `began` is the message that turn began with.
+ */
+export type Retry =
+	| { kind: 'resend'; prompts: string[] }
+	| { kind: 'carry-on'; began: string | null };
+
+const RESENDS: ReadonlySet<string> = new Set(['start', 'stalled', 'unarchived']);
+const DIDNT_FINISH = "Your last turn didn't finish";
+const BEGAN_WITH = /\nIt began with my message: "(.*)"\n/;
+const RESTARTED = 'Tenzo restarted while you were working';
+
+export function retryOf(error: QueueItem['error']): Retry {
+	if (error && RESENDS.has(error.cause) && error.prompts.length > 0) {
+		return { kind: 'resend', prompts: error.prompts };
+	}
+	// A retry of a retry quotes the turn it picks up; a restart's resume quotes nothing.
+	const first = error?.prompts[0];
+	let began: string | null = first ?? null;
+	if (first?.startsWith(RESTARTED)) began = null;
+	else if (first?.startsWith(DIDNT_FINISH)) began = BEGAN_WITH.exec(first)?.[1] ?? null;
+	return { kind: 'carry-on', began };
 }
 
 /** How many of its last tool calls an error's back lists. */
@@ -281,7 +310,7 @@ export function errorBack(
 	}
 	const cut = lastSaid.length - REASONING_LIMIT;
 	return {
-		retry: item.error?.prompts ?? [],
+		retry: retryOf(item.error),
 		lastSaid: cut <= 0 ? lastSaid : `…${lastSaid.slice(cut).trimStart()}`,
 		lastSteps: steps.slice(-LAST_STEPS),
 		files: filesOf(events, worktreePath)

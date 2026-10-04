@@ -148,11 +148,80 @@ describe("formatItem", () => {
         "    Checks: Tests pass, Lint fail",
         "    Screenshots: 1",
         "    Live: port 5173",
-        "    1. Done (suggested)",
+        "    merge: open the PR, see it through, merge it",
+        "    pr: open the PR, ask me before merging",
+        "    done: nothing to land",
+        "    Or say what needs changing.",
       ].join("\n"),
     );
-    expect(answerFromWords(finished, ["done"])).toEqual({ kind: "finished", decision: "done" });
-    expect(() => answerFromWords(finished, ["merge"])).toThrow(/with done/);
+    expect(answerFromWords(finished, ["merge"])).toEqual({ kind: "finished", decision: "merge" });
+    expect(answerFromWords(finished, ["open", "pr"])).toEqual({ kind: "finished", decision: "pr" });
+    // Only the word merges: y, yes and 1 still mean Done, as before finished work could land.
+    for (const done of ["done", "y", "yes", "1", "ok"]) {
+      expect(answerFromWords(finished, [done])).toEqual({ kind: "finished", decision: "done" });
+    }
+    expect(answerFromWords(finished, ["Bigger", "button"])).toEqual({
+      kind: "finished",
+      decision: "changes",
+      note: "Bigger button",
+    });
+    for (const unclear of [[], ["2"], ["n"]]) {
+      expect(() => answerFromWords(finished, unclear)).toThrow(/merge, pr or done/);
+    }
+  });
+
+  it("shows a PR ready to merge: its link and state, Merge or what first", () => {
+    const ready: QueueItem = {
+      ...item,
+      context: "",
+      kind: "ready",
+      ask: "PR #12 can merge",
+      questions: [],
+      ready: { url: "https://github.com/o/r/pull/12", summary: "Checks green, one approval." },
+    };
+    expect(formatItem(ready)).toBe(
+      [
+        "itm_abcdefghij0123456789 · ready",
+        "  ✓ PR #12 can merge",
+        "    https://github.com/o/r/pull/12",
+        "    Checks green, one approval.",
+        "    merge: merge it now",
+        "    Or say what to do first.",
+      ].join("\n"),
+    );
+    expect(answerFromWords(ready, ["merge"])).toEqual({ kind: "ready", decision: "merge" });
+    for (const unclear of [["y"], ["1"], ["yes"]]) {
+      expect(() => answerFromWords(ready, unclear)).toThrow(/merge, or say what to do first/);
+    }
+    expect(answerFromWords(ready, ["wait", "for", "Ana"])).toEqual({
+      kind: "ready",
+      decision: "changes",
+      note: "wait for Ana",
+    });
+  });
+
+  it("shows the landing events in a line each", () => {
+    const at = "2026-10-04T12:00:00.000Z";
+    const base = {
+      eventId: "evt_abcdefghij0123456789",
+      threadId: "thr_abcdefghij0123456789",
+      agent: "claude",
+      createdAt: at,
+    } as const;
+    expect(formatEvent({ ...base, type: "wake.scheduled", payload: { at, why: "Check CI" } })).toBe(
+      `wake.scheduled       at ${at}: Check CI`,
+    );
+    expect(
+      formatEvent({
+        ...base,
+        type: "report.resolved",
+        requestId: "req_abcdefghij0123456789",
+        payload: { decision: "changes", note: "Bigger" },
+      }),
+    ).toMatch(/changes: Bigger$/);
+    expect(
+      formatEvent({ ...base, type: "thread.landed", payload: { url: "https://x.dev/pr/1" } }),
+    ).toMatch(/https:\/\/x\.dev\/pr\/1$/);
   });
 
   it("says when answering resumes a stopped agent", () => {

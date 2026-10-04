@@ -58,11 +58,21 @@ export const ProposalDecision = z.enum(["build", "change", "cancel"]);
 export type ProposalDecision = z.infer<typeof ProposalDecision>;
 
 /**
- * How finished work was answered. Done: looked at, nothing more to do. The review actions
- * (Merge, Open PR, Needs changes) join it in #21.
+ * How finished work was answered (PRODUCT.md §4). Merge: the agent lands it (PR, CI, reviews,
+ * merge) and the thread archives. Pr: the agent opens the PR and sees it through review, and
+ * pokes you when it can merge. Changes: your note goes back, and the thread builds again. Done:
+ * looked at, nothing to land.
  */
-export const ReviewDecision = z.enum(["done"]);
+export const ReviewDecision = z.enum(["merge", "pr", "changes", "done"]);
 export type ReviewDecision = z.infer<typeof ReviewDecision>;
+
+/** How a PR the agent says is ready to merge was answered: merge it, or not yet (with a note). */
+export const MergeDecision = z.enum(["merge", "changes"]);
+export type MergeDecision = z.infer<typeof MergeDecision>;
+
+/** A link the agent hands over (a PR): http(s) only, so a card never links to a script. */
+export const WebUrl = z.url({ protocol: /^https?$/ }).max(2000);
+export type WebUrl = z.infer<typeof WebUrl>;
 
 export const UserInputOption = z.object({
   /** What to show. */
@@ -288,12 +298,76 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       checks: z.array(Check),
     }),
   }),
-  /** Recorded by the daemon: you answered finished work. */
+  /**
+   * Recorded by the daemon: you answered finished work. Merge and Open PR send the thread
+   * landing, Needs changes back to building; all but Done go to the agent as a message.
+   */
   z.object({
     ...base,
     requestId: RequestId,
     type: z.literal("report.resolved"),
-    payload: z.object({ decision: ReviewDecision }),
+    payload: z.object({ decision: ReviewDecision, note: z.string().optional() }),
+  }),
+  /**
+   * The agent says the PR it opened can merge (Tenzo's `ready_to_merge`, after Open PR): a
+   * quick-lane card with Merge. The call doesn't wait for you.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("merge.ready"),
+    payload: z.object({
+      url: WebUrl,
+      /** Its state in a line or two: checks, reviews, what it fixed. Markdown. */
+      summary: z.string(),
+      headline: z.string().optional(),
+    }),
+  }),
+  /** Recorded by the daemon: you answered a ready PR. It goes to the agent as a message. */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("merge.resolved"),
+    payload: z.object({ decision: MergeDecision, note: z.string().optional() }),
+  }),
+  /**
+   * The agent asked to be woken later (Tenzo's `wake_me`), e.g. to look at CI again. One per
+   * thread: a newer one replaces it. The daemon keeps it across restarts.
+   */
+  z.object({
+    ...base,
+    type: z.literal("wake.scheduled"),
+    payload: z.object({ at: z.iso.datetime(), why: z.string() }),
+  }),
+  /** Recorded by the daemon: the wake came, and "You asked to be woken: <why>" went as a turn. */
+  z.object({
+    ...base,
+    type: z.literal("wake.fired"),
+    payload: z.object({ why: z.string() }),
+  }),
+  /**
+   * The agent says its work has landed (Tenzo's `landed`): the PR is merged. The daemon
+   * archives the thread once the turn ends: worktree removed, branch kept.
+   */
+  z.object({
+    ...base,
+    type: z.literal("thread.landed"),
+    payload: z.object({ url: WebUrl, summary: z.string().optional() }),
+  }),
+  /**
+   * Recorded by the daemon: landing needs you. `stalled`: a landing turn ended with no wake,
+   * no card and no `landed`, so nothing would ever happen. `unarchived`: the agent landed, but
+   * the thread couldn't be archived (work left over, or a message you sent meanwhile). It
+   * opens an error card whose Retry sends `prompts`.
+   */
+  z.object({
+    ...base,
+    type: z.literal("landing.stuck"),
+    payload: z.object({
+      cause: z.enum(["stalled", "unarchived"]),
+      message: z.string(),
+      prompts: z.array(z.string()),
+    }),
   }),
   /**
    * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.

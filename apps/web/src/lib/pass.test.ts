@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type QueueItem, suggestedAnswer } from '@tenzo/client-runtime';
-import { at, failure, finished, item, permission, proposal, question } from './fixtures.ts';
+import { at, failure, finished, item, permission, proposal, question, ready } from './fixtures.ts';
 import {
 	ageLabel,
 	answerOf,
@@ -229,27 +229,71 @@ describe('stepsOf', () => {
 });
 
 describe('stepsOf: finished work', () => {
-	it('offers Done, no field, the headline as the ask; the row waits for #21', () => {
+	it('offers Merge filled, Open PR and Done in the row, and the field for Needs changes', () => {
 		const [step, ...rest] = stepsOf(finished('f'));
 		expect(rest).toEqual([]);
 		expect(step).toEqual({
 			key: 'finished',
 			ask: 'Counter works',
-			suggested: { label: 'Done', value: 'done', description: '' },
+			suggested: { label: 'Merge', value: 'merge', description: '' },
 			recommended: false,
 			others: [],
-			row: [],
-			placeholder: null
+			row: [
+				{ label: 'Open PR', value: 'pr', description: '' },
+				{ label: 'Done', value: 'done', description: '' }
+			],
+			placeholder: 'Needs changes'
 		});
 	});
 
-	it('sends done, which is what taking the suggestion sends', () => {
+	it('sends merge for the filled button, though one tap on everything never merges', () => {
 		const card = finished('f');
 		const step = stepsOf(card)[0];
 		if (!step?.suggested) throw new Error('no button');
 		const answer = answerOf(card, [{ choice: step.suggested }]);
-		expect(answer).toEqual({ kind: 'finished', decision: 'done' });
-		expect(answer).toEqual(suggestedAnswer(card));
+		expect(answer).toEqual({ kind: 'finished', decision: 'merge' });
+		expect(suggestedAnswer(card)).toEqual({ kind: 'finished', decision: 'done' });
+	});
+
+	it('sends each row button by its value, and words as what needs changing', () => {
+		const card = finished('f');
+		const [open, done] = stepsOf(card)[0]?.row ?? [];
+		expect(answerOf(card, [{ choice: open! }])).toEqual({ kind: 'finished', decision: 'pr' });
+		expect(answerOf(card, [{ choice: done! }])).toEqual({ kind: 'finished', decision: 'done' });
+		expect(answerOf(card, [{ text: ' Bigger button ' }])).toEqual({
+			kind: 'finished',
+			decision: 'changes',
+			note: 'Bigger button'
+		});
+	});
+});
+
+describe('stepsOf: a ready PR', () => {
+	it('offers Merge, and words as what to do first', () => {
+		const card = ready('r');
+		const [step, ...rest] = stepsOf(card);
+		expect(rest).toEqual([]);
+		expect(step).toMatchObject({
+			ask: 'PR #12 can merge',
+			suggested: { label: 'Merge', value: 'merge' },
+			row: [],
+			placeholder: 'Not yet: say what first'
+		});
+		const merge = answerOf(card, [{ choice: step!.suggested! }]);
+		expect(merge).toEqual({ kind: 'ready', decision: 'merge' });
+		expect(suggestedAnswer(card)).toBeNull();
+		expect(answerOf(card, [{ text: 'Wait for Ana ' }])).toEqual({
+			kind: 'ready',
+			decision: 'changes',
+			note: 'Wait for Ana'
+		});
+	});
+
+	it('is quick-lane: it goes before finished work on the pile', () => {
+		expect(pileOf([finished('f'), ready('r')]).map((i) => i.kind)).toEqual([
+			'ready',
+			'finished'
+		]);
 	});
 });
 

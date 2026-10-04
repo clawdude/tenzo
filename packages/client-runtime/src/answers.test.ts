@@ -51,9 +51,11 @@ describe("suggestedAnswer", () => {
     expect(suggestedAnswer(proposal)).toEqual({ kind: "proposal", decision: "build" });
   });
 
-  it("marks finished work done", () => {
-    const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "done", questions: [] });
+  it("never merges in one tap: finished work is Done, a ready PR has no one-tap answer", () => {
+    const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "merge", questions: [] });
     expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "done" });
+    const ready = item("x", "a", { kind: "ready", suggested: "merge", questions: [] });
+    expect(suggestedAnswer(ready)).toBeNull();
   });
 
   it("retries an error", () => {

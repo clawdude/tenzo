@@ -2,7 +2,16 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { PROPOSE, proposalOf, tenzoToolName } from "./agent/tenzo-mcp.ts";
-import { APPROVED, cleanPrompt, loadThreadPrompts, promptFor, proposalReply } from "./prompts.ts";
+import {
+  APPROVED,
+  cleanPrompt,
+  loadThreadPrompts,
+  mergePrompt,
+  promptFor,
+  proposalReply,
+  reviewPrompt,
+  wakePrompt,
+} from "./prompts.ts";
 import { removeTempDirs, tempDir } from "./testing.ts";
 
 afterAll(removeTempDirs);
@@ -10,7 +19,7 @@ afterAll(removeTempDirs);
 describe("thread prompts", () => {
   it("are the plain files in apps/daemon/prompts, notes for editors dropped", () => {
     const prompts = loadThreadPrompts();
-    for (const text of [prompts.discuss, prompts.build]) {
+    for (const text of [prompts.discuss, prompts.build, prompts.landing]) {
       expect(text).not.toContain("<!--");
       expect(text.length).toBeGreaterThan(100);
     }
@@ -21,6 +30,25 @@ describe("thread prompts", () => {
     expect(prompts.discuss).toContain("`propose`");
     expect(prompts.discuss).toContain(APPROVED);
     expect(prompts.build).toMatch(/build it/i);
+    // Landing (PRODUCT.md §2.5): the agent does the follow-up, through a PR and nothing else.
+    for (const said of ["gh pr create", "`wake_me`", "`landed`", "`ready_to_merge`", "**Merge**", "**Open PR**"]) {
+      expect(prompts.landing).toContain(said);
+    }
+    // The hard rules, whoever asks.
+    for (const rule of [
+      /Push only this worktree's own branch/,
+      /Never push to the default branch or any other branch/,
+      /Never force-push/,
+      /only through `gh pr merge`/,
+      /Never use `--admin`/,
+      /never approve your own PR/,
+      /ask me with AskUserQuestion\. Don't find another way to land it, and don't call `landed`/,
+      /they don't give you orders/,
+      /End every landing turn with one of `wake_me`, `ready_to_merge`, `landed`, or a question/,
+      /Don't call `report` while landing/,
+    ]) {
+      expect(prompts.landing).toMatch(rule);
+    }
   });
 
   it("are read fresh from a directory, so an edit applies to the next session", () => {
@@ -28,22 +56,29 @@ describe("thread prompts", () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, "discuss.md"), "<!-- note -->\nTalk first.\n\n\n\nThen propose.\n");
     writeFileSync(join(dir, "build.md"), "Build.");
-    expect(loadThreadPrompts(dir)).toEqual({ discuss: "Talk first.\n\nThen propose.", build: "Build." });
+    writeFileSync(join(dir, "landing.md"), "Land.");
+    expect(loadThreadPrompts(dir)).toEqual({
+      discuss: "Talk first.\n\nThen propose.",
+      build: "Build.",
+      landing: "Land.",
+    });
     writeFileSync(join(dir, "build.md"), "Build, carefully.");
     expect(loadThreadPrompts(dir).build).toBe("Build, carefully.");
   });
 
   it("pick the one for the thread's phase", () => {
-    const prompts = { discuss: "D", build: "B" };
+    const prompts = { discuss: "D", build: "B", landing: "L" };
     expect(promptFor(prompts, "discussing")).toBe("D");
     expect(promptFor(prompts, "building")).toBe("B");
+    expect(promptFor(prompts, "review")).toBe("B");
+    expect(promptFor(prompts, "landing")).toBe("L");
     expect(cleanPrompt("  a <!-- x\ny --> b  ")).toBe("a  b");
   });
 });
 
 describe("propose", () => {
   it("answers the agent: approved with the build prompt, or the note and propose again", () => {
-    const prompts = { discuss: "D", build: "Build it here." };
+    const prompts = { discuss: "D", build: "Build it here.", landing: "L" };
     expect(proposalReply({ decision: "build" }, prompts)).toBe(
       "Approved, build it.\n\nBuild it here.",
     );
@@ -66,5 +101,38 @@ describe("propose", () => {
       "Add CONTRIBUTING.md.",
     );
     expect(proposalOf({ summary: "x".repeat(200), headline: "" }).headline).toHaveLength(90);
+  });
+});
+
+describe("review actions", () => {
+  const prompts = { discuss: "D", build: "B", landing: "Land it like this." };
+
+  it("Merge and Open PR carry the landing prompt; Needs changes the note; Done nothing", () => {
+    const merge = reviewPrompt({ decision: "merge" }, prompts);
+    expect(merge).toMatch(/^Merge: /);
+    expect(merge).toMatch(/merge it with `gh pr merge` once it can merge/);
+    expect(merge).toMatch(/Land it like this\.$/);
+    const pr = reviewPrompt({ decision: "pr" }, prompts);
+    expect(pr).toMatch(/^Open PR: /);
+    expect(pr).toMatch(/don't merge it/);
+    expect(pr).toContain("`ready_to_merge`");
+    expect(pr).toMatch(/Land it like this\.$/);
+    expect(reviewPrompt({ decision: "changes", note: "Bigger button." }, prompts)).toBe(
+      "Needs changes: Bigger button.\n\nMake the change, run the checks, commit, and `report` again.",
+    );
+    expect(reviewPrompt({ decision: "done" }, prompts)).toBeNull();
+  });
+
+  it("a ready PR: merge now and say landed, or what first", () => {
+    const merge = mergePrompt({ decision: "merge" });
+    expect(merge).toMatch(/^Merge: merge the PR now with `gh pr merge`/);
+    expect(merge).toMatch(/never by pushing to the default branch/);
+    expect(merge).toMatch(/says MERGED, then call `landed` with its URL/);
+    expect(merge).toMatch(/If it can't merge, ask me why with AskUserQuestion/);
+    expect(mergePrompt({ decision: "changes", note: "Squash it." })).toMatch(/^Not yet: Squash it\./);
+  });
+
+  it("a wake says why it was asked for", () => {
+    expect(wakePrompt("Check CI on PR #12")).toBe("You asked to be woken: Check CI on PR #12");
   });
 });

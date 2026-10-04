@@ -40,6 +40,10 @@ export type Row = Base &
 		| { kind: 'permission'; detail: string; answer: string | null }
 		| { kind: 'proposal'; headline: string; summary: string; answer: string | null }
 		| { kind: 'report'; headline: string; summary: string; checks: Check[]; answer: string | null }
+		| { kind: 'ready'; headline: string; summary: string; url: string; answer: string | null }
+		| { kind: 'landed'; url: string; summary: string }
+		/** A thread this one's agent started (`start_thread`): `childId` once it is known. */
+		| { kind: 'started'; childId: string | null; title: string; failed: boolean; detail: string }
 		| { kind: 'note'; text: string; tone: 'quiet' | 'fail' }
 	);
 
@@ -49,6 +53,10 @@ type ItemEvent = Extract<RuntimeEvent, { type: 'item.started' | 'item.completed'
 
 /** Tool calls the timeline shows as what they did instead: a question, a proposal, a report. */
 const OWN_ROWS = /^(AskUserQuestion|mcp__tenzo__\w+)$/;
+/** Tenzo's `start_thread`: a row of its own, linking to the thread it started. */
+const START_THREAD = 'mcp__tenzo__start_thread';
+/** What `start_thread` answers: `Started thr_… ("title") in …`. */
+const STARTED = /Started (thr_[a-z0-9]{20}) \("(.*?)"\)/;
 
 /**
  * The thread's events → rows, oldest first. Events must be in log order (a feed's are). Paths
@@ -73,6 +81,10 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 
 	const onTool = (event: ItemEvent, at: string) => {
 		const p = event.payload;
+		if (p.toolName === START_THREAD && !p.parentItemId) {
+			onStart(event, at);
+			return;
+		}
 		// Asking you and Tenzo's own tools have rows of their own (the ask, the report, the note).
 		if (p.toolName && OWN_ROWS.test(p.toolName)) return;
 		const parent = p.parentItemId ? calls.get(p.parentItemId) : undefined;
@@ -101,6 +113,29 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 		if (event.type === 'item.completed') {
 			call.status = p.status;
 			if (p.output !== undefined) call.output = p.output;
+		}
+	};
+
+	const started = new Map<string, Extract<Row, { kind: 'started' }>>();
+	const onStart = (event: ItemEvent, at: string) => {
+		let row = started.get(event.itemId);
+		if (!row) {
+			const input = event.payload.input as { title?: unknown; prompt?: unknown } | undefined;
+			const named = typeof input?.title === 'string' ? input.title : '';
+			const asked = typeof input?.prompt === 'string' ? input.prompt.split('\n')[0] ?? '' : '';
+			row = { kind: 'started', key: `started:${event.itemId}`, at, childId: null, title: named || asked, failed: false, detail: '' };
+			started.set(event.itemId, row);
+			push(row);
+		}
+		if (event.type === 'item.completed') {
+			const found = STARTED.exec(event.payload.output ?? '');
+			row.failed = event.payload.status === 'failed';
+			if (found) {
+				row.childId = found[1] ?? null;
+				row.title = found[2] || row.title;
+			} else if (row.failed) {
+				row.detail = event.payload.output ?? '';
+			}
 		}
 	};
 
@@ -197,9 +232,55 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 				push(row);
 				break;
 			}
-			case 'report.resolved':
-				answer(asks, event.requestId, 'Done');
+			case 'report.resolved': {
+				const { decision, note } = event.payload;
+				answer(asks, event.requestId, REVIEWED[decision] + (note ? `: ${note}` : ''));
+				if (decision === 'merge' || decision === 'pr') {
+					push({ kind: 'note', key: `note:${seq}`, at, text: LANDING[decision], tone: 'quiet' });
+				} else if (decision === 'changes') {
+					push({ kind: 'note', key: `note:${seq}`, at, text: 'Building again', tone: 'quiet' });
+				}
 				break;
+			}
+			case 'merge.ready': {
+				const row: Row = {
+					kind: 'ready',
+					key: `ask:${event.requestId}`,
+					at,
+					headline: event.payload.headline || 'The PR can merge',
+					summary: event.payload.summary,
+					url: event.payload.url,
+					answer: null
+				};
+				asks.set(event.requestId, row);
+				push(row);
+				break;
+			}
+			case 'merge.resolved': {
+				const { decision, note } = event.payload;
+				answer(asks, event.requestId, decision === 'merge' ? 'Merge' : `Not yet${note ? `: ${note}` : ''}`);
+				if (decision === 'merge') push({ kind: 'note', key: `note:${seq}`, at, text: LANDING.merge, tone: 'quiet' });
+				break;
+			}
+			case 'wake.scheduled':
+				push({
+					kind: 'note',
+					key: `note:${seq}`,
+					at,
+					text: `Asked to be woken at ${clockOf(event.payload.at)}: ${event.payload.why}`,
+					tone: 'quiet'
+				});
+				break;
+			case 'wake.fired':
+				push({ kind: 'note', key: `note:${seq}`, at, text: `Woke up: ${event.payload.why}`, tone: 'quiet' });
+				break;
+			case 'thread.landed':
+				push({ kind: 'landed', key: `landed:${seq}`, at, url: event.payload.url, summary: event.payload.summary ?? '' });
+				break;
+			case 'landing.stuck':
+				push({ kind: 'note', key: `note:${seq}`, at, text: event.payload.message, tone: 'fail' });
+				break;
+
 			case 'attachment.added': {
 				const a = event.payload.attachment;
 				push({ kind: 'note', key: `note:${seq}`, at, text: `Attached ${a.caption || a.name}`, tone: 'quiet' });
@@ -231,7 +312,8 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 				push({ kind: 'note', key: `note:${seq}`, at, text: 'Archived', tone: 'quiet' });
 				break;
 			default:
-				// Sessions starting and their configuration: nothing to read.
+				// Sessions starting and their configuration, snoozes, an error answered (its next turn
+				// shows what went): nothing to read.
 				break;
 		}
 	}
@@ -244,6 +326,20 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 	}
 	return rows;
 }
+
+/** How finished work was answered, in a word or two. */
+const REVIEWED: Record<'merge' | 'pr' | 'changes' | 'done', string> = {
+	merge: 'Merge',
+	pr: 'Open PR',
+	changes: 'Needs changes',
+	done: 'Done'
+};
+
+/** The thread going landing, by how it was sent. */
+const LANDING: Record<'merge' | 'pr', string> = {
+	merge: 'Landing: it opens the PR, sees it through CI and review, and merges',
+	pr: 'Landing: it opens the PR and sees it through review; you merge'
+};
 
 function answer(asks: Map<string, Row>, requestId: string, said: string): void {
 	const row = asks.get(requestId);

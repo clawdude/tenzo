@@ -11,6 +11,7 @@ import {
   ThreadPhase,
   type TurnId,
 } from "@tenzo/contracts";
+import { z } from "zod";
 import type { StandingReply } from "./answers.ts";
 import { type FoldState, foldEvent, type ItemChange, type ThreadRuntime } from "./fold.ts";
 import { type Store, transaction } from "./store.ts";
@@ -52,7 +53,7 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
     store.db
       .prepare(
         `UPDATE threads SET live = ?, agent = ?, session_id = ?, turn_id = ?, context = ?, phase = ?,
-           attachments = ?, preview = ?,
+           attachments = ?, preview = ?, wake = ?,
            turn_prompt = ?, turn_error = ?
          WHERE id = ?`,
       )
@@ -65,6 +66,7 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
         r.phase,
         JSON.stringify(r.attachments),
         r.preview === null ? null : JSON.stringify(r.preview),
+        r.wake === null ? null : JSON.stringify(r.wake),
         r.prompt,
         r.error,
         event.threadId,
@@ -82,8 +84,8 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
 export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
   const row = store.db
     .prepare(
-      `SELECT live, agent, session_id, turn_id, context, phase, attachments, preview, turn_prompt,
-         turn_error
+      `SELECT live, agent, session_id, turn_id, context, phase, attachments, preview, wake,
+         turn_prompt, turn_error
        FROM threads WHERE id = ?`,
     )
     .get(threadId);
@@ -100,6 +102,7 @@ export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
         .catch([])
         .parse(JSON.parse(String(row.attachments ?? "[]"))),
       preview: row.preview === null ? null : Preview.parse(JSON.parse(String(row.preview))),
+      wake: row.wake === null ? null : Wake.parse(JSON.parse(String(row.wake))),
       prompt: row.turn_prompt === null ? null : String(row.turn_prompt),
       error: row.turn_error === null ? null : String(row.turn_error),
     },
@@ -224,6 +227,35 @@ export function lastEvent(store: Store, threadId: ThreadId): { seq: number; at: 
     .prepare("SELECT seq, created_at FROM events WHERE thread_id = ? ORDER BY seq DESC LIMIT 1")
     .get(threadId);
   return row ? { seq: Number(row.seq), at: String(row.created_at) } : null;
+}
+
+const Wake = z.object({ at: z.iso.datetime(), why: z.string() });
+
+/** Active threads with a wake to come (`wake_me`): the daemon re-arms them on start. */
+export function threadsToWake(store: Store): ThreadId[] {
+  return store.db
+    .prepare("SELECT id FROM threads WHERE status = 'active' AND wake IS NOT NULL ORDER BY created_at")
+    .all()
+    .map((row) => String(row.id) as ThreadId);
+}
+
+/**
+ * Active threads whose agent said they landed (`landed`) in their latest turn: the daemon
+ * archives them. A turn after the landing (you told it something more) means it carries on.
+ */
+export function landedThreads(store: Store): ThreadId[] {
+  return store.db
+    .prepare(
+      `SELECT DISTINCT l.thread_id AS id FROM events l JOIN threads t ON t.id = l.thread_id
+       WHERE l.type = 'thread.landed' AND t.status = 'active'
+         AND NOT EXISTS (
+           SELECT 1 FROM events s
+           WHERE s.thread_id = l.thread_id AND s.type = 'turn.started' AND s.seq > l.seq
+         )
+       ORDER BY l.thread_id`,
+    )
+    .all()
+    .map((row) => String(row.id) as ThreadId);
 }
 
 /** Threads whose agent session was running when the daemon last stopped. */

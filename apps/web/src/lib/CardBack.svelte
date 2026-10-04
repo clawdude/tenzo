@@ -128,9 +128,32 @@
 			</section>
 		{/if}
 	{:else if labels.kind === 'change'}
+		{#if item.ready}
+			<!-- A ready PR: the PR, where it stands in the agent's words, then the change itself. -->
+			<section class="flex flex-col gap-3" data-testid="ready-back">
+				{#if /^https?:\/\//i.test(item.ready.url)}
+					<a
+						href={item.ready.url}
+						target="_blank"
+						rel="noopener noreferrer"
+						class="opt flex min-h-[52px] items-center justify-between gap-3 rounded-2xl bg-fill px-4 text-[16px] text-ink"
+						data-testid="back-pr-link"
+					>
+						<span class="min-w-0 truncate">{item.ready.url.replace(/^https?:\/\//i, '')}</span>
+						<svg class="shrink-0" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"></path><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"></path></svg>
+					</a>
+				{/if}
+				{#if item.ready.summary.trim()}
+					<div class="md text-[16px] leading-[1.45] text-ink-soft">
+						<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
+						{@html renderMarkdown(item.ready.summary)}
+					</div>
+				{/if}
+			</section>
+		{/if}
 		<div class="flex flex-col gap-1">
-			{#if done}
-				<span class="text-[13px] font-semibold tracking-[0.06em] text-done uppercase">{done.headline}</span>
+			{#if done || item.ready}
+				<span class="text-[13px] font-semibold tracking-[0.06em] text-done uppercase">{done?.headline ?? item.ask}</span>
 			{/if}
 			<span class="text-[22px] font-bold tracking-[-0.02em]" data-testid="change-headline">
 				{change?.headline ?? (diffError ? 'The change' : 'Counting the change…')}
@@ -184,14 +207,25 @@
 		{/if}
 	{:else if stopped}
 		<!-- The front says what went wrong; this says what it was doing. -->
-		{#if stopped.retry.length > 0}
-			<section data-testid="retry">
-				{@render label(stopped.retry.length === 1 ? 'Retry sends' : `Retry sends, in order`)}
+		{#if stopped.retry.kind === 'resend'}
+			<section data-testid="retry" data-retry="resend">
+				{@render label(stopped.retry.prompts.length === 1 ? 'Retry sends' : 'Retry sends, in order')}
 				<ul class="flex flex-col gap-2">
-					{#each stopped.retry as prompt, i (i)}
+					{#each stopped.retry.prompts as prompt, i (i)}
 						<li class="rounded-2xl bg-fill px-4 py-3 text-[15px] leading-snug break-words whitespace-pre-line text-ink-soft">{prompt}</li>
 					{/each}
 				</ul>
+			</section>
+		{:else}
+			<section data-testid="retry" data-retry="carry-on">
+				{@render label('Retry')}
+				<p class="text-[15px] leading-snug text-ink-soft">
+					Tells it the turn didn't finish, and to check what's already done before it carries on.
+				</p>
+				{#if stopped.retry.began}
+					<p class="mt-3 mb-1.5 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">The turn began with</p>
+					<p class="rounded-2xl bg-fill px-4 py-3 text-[15px] leading-snug break-words whitespace-pre-line text-ink-soft">{stopped.retry.began}</p>
+				{/if}
 			</section>
 		{/if}
 		{#if stopped.lastSaid}

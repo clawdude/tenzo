@@ -4,6 +4,7 @@ import {
 	backLabels,
 	changeView,
 	errorBack,
+	retryOf,
 	filesOf,
 	FILES_LIMIT,
 	reasoningOf,
@@ -12,7 +13,7 @@ import {
 	weighedOf,
 	whyBack
 } from './back.ts';
-import { failure, finished, item, permission, proposal, question, said, stored, tool } from './fixtures.ts';
+import { failure, finished, item, ready, permission, proposal, question, said, stored, tool } from './fixtures.ts';
 
 const ask = (seq: number, requestId: string) =>
 	stored(seq, {
@@ -28,6 +29,7 @@ describe('backLabels', () => {
 		expect(backLabels(proposal('a'))).toMatchObject({ kind: 'why', pill: 'What it looked at' });
 		expect(backLabels(finished('a'))).toMatchObject({ kind: 'change', pill: 'See the change', title: 'The change' });
 		expect(backLabels(failure('a'))).toMatchObject({ kind: 'error', title: 'What it was doing' });
+		expect(backLabels(ready('a'))).toMatchObject({ kind: 'change', pill: 'See the change', title: 'The PR' });
 	});
 });
 
@@ -198,7 +200,7 @@ describe('errorBack', () => {
 			'/w'
 		);
 		expect(back).toEqual({
-			retry: ['Fix it'],
+			retry: { kind: 'carry-on', began: 'Fix it' },
 			lastSaid: 'Now the tests.',
 			lastSteps: [
 				{ summary: 'Read: a.ts', failed: false },
@@ -208,5 +210,29 @@ describe('errorBack', () => {
 			files: { changed: ['b.ts'], read: ['a.ts'], moreChanged: 0, moreRead: 0 }
 		});
 		expect(JSON.stringify(back)).not.toContain('529 Overloaded');
+	});
+});
+
+describe('retryOf', () => {
+	const error = (cause: 'turn' | 'crash' | 'start' | 'stalled' | 'unarchived', prompts: string[]) => ({
+		cause,
+		message: 'boom',
+		prompts
+	});
+	it('resends what never reached the agent, and a landing card\'s instructions', () => {
+		expect(retryOf(error('start', ['a', 'b']))).toEqual({ kind: 'resend', prompts: ['a', 'b'] });
+		expect(retryOf(error('stalled', ['Check the PR']))).toEqual({ kind: 'resend', prompts: ['Check the PR'] });
+		expect(retryOf(error('unarchived', ['Commit it']))).toEqual({ kind: 'resend', prompts: ['Commit it'] });
+	});
+	it('tells a failed or cut-short turn to carry on, quoting the message it began with', () => {
+		expect(retryOf(error('turn', ['Paint it']))).toEqual({ kind: 'carry-on', began: 'Paint it' });
+		expect(retryOf(error('crash', []))).toEqual({ kind: 'carry-on', began: null });
+		const again = 'Your last turn didn\'t finish: boom\nIt began with my message: "Paint it"\nCheck what is done.';
+		expect(retryOf(error('turn', [again]))).toEqual({ kind: 'carry-on', began: 'Paint it' });
+		expect(retryOf(error('crash', ['Tenzo restarted while you were working, which cut…']))).toEqual({
+			kind: 'carry-on',
+			began: null
+		});
+		expect(retryOf(undefined)).toEqual({ kind: 'carry-on', began: null });
 	});
 });
