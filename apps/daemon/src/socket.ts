@@ -1,5 +1,6 @@
 import {
   ClientFrame,
+  type Command,
   type EnvironmentId,
   RequestFrameId,
   type ServerFrame,
@@ -8,6 +9,7 @@ import type { WSContext, WSEvents } from "hono/ws";
 import type { WebSocket, WebSocketServer } from "ws";
 import { executeCommand } from "./commands.ts";
 import type { Engine, EngineChange } from "./engine.ts";
+import { TenzoError } from "./errors.ts";
 
 /**
  * The daemon's side of `/ws` (the protocol is in contracts' frames.ts). Each socket gets a hello
@@ -31,6 +33,9 @@ export const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
 /** Largest frame a client may send. Commands are small; this keeps garbage cheap. */
 export const MAX_FRAME_BYTES = 1024 * 1024;
 
+/** The most threads one socket watches at once: a screen watches one or two. */
+export const MAX_WATCHED = 16;
+
 /** Handlers for one socket, for Hono's `upgradeWebSocket`. */
 export function socketHandlers({
   environmentId,
@@ -39,6 +44,41 @@ export function socketHandlers({
   log = (message) => console.error(`tenzo: ${message}`),
 }: SocketOptions): WSEvents {
   let unsubscribe: (() => void) | undefined;
+  /** Threads this socket watches: it gets their new events (`thread.watch`). */
+  const watching = new Set<string>();
+
+  /**
+   * Starts or stops a watch, answering at once. The backlog is read, the watch added and the
+   * answer sent in one tick, before the engine can append anything: the client gets every event
+   * after the backlog as an `event` frame, none of them twice.
+   */
+  function watch(id: string, command: WatchCommand): ServerFrame {
+    if (command.type === "thread.unwatch") {
+      watching.delete(command.threadId);
+      return { type: "ok", id, result: { watching: false } };
+    }
+    if (!engine) return { type: "error", id, error: "This daemon runs no threads." };
+    if (!watching.has(command.threadId) && watching.size >= MAX_WATCHED) {
+      return {
+        type: "error",
+        id,
+        error: `A connection can watch ${MAX_WATCHED} threads at most; unwatch one first.`,
+      };
+    }
+    try {
+      const backlog = engine.backlog(command.threadId, {
+        ...(command.after !== undefined ? { after: command.after } : {}),
+        ...(command.limit !== undefined ? { limit: command.limit } : {}),
+      });
+      watching.add(backlog.thread.id);
+      return { type: "ok", id, result: backlog };
+    } catch (error) {
+      if (error instanceof TenzoError) return { type: "error", id, error: error.message };
+      log(`thread.watch failed: ${String(error)}`);
+      return { type: "error", id, error: `thread.watch failed: ${String(error)}` };
+    }
+  }
+
   return {
     onOpen(_event, ws) {
       send(ws, { type: "hello", environmentId, version, serverTime: new Date().toISOString() });
@@ -54,7 +94,7 @@ export function socketHandlers({
         return;
       }
       unsubscribe = engine.subscribe((change) => {
-        const frame = frameOf(change);
+        const frame = frameOf(change, watching);
         if (frame) send(ws, frame);
       });
     },
@@ -70,6 +110,10 @@ export function socketHandlers({
         return;
       }
       const { id, command } = frame.value;
+      if (command.type === "thread.watch" || command.type === "thread.unwatch") {
+        send(ws, watch(id, command));
+        return;
+      }
       void executeCommand(engine, command)
         .then((outcome) => {
           send(
@@ -87,19 +131,28 @@ export function socketHandlers({
     onClose() {
       unsubscribe?.();
       unsubscribe = undefined;
+      watching.clear();
     },
   };
 }
 
-/** What a client hears of an engine change. Raw events stay on the daemon (`thread.events`). */
-function frameOf(change: EngineChange): ServerFrame | null {
+type WatchCommand = Extract<Command, { type: "thread.watch" | "thread.unwatch" }>;
+
+/**
+ * What a client hears of an engine change. Raw events go only to sockets watching their thread;
+ * the rest stay on the daemon (`thread.events`).
+ */
+function frameOf(change: EngineChange, watching: ReadonlySet<string>): ServerFrame | null {
   switch (change.type) {
     case "thread":
       return { type: "thread", thread: change.thread };
     case "item":
       return { type: "item", change: change.change.type, item: change.change.item };
-    case "event":
-      return null;
+    case "event": {
+      if (!watching.has(change.event.threadId)) return null;
+      const { seq, environmentId, event } = change;
+      return { type: "event", event: { seq, environmentId, event } };
+    }
   }
 }
 

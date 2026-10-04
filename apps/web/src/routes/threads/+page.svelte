@@ -122,9 +122,12 @@
 										leaveTo('/');
 									}}>{@render content()}</a>
 								{:else}
-									<div class="flex min-h-14 items-center gap-3.5 px-[18px]">
-										{@render content()}
-									</div>
+									<!-- What happened so far, live. -->
+									<a
+										href={`/threads/${row.thread.id}`}
+										class="flex min-h-14 items-center gap-3.5 px-[18px]"
+										data-testid="open-thread">{@render content()}</a
+									>
 								{/if}
 							</li>
 						{/each}

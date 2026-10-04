@@ -147,6 +147,7 @@
 						failure={failure?.itemId === item.id ? failure : null}
 						compact={fit?.compact ?? false}
 						{liveOrigin}
+						threadView={live.threads.find((t) => t.id === item.threadId)}
 						onanswer={(a) => answer(item, a)}
 					/>
 				</div>

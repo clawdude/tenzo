@@ -217,6 +217,40 @@ async function reload(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/**
+ * A thread's timeline: from a row of the Threads list and back, or loaded directly (a bookmark),
+ * when Back goes to the Pass. The thread has no agent, so its timeline is empty but live.
+ */
+async function thread(browser: Browser, base: string, id: string, direct: boolean): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    if (direct) {
+      await page.goto(`${base}/threads/${id}`);
+    } else {
+      await page.goto(`${base}/threads`);
+      await page.locator(`[data-testid="thread-row"][data-id="${id}"] a`).tap();
+    }
+    await page.getByTestId("thread-view").waitFor();
+    if (path(page) !== `/threads/${id}`) problems.push(`opened ${path(page)}`);
+    await page.locator('[data-testid="timeline"][data-status="live"]').waitFor();
+    const title = await page.getByTestId("thread-title").textContent();
+    if (title?.trim() !== "Smoke thread") problems.push(`the title was "${title}"`);
+    await page.getByTestId("back").tap();
+    await page.getByTestId(direct ? "pass" : "threads-list").waitFor();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  if (seen.sockets !== 1) problems.push(`${seen.sockets} WebSockets, not 1`);
+  if (seen.documents !== 1) problems.push(`${seen.documents} page loads, not 1`);
+  return problems;
+}
+
 async function main(): Promise<number> {
   if (!existsSync(join(WEB_DIR, "index.html"))) {
     console.error("No web build. Run `pnpm --filter @tenzo/web build` first (`pnpm smoke` does).");
@@ -244,12 +278,24 @@ async function main(): Promise<number> {
     });
     browser = launched;
     const base = `http://127.0.0.1:${port}`;
+    // A thread with a title and no prompt: no agent starts, so no `claude` is needed.
+    const created = (await (
+      await fetch(`${base}/api/commands`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "thread.create", project: "app", title: "Smoke thread" }),
+      })
+    ).json()) as { ok: boolean; result?: { thread: { id: string } }; error?: string };
+    const threadId = created.result?.thread.id;
+    if (!threadId) throw new Error(`couldn't create a thread: ${created.error}`);
     const checks: [string, () => Promise<string[]>][] = [
       ...["/", "/new", "/threads"].map((start): [string, () => Promise<string[]>] => [
         `start at ${start}`,
         () => run(launched, base, start),
       ]),
       ["reload on New, then Close", () => reload(launched, base)],
+      ["a Threads row opens its timeline, and back", () => thread(launched, base, threadId, false)],
+      ["start at a thread's timeline, back to the Pass", () => thread(launched, base, threadId, true)],
     ];
     let failed = false;
     for (const [name, check] of checks) {

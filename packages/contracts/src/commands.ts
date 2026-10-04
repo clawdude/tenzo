@@ -1,7 +1,11 @@
 import { z } from "zod";
+import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
 import { EnvironmentId } from "./ids.ts";
 import { ItemAnswer, ProjectView, QueueItem, StoredEvent, ThreadView } from "./queue.ts";
+
+/** The most events one `thread.events` or `thread.watch` answer carries. */
+export const MAX_EVENT_PAGE = 500;
 
 /**
  * What a client can ask the daemon to do. One vocabulary for every transport: the CLI posts these
@@ -41,12 +45,33 @@ export const Command = z.discriminatedUnion("type", [
     project: z.string().min(1).optional(),
     includeArchived: z.boolean().optional(),
   }),
-  /** A thread's events after `after` (a `seq`), oldest first. */
+  /**
+   * A thread's events, oldest first: after `after` (a `seq`), or the `limit` latest before
+   * `before`, or both. Without `limit`, every one.
+   */
   z.object({
     type: z.literal("thread.events"),
     threadId: z.string().min(1),
     after: z.number().int().nonnegative().optional(),
+    before: z.number().int().positive().optional(),
+    limit: z.number().int().min(1).max(MAX_EVENT_PAGE).optional(),
   }),
+  /**
+   * WebSocket only: follow one thread's events. The answer carries the backlog (the `limit`
+   * latest events, or those after `after` when the client has the ones before), and from then
+   * on the socket gets an `event` frame for each new one, in order, none missed or repeated.
+   * Until `thread.unwatch` or the socket closes; a reconnected client watches again.
+   */
+  z.object({
+    type: z.literal("thread.watch"),
+    threadId: z.string().min(1),
+    after: z.number().int().nonnegative().optional(),
+    limit: z.number().int().min(1).max(MAX_EVENT_PAGE).optional(),
+  }),
+  /** WebSocket only: stop following a thread's events. */
+  z.object({ type: z.literal("thread.unwatch"), threadId: z.string().min(1) }),
+  /** What the thread changed against the project's default branch: files with +/−. */
+  z.object({ type: z.literal("thread.diff"), threadId: z.string().min(1) }),
   /** The projects a thread can start in, by name. */
   z.object({ type: z.literal("project.list") }),
   /** Projects, active threads and open items: everything the Pass needs to draw. */
@@ -78,7 +103,26 @@ export const CommandResults = {
   "thread.send": z.object({ thread: ThreadView }),
   "thread.archive": z.object({ thread: ThreadView }),
   "thread.list": z.object({ threads: z.array(ThreadView) }),
-  "thread.events": z.object({ thread: ThreadView, events: z.array(StoredEvent) }),
+  "thread.events": z.object({
+    thread: ThreadView,
+    events: z.array(StoredEvent),
+    /** There are earlier events than the first one here (with `limit`). */
+    older: z.boolean().default(false),
+  }),
+  "thread.watch": z.object({
+    thread: ThreadView,
+    /** The backlog, oldest first. */
+    events: z.array(StoredEvent),
+    /** There are earlier events than the backlog's first: `thread.events` with `before` pages them. */
+    older: z.boolean(),
+    /**
+     * The backlog replaces what the client had: no `after` was given, or more than `limit` events
+     * came after it. False: the backlog follows on from `after` with nothing missing.
+     */
+    reset: z.boolean(),
+  }),
+  "thread.unwatch": z.object({ watching: z.literal(false) }),
+  "thread.diff": ThreadDiff,
   "project.list": z.object({ projects: z.array(ProjectView) }),
   snapshot: Snapshot,
   "item.answer": z.object({

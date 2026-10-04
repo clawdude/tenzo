@@ -67,7 +67,17 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
         }),
       };
     case "thread.events":
-      return engine.events(command.threadId, command.after ?? 0);
+      return engine.events(command.threadId, {
+        ...(command.after !== undefined ? { after: command.after } : {}),
+        ...(command.before !== undefined ? { before: command.before } : {}),
+        ...(command.limit !== undefined ? { limit: command.limit } : {}),
+      });
+    case "thread.watch":
+    case "thread.unwatch":
+      // A watch is a socket's: socket.ts answers these itself, so only another transport gets here.
+      throw new TenzoError(`${command.type} works over the WebSocket only.`);
+    case "thread.diff":
+      return engine.diff(command.threadId);
     case "project.list":
       return { projects: engine.projects() };
     case "snapshot":

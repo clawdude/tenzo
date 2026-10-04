@@ -1,4 +1,11 @@
-import type { ProjectView, QueueItem, ThreadView, UserInputQuestion } from '@tenzo/client-runtime';
+import type {
+	ProjectView,
+	QueueItem,
+	RuntimeEvent,
+	StoredEvent,
+	ThreadView,
+	UserInputQuestion
+} from '@tenzo/client-runtime';
 
 /** Test-only records that pass the contracts. */
 
@@ -71,6 +78,56 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		activeAt: at,
 		...overrides
 	};
+}
+
+export const TURN = '11111111-1111-4111-8111-111111111111';
+
+/** A stored event of thread `a`: `event` is the type, payload and anything else it needs. */
+export function stored(seq: number, event: Record<string, unknown>): StoredEvent {
+	return {
+		seq,
+		environmentId: 'env_abcdefghij0123456789',
+		event: {
+			eventId: `evt_${String(seq).padStart(20, '0')}`,
+			threadId: 'thr_aaaaaaaaaaaaaaaaaaaa',
+			agent: 'claude',
+			createdAt: new Date(Date.parse(at) + seq * 60_000).toISOString(),
+			turnId: TURN,
+			...event
+		} as RuntimeEvent
+	};
+}
+
+/** The agent says `text` (in a subagent when `parent` is given). */
+export function said(seq: number, text: string, parent?: string): StoredEvent {
+	return stored(seq, {
+		type: 'item.completed',
+		itemId: `m${seq}`,
+		payload: {
+			itemType: 'assistant_message',
+			status: 'completed',
+			text,
+			...(parent ? { parentItemId: parent } : {})
+		}
+	});
+}
+
+/** A tool call starting (with its input) or finishing (with its output). */
+export function tool(
+	seq: number,
+	itemId: string,
+	phase: 'started' | 'completed',
+	payload: Record<string, unknown>
+): StoredEvent {
+	return stored(seq, {
+		type: `item.${phase}`,
+		itemId,
+		payload: {
+			itemType: 'tool',
+			status: phase === 'started' ? 'in_progress' : 'completed',
+			...payload
+		}
+	});
 }
 
 export function project(name: string): ProjectView {

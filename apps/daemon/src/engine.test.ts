@@ -109,7 +109,7 @@ describe("Engine: running threads", () => {
     expect(session.stopped).toBe(false);
     session.say("A background task finished.");
     await settle();
-    expect(d.engine.events(thread.id, after.lastSeq).events).toHaveLength(1);
+    expect(d.engine.events(thread.id, { after: after.lastSeq }).events).toHaveLength(1);
   });
 
   it("a thread without a prompt starts no agent", async () => {
