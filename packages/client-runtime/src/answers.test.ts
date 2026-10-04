@@ -51,9 +51,11 @@ describe("suggestedAnswer", () => {
     expect(suggestedAnswer(proposal)).toEqual({ kind: "proposal", decision: "build" });
   });
 
-  it("marks finished work done", () => {
-    const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "done", questions: [] });
-    expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "done" });
+  it("merges finished work, and a ready PR", () => {
+    const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "merge", questions: [] });
+    expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "merge" });
+    const ready = item("x", "a", { kind: "ready", suggested: "merge", questions: [] });
+    expect(suggestedAnswer(ready)).toEqual({ kind: "ready", decision: "merge" });
   });
 
   it("sends the suggested decision on a permission request, Allow when there is none", () => {

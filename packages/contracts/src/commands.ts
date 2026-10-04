@@ -84,9 +84,10 @@ export const CommandResults = {
   "item.answer": z.object({
     item: QueueItem,
     /**
-     * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
-     * asked had stopped, so the answer goes to it as a message when its session resumes. `none`:
-     * nothing goes to the agent (finished work marked done).
+     * `live`: the agent was still waiting and got the answer directly. `message`: the answer goes
+     * to the agent as its next message: the agent that asked had stopped (its session resumes
+     * with it), or nothing waits on the item (finished work, a ready PR). `none`: nothing goes to
+     * the agent (finished work marked done).
      */
     delivery: z.enum(["live", "message", "none"]),
     thread: ThreadView,

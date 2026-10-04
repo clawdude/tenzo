@@ -32,7 +32,8 @@ const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
   question: { name: "a question", answer: "an answer to each question" },
   permission: { name: "a permission request", answer: "allow or deny" },
   proposal: { name: "a proposal", answer: "build, or what to change" },
-  finished: { name: "finished work", answer: "done" },
+  finished: { name: "finished work", answer: "merge, pr, done, or what needs changing" },
+  ready: { name: "a PR ready to merge", answer: "merge, or what to do first" },
 };
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
@@ -41,7 +42,18 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     const { name, answer: how } = KINDS[item.kind];
     throw new TenzoError(`${item.id} is ${name}; answer it with ${how}.`);
   }
-  if (answer.kind === "finished") return { kind: "finished", decision: answer.decision };
+  if (answer.kind === "finished") {
+    if (answer.decision !== "changes") return { kind: "finished", decision: answer.decision };
+    const note = answer.note?.trim();
+    if (!note) throw new TenzoError("Say what needs changing.");
+    return { kind: "finished", decision: "changes", note };
+  }
+  if (answer.kind === "ready") {
+    if (answer.decision === "merge") return { kind: "ready", decision: "merge" };
+    const note = answer.note?.trim();
+    if (!note) throw new TenzoError("Say what to do before merging.");
+    return { kind: "ready", decision: "changes", note };
+  }
   if (answer.kind === "proposal") {
     if (answer.decision === "build") return { kind: "proposal", decision: "build" };
     const note = answer.note?.trim();
@@ -88,7 +100,8 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
         ...(answer.note ? { note: answer.note } : {}),
       };
     case "finished":
-      return null; // nothing waits on a report, so nothing is asked again
+    case "ready":
+      return null; // nothing waits on a report or a ready PR, so nothing is asked again
   }
 }
 
@@ -121,9 +134,13 @@ export function matchReply(replies: readonly StandingReply[], event: AskEvent): 
 
 /**
  * The message that tells a resumed agent what it asked before it stopped, and the answer.
- * Finished work is never delivered this way: the engine answers it itself.
+ * Finished work and ready PRs are never delivered this way: nothing waits on them, and the
+ * engine sends their answers as ordinary messages (prompts.ts).
  */
-export function deliveryPrompt(item: QueueItem, answer: Exclude<ItemAnswer, { kind: "finished" }>): string {
+export function deliveryPrompt(
+  item: QueueItem,
+  answer: Exclude<ItemAnswer, { kind: "finished" | "ready" }>,
+): string {
   if (answer.kind === "proposal") {
     const head = `Your session ended while you were waiting for my answer to your proposal: ${item.proposal?.headline ?? item.ask}`;
     return answer.decision === "build"
@@ -165,8 +182,17 @@ function labelOf(q: UserInputQuestion, value: string): string {
 export function answerFromWords(item: QueueItem, words: readonly string[]): ItemAnswer {
   if (item.kind === "finished") {
     const text = words.join(" ").trim();
-    if (/^(1|y|yes|done|ok)$/i.test(text)) return { kind: "finished", decision: "done" };
-    throw new TenzoError("Answer finished work with done.");
+    if (/^(1|y|yes|merge)$/i.test(text)) return { kind: "finished", decision: "merge" };
+    if (/^(2|pr|open pr)$/i.test(text)) return { kind: "finished", decision: "pr" };
+    if (/^(3|done|ok)$/i.test(text)) return { kind: "finished", decision: "done" };
+    if (text === "") throw new TenzoError("Answer with merge, pr or done, or say what needs changing.");
+    return { kind: "finished", decision: "changes", note: text };
+  }
+  if (item.kind === "ready") {
+    const text = words.join(" ").trim();
+    if (/^(1|y|yes|merge)$/i.test(text)) return { kind: "ready", decision: "merge" };
+    if (text === "") throw new TenzoError("Answer with merge, or say what to do first.");
+    return { kind: "ready", decision: "changes", note: text };
   }
   if (item.kind === "proposal") {
     const text = words.join(" ").trim();

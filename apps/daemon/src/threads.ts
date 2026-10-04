@@ -1,6 +1,6 @@
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentKind, EnvironmentId, ThreadId } from "@tenzo/contracts";
+import type { AgentKind, EnvironmentId, ThreadId, ThreadOrigin } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import {
   addWorktree,
@@ -35,6 +35,9 @@ export interface Thread {
   sessionId: string | null;
   /** The model the thread runs, when one was picked; else the agent's default. */
   model: string | null;
+  /** Who started it: you, or another thread's agent (`start_thread`), `parentId`. */
+  origin: ThreadOrigin;
+  parentId: ThreadId | null;
 }
 
 const BRANCH_PREFIX = "tenzo/";
@@ -54,6 +57,8 @@ export async function createThread(
     naming?: string;
     /** The client's key for this create and what it asked for (see `threadByClientKey`). */
     client?: { key: string; request: string };
+    /** The thread whose agent starts this one (origin `agent`). */
+    parent?: ThreadId;
   } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
@@ -85,6 +90,8 @@ export async function createThread(
     agent: null,
     sessionId: null,
     model: options.model ?? null,
+    origin: options.parent ? "agent" : "user",
+    parentId: options.parent ?? null,
   };
 
   await addWorktree(project.path, thread.worktreePath, thread.branch, base);
@@ -93,8 +100,8 @@ export async function createThread(
       .prepare(
         `INSERT INTO threads
            (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at,
-            environment_id, model, naming, client_key, client_request)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_id, model, naming, client_key, client_request, origin, parent_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -111,6 +118,8 @@ export async function createThread(
         options.naming ?? null,
         options.client?.key ?? null,
         options.client?.request ?? null,
+        thread.origin,
+        thread.parentId,
       );
   } catch (error) {
     // Nobody has seen this worktree or branch yet: undo both rather than leave strays.
@@ -296,5 +305,8 @@ function toThread(row: Record<string, unknown>): Thread {
     sessionId:
       row.session_id === null || row.session_id === undefined ? null : String(row.session_id),
     model: row.model === null || row.model === undefined ? null : String(row.model),
+    origin: row.origin === "agent" ? "agent" : "user",
+    parentId:
+      row.parent_id === null || row.parent_id === undefined ? null : (String(row.parent_id) as ThreadId),
   };
 }

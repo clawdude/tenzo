@@ -63,6 +63,9 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		updatedAt: at,
 		archivedAt: null,
 		phase: 'discussing',
+		origin: 'user',
+		parentId: null,
+		wakeAt: null,
 		activity: 'idle',
 		working: false,
 		queued: 0,
@@ -107,6 +110,17 @@ export function proposal(tag: string, summary = 'Add CONTRIBUTING.md with three 
 	});
 }
 
+export function ready(tag: string, url = 'https://github.com/o/r/pull/12'): QueueItem {
+	return item(tag, {
+		kind: 'ready',
+		ask: 'PR #12 can merge',
+		options: [{ label: 'Merge', value: 'merge', description: '', recommended: true }],
+		suggested: 'merge',
+		questions: [],
+		ready: { url, summary: 'Checks green, **one** approval.' }
+	});
+}
+
 export function finished(
 	tag: string,
 	overrides: Partial<NonNullable<QueueItem['finished']>> = {}
@@ -115,8 +129,12 @@ export function finished(
 		kind: 'finished',
 		lane: 'review',
 		ask: 'Counter works',
-		options: [{ label: 'Done', value: 'done', description: '', recommended: true }],
-		suggested: 'done',
+		options: [
+			{ label: 'Merge', value: 'merge', description: '', recommended: true },
+			{ label: 'Open PR', value: 'pr', description: '', recommended: false },
+			{ label: 'Done', value: 'done', description: '', recommended: false }
+		],
+		suggested: 'merge',
 		questions: [],
 		finished: {
 			headline: 'Counter works',

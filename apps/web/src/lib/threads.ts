@@ -33,9 +33,10 @@ const LABELS: Record<GroupKey, string> = {
 const ORDER: GroupKey[] = ['needs-you', 'working', 'landing', 'today', 'earlier'];
 
 /**
- * The threads in their groups, in the list's order, empty groups left out. Needs you and Working
- * keep the threads' own order (oldest first); Today and Earlier show the latest active first.
- * Landing has no members until threads can land (M2); its place is kept.
+ * The threads in their groups, in the list's order, empty groups left out. Needs you, Working and
+ * Landing keep the threads' own order (oldest first); Today and Earlier show the latest active
+ * first. Landing holds every thread whose work is pushed and waiting on the outside world,
+ * however long ago it was last active: it can't be forgotten, and leaves only when it archives.
  */
 export function groupThreads(
 	threads: readonly ThreadView[],
@@ -50,7 +51,7 @@ export function groupThreads(
 		earlier: []
 	};
 	for (const thread of threads) {
-		const row = rowOf(thread, items);
+		const row = rowOf(thread, items, now);
 		rows[groupOf(thread, now)].push(row);
 	}
 	for (const key of ['today', 'earlier'] as const) {
@@ -65,6 +66,7 @@ export function groupThreads(
 
 export function groupOf(thread: ThreadView, now: number): GroupKey {
 	if (thread.activity === 'needs-you') return 'needs-you';
+	if (thread.phase === 'landing') return 'landing';
 	if (thread.activity === 'working') return 'working';
 	return sameDay(Date.parse(thread.activeAt), now) ? 'today' : 'earlier';
 }
@@ -74,22 +76,38 @@ const ASKS: Record<QueueItem['kind'], string> = {
 	question: 'asking',
 	permission: 'allow?',
 	proposal: 'build?',
-	finished: 'review'
+	finished: 'review',
+	ready: 'merge?'
 };
 
 /**
- * The thread's dot and word: what it waits for (asking, allow?, build?, review), what it is
- * doing (discussing, building), done, or new (never started).
+ * The thread's dot and word: what it waits for (asking, allow?, build?, review, merge?), what
+ * it is doing (discussing, building, landing), when a landing thread looks again (in 12m), done,
+ * or new (never started).
  */
-export function rowOf(thread: ThreadView, items: readonly QueueItem[]): Row {
+export function rowOf(thread: ThreadView, items: readonly QueueItem[], now = Date.now()): Row {
 	if (thread.activity === 'needs-you') {
 		const first = items.find((i) => i.threadId === thread.id);
 		return { thread, tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
 	}
 	if (thread.activity === 'working') return { thread, tone: 'working', word: thread.phase };
+	if (thread.phase === 'landing') {
+		// Waiting on CI and reviewers: grey, with when it looks again if it said.
+		const word = thread.wakeAt ? `in ${untilLabel(thread.wakeAt, now)}` : 'landing';
+		return { thread, tone: 'quiet', word };
+	}
 	if (thread.lastSeq === 0) return { thread, tone: 'quiet', word: 'new' };
 	// Idle after a failed turn reads "done" too, until failures become items of their own (M2).
 	return { thread, tone: 'done', word: 'done' };
+}
+
+/** How long until `iso`, in a word: "1m" at least, then "12m", "3h", "2d". */
+export function untilLabel(iso: string, now: number): string {
+	const minutes = Math.max(1, Math.ceil((Date.parse(iso) - now) / 60_000));
+	if (minutes < 60) return `${minutes}m`;
+	const hours = Math.round(minutes / 60);
+	if (hours < 24) return `${hours}h`;
+	return `${Math.round(hours / 24)}d`;
 }
 
 /** Same calendar day where the viewer is. */

@@ -19,8 +19,8 @@ import { PROPOSE, tenzoToolName } from "./tenzo-mcp.ts";
 
 /**
  * Test-only: an agent adapter a test drives by hand. Each session reports what the test tells it
- * to (`say`, `ask`, `askPermission`, `propose`, `report`, `attach`, `expose`, `complete`,
- * `crash`) and records the prompts and answers it
+ * to (`say`, `ask`, `askPermission`, `propose`, `report`, `attach`, `expose`, `wakeMe`,
+ * `readyToMerge`, `landed`, `complete`, `crash`) and records the prompts and answers it
  * gets, keeping the adapter contract: one turn at a time, answers only to open requests, no
  * `*.resolved` after the session ends.
  */
@@ -193,6 +193,29 @@ export class FakeSession implements AgentSession {
   /** Like Claude calling Tenzo's `expose`, once the port answered. */
   expose(port: number, path = ""): void {
     this.emit({ type: "preview.exposed", ...this.#inTurn(), payload: { port, path } });
+  }
+
+  /** Like Claude calling Tenzo's `wake_me`, `ms` from now. */
+  wakeMe(ms: number, why: string): void {
+    const at = new Date(Date.now() + ms).toISOString();
+    this.emit({ type: "wake.scheduled", ...this.#inTurn(), payload: { at, why } });
+  }
+
+  /** Like Claude calling Tenzo's `ready_to_merge`: a ready PR, nothing waits on it. */
+  readyToMerge(url: string, summary = "Checks green.", headline?: string): RequestId {
+    const requestId = randomId("req");
+    this.emit({
+      type: "merge.ready",
+      ...this.#inTurn(),
+      requestId,
+      payload: { url, summary, ...(headline ? { headline } : {}) },
+    });
+    return requestId;
+  }
+
+  /** Like Claude calling Tenzo's `landed`: the PR is merged. */
+  landed(url?: string): void {
+    this.emit({ type: "thread.landed", ...this.#inTurn(), payload: url ? { url } : {} });
   }
 
   complete(state: "completed" | "failed" | "interrupted" = "completed"): void {

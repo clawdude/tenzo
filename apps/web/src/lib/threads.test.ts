@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { finished, item, permission, proposal, thread } from './fixtures.ts';
-import { groupThreads, rowOf } from './threads.ts';
+import { groupThreads, rowOf, untilLabel } from './threads.ts';
+
+/** A ready PR card of a given thread. */
+const ready = (tag: string, overrides: Parameters<typeof item>[1] = {}) =>
+	item(tag, { kind: 'ready', questions: [], ...overrides });
 
 // Local times, so "today" means the same wherever the tests run.
 const now = new Date(2026, 9, 3, 18, 0).getTime();
@@ -23,10 +27,31 @@ describe('groupThreads', () => {
 		]);
 	});
 
-	it('leaves empty groups out, Landing included until threads can land', () => {
+	it('leaves empty groups out', () => {
 		const groups = groupThreads([thread('a', { activity: 'working' })], [], now);
 		expect(groups.map((g) => g.key)).toEqual(['working']);
 		expect(groupThreads([], [], now)).toEqual([]);
+	});
+
+	it('keeps landing threads in Landing, working or not, however old: they never fall off', () => {
+		const waiting = thread('a', { phase: 'landing', activeAt: lastNight });
+		const checking = thread('b', { phase: 'landing', activity: 'working', working: true });
+		const asking = thread('c', { phase: 'landing', activity: 'needs-you', openItems: 1 });
+		const groups = groupThreads(
+			[waiting, checking, asking],
+			[ready('r', { threadId: asking.id })],
+			now
+		);
+		expect(groups.map((g) => [g.label, g.rows.map((r) => [r.thread.id, r.word])])).toEqual([
+			['Needs you', [[asking.id, 'merge?']]],
+			[
+				'Landing',
+				[
+					[waiting.id, 'landing'],
+					[checking.id, 'landing']
+				]
+			]
+		]);
 	});
 
 	it('shows the latest finished first', () => {
@@ -43,6 +68,17 @@ describe('groupThreads', () => {
 		expect(groupThreads([asking], [item('x', { threadId: t.id })], now)[0]?.key).toBe('needs-you');
 		const finished = { ...t, activity: 'idle' as const, working: false, activeAt: noon };
 		expect(groupThreads([finished], [], now)[0]?.key).toBe('today');
+	});
+});
+
+describe('untilLabel', () => {
+	it('says how long until, in a word, never less than a minute', () => {
+		const at = (ms: number) => new Date(now + ms).toISOString();
+		expect(untilLabel(at(-5_000), now)).toBe('1m');
+		expect(untilLabel(at(30_000), now)).toBe('1m');
+		expect(untilLabel(at(12 * 60_000), now)).toBe('12m');
+		expect(untilLabel(at(3 * 3_600_000), now)).toBe('3h');
+		expect(untilLabel(at(50 * 3_600_000), now)).toBe('2d');
 	});
 });
 
@@ -68,6 +104,14 @@ describe('rowOf', () => {
 			word: 'building'
 		});
 		expect(rowOf(thread('c'), [])).toMatchObject({ tone: 'done', word: 'done' });
+		const landing = thread('e', { phase: 'landing' });
+		expect(rowOf(landing, [], now)).toMatchObject({ tone: 'quiet', word: 'landing' });
+		const wakes = { ...landing, wakeAt: new Date(now + 12 * 60_000).toISOString() };
+		expect(rowOf(wakes, [], now)).toMatchObject({ tone: 'quiet', word: 'in 12m' });
+		expect(rowOf({ ...landing, activity: 'working' }, [], now)).toMatchObject({
+			tone: 'working',
+			word: 'landing'
+		});
 		expect(rowOf(thread('d', { lastSeq: 0 }), [])).toMatchObject({ tone: 'quiet', word: 'new' });
 	});
 });

@@ -147,6 +147,18 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE threads ADD COLUMN preview TEXT;
     `,
   },
+  {
+    name: "landing and agent threads",
+    sql: `
+      -- More projection (fold.ts); 'landing' joins the phases as plain text. When the agent asked
+      -- to be woken next and why (JSON {at, why}), NULL when it didn't: the daemon re-arms it on
+      -- start.
+      ALTER TABLE threads ADD COLUMN wake TEXT;
+      -- Who started the thread: 'user', or 'agent' (start_thread) with the thread that did.
+      ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
+      ALTER TABLE threads ADD COLUMN parent_id TEXT REFERENCES threads(id);
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

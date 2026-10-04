@@ -224,8 +224,28 @@
 			{/if}
 		{/if}
 
-		<!-- Proposals and finished work show all they have; their backs come with #22. -->
-		{#if item.kind !== 'proposal' && item.kind !== 'finished'}
+		{#if item.ready}
+			<!-- A ready PR: where it stands, and the PR itself one tap away. -->
+			<div class="md mb-4 text-[17px] leading-[1.45] text-ink-soft" data-testid="ready-summary">
+				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
+				{@html renderMarkdown(item.ready.summary)}
+			</div>
+			{#if /^https?:\/\//i.test(item.ready.url)}
+				<a
+					href={item.ready.url}
+					target="_blank"
+					rel="noopener noreferrer"
+					class="opt mb-4 inline-flex min-h-11 max-w-full items-center gap-2 rounded-full bg-fill px-4 text-[15px] font-medium text-ink"
+					data-testid="pr-link"
+				>
+					<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"></path><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"></path></svg>
+					<span class="truncate">Open the PR</span>
+				</a>
+			{/if}
+		{/if}
+
+		<!-- Proposals, finished work and ready PRs show all they have; their backs come with #22. -->
+		{#if item.kind !== 'proposal' && item.kind !== 'finished' && item.kind !== 'ready'}
 			<button
 				type="button"
 				class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"

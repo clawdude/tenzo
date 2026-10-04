@@ -1,13 +1,13 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { QueueItem, StoredEvent, ThreadView, type UserInputQuestion } from "@tenzo/contracts";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeAdapter, type FakeSession } from "./agent/fake-agent.ts";
 import { Engine, type EngineChange, type EngineOptions } from "./engine.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
-import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
-import { getThread } from "./threads.ts";
+import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
+import { getThread, projectOf } from "./threads.ts";
 
 afterAll(removeTempDirs);
 
@@ -479,7 +479,7 @@ describe("Engine: items", () => {
   });
 });
 
-const PROMPTS = { discuss: "Talk first.", build: "Build it now." };
+const PROMPTS = { discuss: "Talk first.", build: "Build it now.", landing: "Land it." };
 
 /** Starts a thread whose agent, on its first prompt, reads the repo and proposes. */
 async function threadProposing(d: ReturnType<typeof daemon>) {
@@ -582,7 +582,7 @@ describe("Engine: discuss, propose, build", () => {
 
   it("reads the prompts as each session starts, so an edit applies to the next one", async () => {
     let discuss = "v1";
-    const d = daemon(new FakeAdapter(), { prompts: () => ({ discuss, build: "b" }) });
+    const d = daemon(new FakeAdapter(), { prompts: () => ({ discuss, build: "b", landing: "l" }) });
     await threadProposing(d);
     expect(d.adapter.last.input.prompts?.discuss).toBe("v1");
     discuss = "v2";
@@ -878,7 +878,7 @@ describe("Engine: finished work", () => {
     expect(item).toMatchObject({ kind: "finished", detached: false });
     await expect(
       d.engine.answer(item?.id ?? "", { kind: "permission", decision: "allow" }),
-    ).rejects.toThrow(/is finished work; answer it with done/);
+    ).rejects.toThrow(/is finished work; answer it with merge, pr, done/);
     const sessions = d.adapter.sessions.length;
     const result = await d.engine.answer(item?.id ?? "", { kind: "finished", decision: "done" });
     expect(result).toMatchObject({
@@ -951,5 +951,284 @@ describe("Engine: finished work", () => {
     await d.engine.archive(thread.id);
     expect(d.engine.livePort(thread.id)).toBeNull();
     expect(existsSync(dir)).toBe(false);
+  });
+});
+
+describe("Engine: review actions and landing", () => {
+  const PR = "https://github.com/o/r/pull/12";
+
+  /** A thread whose agent proposes, builds and reports, then ends its turn: finished work waits. */
+  async function threadFinished(d: ReturnType<typeof daemon>) {
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        session.respondToProposal(session.propose("Add a counter page."), "build");
+        session.report("Added a counter page.", { headline: "Counter works" });
+        session.complete();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Add a counter" });
+    await settle();
+    d.adapter.onStart = undefined;
+    const session = d.adapter.last;
+    session.onPrompt = undefined;
+    const item = d.engine.snapshot().items[0];
+    if (!item) throw new Error("no finished card");
+    return { thread, item, session };
+  }
+
+  /** A graceful stop, as `tenzo serve` does on Ctrl-C. */
+  async function shutDown(d: ReturnType<typeof daemon>) {
+    await d.engine.close();
+    engines.splice(engines.indexOf(d.engine), 1);
+    stores.splice(stores.indexOf(d.store), 1);
+    d.store.close();
+  }
+
+  const repoOf = (d: ReturnType<typeof daemon>, threadId: string) =>
+    projectOf(d.store, getThread(d.store, threadId)).path;
+
+  it("Merge sends the landing prompt as the next turn; landed archives the thread when it ends", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    const result = await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    expect(result).toMatchObject({
+      delivery: "message",
+      item: { status: "resolved", resolution: { kind: "merge" } },
+      thread: { phase: "landing", activity: "working" },
+    });
+    expect(session.prompts.at(-1)).toMatch(/^Merge: land this work\./);
+    expect(session.prompts.at(-1)).toMatch(/Land it\.$/);
+    // The running session sees the new phase: its landing tools now work.
+    expect(session.input.host?.phase()).toBe("landing");
+
+    session.landed(PR);
+    await settle();
+    expect(d.engine.view(thread.id).status).toBe("active"); // not mid-turn
+    session.complete();
+    await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
+    expect(session.stopped).toBe(true);
+    expect(existsSync(thread.worktreePath)).toBe(false);
+    expect(sh(repoOf(d, thread.id), "branch", "--list", thread.branch)).toContain(thread.branch);
+    expect(d.engine.events(thread.id).events.map((e) => e.event.type).slice(-3)).toEqual([
+      "turn.completed",
+      "session.exited",
+      "thread.archived",
+    ]);
+  });
+
+  it("Merge after the agent stopped resumes it landing, with the landing prompt", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    await session.stop();
+    await settle();
+    await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    const resumed = d.adapter.last;
+    expect(resumed).not.toBe(session);
+    expect(resumed.input).toMatchObject({ resumeSessionId: session.sessionId, phase: "landing" });
+    expect(resumed.prompts).toEqual([expect.stringMatching(/^Merge: /)]);
+    expect(d.engine.view(thread.id).phase).toBe("landing");
+  });
+
+  it("Open PR: the thread lands; a ready PR is a quick card, and its Merge goes to the agent", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    session.onPrompt = () => {
+      session.say("PR is up; CI is green.");
+      session.readyToMerge(PR, "Checks green, one approval.", "PR #12 can merge");
+      session.complete();
+    };
+    await d.engine.answer(item.id, { kind: "finished", decision: "pr" });
+    expect(session.prompts.at(-1)).toMatch(/^Open PR: .*don't merge it/);
+    await settle();
+    const [ready] = d.engine.snapshot().items;
+    expect(QueueItem.parse(ready)).toEqual(ready);
+    expect(ready).toMatchObject({
+      kind: "ready",
+      lane: "quick",
+      ask: "PR #12 can merge",
+      context: "PR is up; CI is green.",
+      ready: { url: PR },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({ phase: "landing", activity: "needs-you" });
+
+    await expect(
+      d.engine.answer(ready?.id ?? "", { kind: "ready", decision: "changes", note: " " }),
+    ).rejects.toThrow(/what to do before merging/);
+    session.onPrompt = () => {
+      session.landed(PR);
+      session.complete();
+    };
+    const merged = await d.engine.answer(ready?.id ?? "", { kind: "ready", decision: "merge" });
+    expect(merged).toMatchObject({ delivery: "message", item: { resolution: { kind: "merge" } } });
+    expect(session.prompts.at(-1)).toBe("Merge: merge the PR now, then call `landed` with its URL.");
+    await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
+  });
+
+  it("Needs changes sends the note back and the thread builds; its next report is a new card", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    await expect(
+      d.engine.answer(item.id, { kind: "finished", decision: "changes" }),
+    ).rejects.toThrow(/Say what needs changing/);
+    session.onPrompt = () => {}; // still building when we look
+    const result = await d.engine.answer(item.id, {
+      kind: "finished",
+      decision: "changes",
+      note: " Make the button bigger. ",
+    });
+    expect(result).toMatchObject({
+      delivery: "message",
+      item: { resolution: { kind: "changes", note: "Make the button bigger." } },
+      thread: { phase: "building" },
+    });
+    expect(session.prompts.at(-1)).toBe(
+      "Needs changes: Make the button bigger.\n\nMake the change, run the checks, commit, and `report` again.",
+    );
+    session.report("Bigger button.", { headline: "Button is bigger" });
+    session.complete();
+    await settle();
+    expect(d.engine.snapshot().items).toMatchObject([
+      { kind: "finished", ask: "Button is bigger", suggested: "merge" },
+    ]);
+    expect(d.engine.view(thread.id).phase).toBe("review");
+  });
+
+  it("wake_me: the agent gets a turn with why on time, and a newer wake replaces it", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const d = daemon();
+      d.adapter.onStart = (session) => {
+        session.onPrompt = () => {
+          session.wakeMe(5 * 60_000, "Check CI");
+          session.wakeMe(10 * 60_000, "Check CI and reviews");
+          session.complete();
+        };
+      };
+      const thread = await d.engine.createThread({ project: "app", prompt: "Watch the PR" });
+      await settle();
+      const session = d.adapter.last;
+      session.onPrompt = undefined;
+      expect(d.engine.view(thread.id)).toMatchObject({
+        activity: "idle",
+        wakeAt: new Date(Date.now() + 10 * 60_000).toISOString(),
+      });
+      vi.advanceTimersByTime(9 * 60_000);
+      await settle();
+      expect(session.prompts).toEqual(["Watch the PR"]);
+      vi.advanceTimersByTime(60_000);
+      await settle();
+      expect(session.prompts.at(-1)).toBe("You asked to be woken: Check CI and reviews");
+      expect(session.prompts).toHaveLength(2);
+      expect(d.engine.view(thread.id)).toMatchObject({ wakeAt: null, activity: "working" });
+      expect(d.engine.events(thread.id).events.map((e) => e.event.type)).toContain("wake.fired");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("wake_me survives a restart: re-armed on start, or rung at once if its time passed", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const first = daemon();
+      first.adapter.onStart = (session) => {
+        session.onPrompt = () => {
+          session.wakeMe(10 * 60_000, "Check CI");
+          session.complete();
+        };
+      };
+      const thread = await first.engine.createThread({ project: "app", prompt: "Watch the PR" });
+      await settle();
+      const asleep = first.adapter.last;
+      await shutDown(first);
+
+      // A daemon up again before the time: it re-arms the wake.
+      const second = daemon();
+      expect(second.engine.view(thread.id).wakeAt).not.toBeNull();
+      vi.advanceTimersByTime(10 * 60_000 - 1);
+      await settle();
+      expect(second.adapter.sessions).toHaveLength(0);
+      vi.advanceTimersByTime(1);
+      await settle();
+      expect(second.adapter.last.input.resumeSessionId).toBe(asleep.sessionId);
+      expect(second.adapter.last.prompts).toEqual(["You asked to be woken: Check CI"]);
+
+      // The time passes while no daemon runs: the next one wakes it at once.
+      second.adapter.last.wakeMe(10 * 60_000, "Look again");
+      second.adapter.last.complete();
+      await settle();
+      await shutDown(second);
+      vi.advanceTimersByTime(60 * 60_000);
+      const third = daemon();
+      vi.advanceTimersByTime(0);
+      await settle();
+      expect(third.adapter.last.prompts).toEqual(["You asked to be woken: Look again"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("archiving drops a wake; a wake never wakes an archived thread", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const d = daemon();
+      d.adapter.onStart = (session) => {
+        session.onPrompt = () => {
+          session.wakeMe(60_000, "Check CI");
+          session.complete();
+        };
+      };
+      const thread = await d.engine.createThread({ project: "app", prompt: "Watch" });
+      await settle();
+      const sessions = d.adapter.sessions.length;
+      await d.engine.archive(thread.id);
+      vi.advanceTimersByTime(5 * 60_000);
+      await settle();
+      expect(d.adapter.sessions).toHaveLength(sessions);
+      expect(d.engine.view(thread.id)).toMatchObject({ status: "archived", wakeAt: null });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("a thread that landed before a kill is archived by the next daemon", async () => {
+    const first = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(first);
+    await first.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    session.landed(PR);
+    await settle();
+    kill(first);
+    const second = daemon();
+    await expect.poll(() => second.engine.view(thread.id).status).toBe("archived");
+    expect(second.adapter.sessions).toHaveLength(0); // nothing resumed for it
+  });
+
+  it("a landed thread that can't be archived (work left over) stays, and says why", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    writeFileSync(join(thread.worktreePath, "stray.txt"), "left over");
+    session.landed(PR);
+    session.complete();
+    await expect
+      .poll(() => d.engine.events(thread.id).events.at(-1)?.event)
+      .toMatchObject({ type: "runtime.error", payload: { message: /Landed, but couldn't archive/ } });
+    expect(d.engine.view(thread.id)).toMatchObject({ status: "active", phase: "landing" });
+  });
+
+  it("start_thread: a new thread through the normal create, origin agent, its parent recorded", async () => {
+    const d = daemon();
+    const parent = await d.engine.createThread({ project: "app", prompt: "Review open PRs" });
+    const host = d.adapter.last.input.host;
+    if (!host) throw new Error("no host");
+    const child = await host.startThread({ prompt: "Fix the flaky test", title: "Flaky test" });
+    expect(child).toMatchObject({ title: "Flaky test", projectName: "app", branch: "tenzo/flaky-test" });
+    const view = d.engine.view(child.id);
+    expect(ThreadView.parse(view)).toEqual(view);
+    expect(view).toMatchObject({ origin: "agent", parentId: parent.id, phase: "discussing" });
+    expect(d.engine.view(parent.id)).toMatchObject({ origin: "user", parentId: null });
+    // Its own agent starts on the prompt, discussing like any thread.
+    expect(d.adapter.last.input).toMatchObject({ threadId: child.id, phase: "discussing" });
+    expect(d.adapter.last.prompts).toEqual(["Fix the flaky test"]);
+    await expect(host.startThread({ prompt: "x", project: "nope" })).rejects.toThrow(/No project "nope"/);
   });
 });

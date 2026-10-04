@@ -31,12 +31,22 @@ export interface ThreadRuntime {
   readonly turnId: TurnId | null;
   /** What the agent said last in the current turn, trimmed: the context of its next item. */
   readonly context: string;
-  /** Discussing until a proposal is approved, then building; review once the agent reports. */
+  /**
+   * Discussing until a proposal is approved, then building; review once the agent reports;
+   * landing after Merge or Open PR, building again after Needs changes.
+   */
   readonly phase: ThreadPhase;
   /** Screenshots attached since the last report: they go on the next one. */
   readonly attachments: readonly Attachment[];
   /** The dev server the agent exposed last; the daemon forwards the thread's live base to it. */
   readonly preview: Preview | null;
+  /** When the agent asked to be woken next, and why (`wake_me`); null when it didn't. */
+  readonly wake: Wake | null;
+}
+
+export interface Wake {
+  at: string;
+  why: string;
 }
 
 export interface FoldState {
@@ -67,6 +77,7 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   phase: "discussing",
   attachments: [],
   preview: null,
+  wake: null,
 };
 export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
@@ -84,13 +95,26 @@ export const PROPOSAL_OPTIONS: readonly UserInputOption[] = [
   { label: "Build it", value: "build", description: "", recommended: true },
 ];
 
-/** Finished work's one button for now; Merge, Open PR and Needs changes come with #21. */
+/**
+ * Finished work's buttons (PRODUCT.md §4): Merge is the suggestion; Needs changes is the free
+ * text under them. Done (nothing to land) stays for work that was never meant to merge.
+ */
 export const FINISHED_OPTIONS: readonly UserInputOption[] = [
-  { label: "Done", value: "done", description: "", recommended: true },
+  { label: "Merge", value: "merge", description: "Open the PR, see it through, merge it", recommended: true },
+  { label: "Open PR", value: "pr", description: "Open the PR; ask me before merging", recommended: false },
+  { label: "Done", value: "done", description: "Nothing to land", recommended: false },
+];
+
+/** A ready PR's one button. Not yet is the free text under it. */
+export const READY_OPTIONS: readonly UserInputOption[] = [
+  { label: "Merge", value: "merge", description: "", recommended: true },
 ];
 
 /** What a finished item asks when the agent gave no headline. */
 export const FINISHED_ASK = "Ready for review";
+
+/** What a ready item asks when the agent gave no headline. */
+export const READY_ASK = "Ready to merge";
 
 type Asking =
   | RuntimeEventOf<"user-input.requested">
@@ -112,10 +136,10 @@ export function foldEvent(
     case "session.exited": {
       // Nothing is waiting on the open requests any more, and the turn is over. The items stay:
       // what was asked still needs an answer, and answering resumes the session (engine.ts).
-      // Finished work waits on you, not on the agent: it never detaches.
+      // Finished work and ready PRs wait on you, not on the agent: they never detach.
       const changes: ItemChange[] = [];
       const open = state.open.map((item) => {
-        if (item.detached || item.kind === "finished") return item;
+        if (item.detached || item.kind === "finished" || item.kind === "ready") return item;
         const detached = { ...item, detached: true };
         changes.push({ type: "detached", item: detached });
         return detached;
@@ -202,19 +226,7 @@ export function foldEvent(
     case "report.submitted": {
       if (state.known.has(event.requestId)) return same(state);
       // A newer report replaces the one still waiting: one finished card per thread.
-      const superseded = state.open
-        .filter((open) => open.kind === "finished")
-        .map(
-          (open): ItemChange => ({
-            type: "resolved",
-            item: {
-              ...open,
-              status: "resolved",
-              resolvedAt: event.createdAt,
-              resolution: { kind: "superseded" },
-            },
-          }),
-        );
+      const superseded = supersede(state, "finished", event.createdAt);
       const item = finishedItem(event, runtime, environmentId);
       return {
         state: {
@@ -231,8 +243,50 @@ export function foldEvent(
         changes: [...superseded, { type: "opened", item }],
       };
     }
-    case "report.resolved":
-      return resolve(state, event, { kind: "done" });
+    case "report.resolved": {
+      const { decision, note } = event.payload;
+      // Like an approval, the answer moves the thread whether or not its card is still open.
+      const phase =
+        decision === "merge" || decision === "pr"
+          ? ("landing" as const)
+          : decision === "changes"
+            ? ("building" as const)
+            : runtime.phase;
+      return resolve(
+        { ...state, runtime: { ...runtime, phase } },
+        event,
+        decision === "changes" ? { kind: "changes", note: note ?? "" } : { kind: decision },
+      );
+    }
+    case "merge.ready": {
+      if (state.known.has(event.requestId)) return same(state);
+      // One ready card per thread: a newer one replaces it.
+      const superseded = supersede(state, "ready", event.createdAt);
+      const item = readyItem(event, runtime.context, environmentId);
+      return {
+        state: {
+          ...state,
+          open: [...state.open.filter((open) => open.kind !== "ready"), item],
+          known: new Set([...state.known, event.requestId]),
+        },
+        changes: [...superseded, { type: "opened", item }],
+      };
+    }
+    case "merge.resolved": {
+      const { decision, note } = event.payload;
+      return resolve(
+        state,
+        event,
+        decision === "merge" ? { kind: "merge" } : { kind: "changes", note: note ?? "" },
+      );
+    }
+    case "wake.scheduled":
+      return same({
+        ...state,
+        runtime: { ...runtime, wake: { at: event.payload.at, why: event.payload.why } },
+      });
+    case "wake.fired":
+      return same({ ...state, runtime: { ...runtime, wake: null } });
     case "thread.archived": {
       const changes = state.open.map(
         (open): ItemChange => ({
@@ -248,7 +302,7 @@ export function foldEvent(
       return {
         state: {
           ...state,
-          runtime: { ...runtime, live: false, turnId: null, preview: null },
+          runtime: { ...runtime, live: false, turnId: null, preview: null, wake: null },
           open: [],
         },
         changes,
@@ -257,6 +311,8 @@ export function foldEvent(
     case "session.configured":
     case "item.started":
     case "runtime.error":
+    // The engine archives the thread once the turn that landed it ends; the log says so then.
+    case "thread.landed":
       return same(state);
   }
 }
@@ -390,7 +446,7 @@ function finishedItem(
     context: runtime.context,
     ask: headline || FINISHED_ASK,
     options: [...FINISHED_OPTIONS],
-    suggested: "done",
+    suggested: "merge",
     questions: [],
     finished: {
       ...(headline ? { headline } : {}),
@@ -408,13 +464,55 @@ function finishedItem(
   };
 }
 
+/** A ready PR, from `ready_to_merge`: quick lane, since the agent is waiting on your Merge. */
+function readyItem(
+  event: RuntimeEventOf<"merge.ready">,
+  context: string,
+  environmentId: EnvironmentId,
+): QueueItem {
+  const { url, summary, headline } = event.payload;
+  return {
+    id: itemIdFor(event.requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "quick",
+    kind: "ready",
+    requestId: event.requestId,
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    context,
+    ask: headline || READY_ASK,
+    options: [...READY_OPTIONS],
+    suggested: "merge",
+    questions: [],
+    ready: { url, summary },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+  };
+}
+
+/** The thread's open items of `kind`, resolved as replaced by a newer one. */
+function supersede(state: FoldState, kind: QueueItem["kind"], at: string): ItemChange[] {
+  return state.open
+    .filter((open) => open.kind === kind)
+    .map(
+      (open): ItemChange => ({
+        type: "resolved",
+        item: { ...open, status: "resolved", resolvedAt: at, resolution: { kind: "superseded" } },
+      }),
+    );
+}
+
 function resolve(
   state: FoldState,
   event:
     | RuntimeEventOf<"user-input.resolved">
     | RuntimeEventOf<"request.resolved">
     | RuntimeEventOf<"proposal.resolved">
-    | RuntimeEventOf<"report.resolved">,
+    | RuntimeEventOf<"report.resolved">
+    | RuntimeEventOf<"merge.resolved">,
   resolution: QueueItemResolution,
 ): Folded {
   const found = state.open.find((item) => item.requestId === event.requestId);

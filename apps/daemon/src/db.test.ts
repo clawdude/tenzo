@@ -180,6 +180,24 @@ describe("openDatabase", () => {
     db.close();
   });
 
+  it("gives threads from before landing no wake, and you as their origin", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const landing = MIGRATIONS.findIndex((m) => m.name === "landing and agent threads");
+    const before = openDatabase(path, MIGRATIONS.slice(0, landing));
+    before.exec(`
+      INSERT INTO projects (id, name, path, default_branch, created_at)
+        VALUES ('prj_1', 'app', '/r/app', 'main', 'now');
+      INSERT INTO threads (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at)
+        VALUES ('thr_1', 'prj_1', 'Ran', 'ran', 'tenzo/ran', '/w/ran', 'active', 'now', 'now');
+    `);
+    before.close();
+    const db = openDatabase(path);
+    expect(db.prepare("SELECT wake, origin, parent_id FROM threads").all()).toEqual([
+      { wake: null, origin: "user", parent_id: null },
+    ]);
+    db.close();
+  });
+
   it("keeps the log append-only", () => {
     const db = openDatabase(join(tempDir(), "tenzo.db"));
     db.exec(`

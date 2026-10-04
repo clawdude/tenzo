@@ -30,6 +30,7 @@ import {
   clearPrompts,
   enqueuePrompt,
   getItem,
+  landedThreads,
   lastEvent,
   liveThreads,
   loadFoldState,
@@ -38,12 +39,19 @@ import {
   queuedCount,
   removePrompt,
   threadEvents,
+  threadsToWake,
   threadsWithPrompts,
 } from "./event-store.ts";
 import { type ItemChange, itemIdFor } from "./fold.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
-import { loadThreadPrompts, type ThreadPrompts } from "./prompts.ts";
+import {
+  loadThreadPrompts,
+  mergePrompt,
+  reviewPrompt,
+  type ThreadPrompts,
+  wakePrompt,
+} from "./prompts.ts";
 import { type Store, transaction } from "./store.ts";
 import {
   archiveThread,
@@ -95,7 +103,12 @@ export interface NewThread {
   prompt?: string;
   model?: string;
   clientKey?: string;
+  /** The thread whose agent starts this one (`start_thread`): its origin is then `agent`. */
+  parent?: ThreadId;
 }
+
+/** The longest a Node timer waits (about 24.8 days); a later wake checks again then. */
+const MAX_TIMER_MS = 2 ** 31 - 1;
 
 /** What a `thread.create` asked for, to tell a retry (the same) from a reused key (not). */
 function createRequest(input: NewThread): string {
@@ -122,6 +135,8 @@ interface Live {
   standing: StandingReply[];
   /** Ends when the session's events do. */
   reading: Promise<void>;
+  /** The agent said its work landed (`landed`): the thread archives when the turn ends. */
+  landed: boolean;
 }
 
 export class Engine {
@@ -144,6 +159,10 @@ export class Engine {
   readonly #stopNaming = new AbortController();
   /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
   readonly #creating = new Map<string, { request: string; thread: Promise<ThreadView> }>();
+  /** A timer per thread whose agent asked to be woken (`wake_me`). */
+  readonly #alarms = new Map<ThreadId, NodeJS.Timeout>();
+  /** Landed threads being archived: nothing new is sent to them meanwhile. */
+  readonly #landing = new Set<ThreadId>();
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -172,9 +191,14 @@ export class Engine {
         }),
       );
     }
+    // Threads that landed while the last daemon ran (or that it couldn't archive) go first, so
+    // nothing queued for them starts a session.
+    for (const threadId of landedThreads(this.store)) this.#archiveLanded(threadId);
     for (const threadId of threadsWithPrompts(this.store)) this.#pump(threadId);
     // Names the last daemon stopped thinking of before it had one.
     for (const { id, prompt } of threadsToName(this.store)) this.#name(id, prompt);
+    // Wakes the agents asked for come on time across restarts; any whose time passed, now.
+    for (const threadId of threadsToWake(this.store)) this.#arm(threadId);
   }
 
   subscribe(listener: (change: EngineChange) => void): () => void {
@@ -217,6 +241,7 @@ export class Engine {
       ...(model ? { model } : {}),
       ...(prompt && !given ? { naming: prompt } : {}),
       ...(client ? { client } : {}),
+      ...(input.parent ? { parent: input.parent } : {}),
     });
     if (prompt) enqueuePrompt(this.store, thread.id, prompt);
     this.#pump(thread.id);
@@ -267,6 +292,7 @@ export class Engine {
       throw error;
     }
     clearPrompts(this.store, thread.id);
+    this.#disarm(thread.id);
     await removeAttachments(this.store.home, thread.id).catch((error: unknown) => {
       this.#log(`couldn't remove the attachments of ${thread.id}: ${String(error)}`);
     });
@@ -338,21 +364,8 @@ export class Engine {
     if (this.#answering.has(item.id)) throw new TenzoError(`${item.id} is being answered already.`);
     const thread = this.#active(item.threadId);
     const checked = checkAnswer(item, answer);
-    if (checked.kind === "finished") {
-      // Nothing waits on a report: the daemon records your answer, and that is all (#21 adds the
-      // review actions that go back to the agent).
-      this.#append(
-        draft(thread, {
-          type: "report.resolved",
-          requestId: item.requestId,
-          payload: { decision: checked.decision },
-        }),
-      );
-      return {
-        item: getItem(this.store, item.id) ?? item,
-        delivery: "none",
-        thread: this.#changed(thread.id),
-      };
+    if (checked.kind === "finished" || checked.kind === "ready") {
+      return this.#answerAsMessage(item, thread, checked);
     }
 
     const live = this.#live.get(thread.id);
@@ -400,6 +413,8 @@ export class Engine {
   /** Stops every session, leaving open items for the next daemon. */
   async close(): Promise<void> {
     this.#closing = true;
+    for (const timer of this.#alarms.values()) clearTimeout(timer);
+    this.#alarms.clear();
     this.#stopNaming.abort();
     await Promise.all([
       ...[...this.#live.values()].map(async (live) => {
@@ -411,6 +426,122 @@ export class Engine {
   }
 
   // Internals.
+
+  /**
+   * Your answer to finished work or a ready PR. Nothing waits on either, so it is recorded here
+   * and, unless it is Done, sent to the agent as its next turn (prompts.ts), the session resumed
+   * if it has stopped. Merge and Open PR make the thread landing, Needs changes building.
+   */
+  #answerAsMessage(
+    item: QueueItem,
+    thread: Thread,
+    answer: Extract<ItemAnswer, { kind: "finished" | "ready" }>,
+  ): { item: QueueItem; delivery: "message" | "none"; thread: ThreadView } {
+    const note = answer.note ? { note: answer.note } : {};
+    const turn = item.turnId ? { turnId: item.turnId } : {};
+    const resolution =
+      answer.kind === "finished"
+        ? draft(thread, {
+            ...turn,
+            type: "report.resolved",
+            requestId: item.requestId,
+            payload: { decision: answer.decision, ...note },
+          })
+        : draft(thread, {
+            ...turn,
+            type: "merge.resolved",
+            requestId: item.requestId,
+            payload: { decision: answer.decision, ...note },
+          });
+    const prompt =
+      answer.kind === "finished" ? reviewPrompt(answer, this.#prompts()) : mergePrompt(answer);
+    // Both or neither, as with any answer delivered as a message.
+    const appended = transaction(this.store, () => {
+      const result = appendEvent(this.store, resolution);
+      if (prompt) enqueuePrompt(this.store, thread.id, prompt);
+      return result;
+    });
+    this.#publish(resolution, appended);
+    if (prompt) this.#pump(thread.id);
+    return {
+      item: getItem(this.store, item.id) ?? item,
+      delivery: prompt ? "message" : "none",
+      thread: this.#changed(thread.id),
+    };
+  }
+
+  /** Sets the thread's wake timer from its log (`wake_me`); a time already past rings now. */
+  #arm(threadId: ThreadId): void {
+    this.#disarm(threadId);
+    if (this.#closing) return;
+    const wake = loadFoldState(this.store, threadId).runtime.wake;
+    if (!wake) return;
+    const delay = Math.max(0, Date.parse(wake.at) - Date.now());
+    const timer = setTimeout(() => this.#ring(threadId), Math.min(delay, MAX_TIMER_MS));
+    timer.unref?.();
+    this.#alarms.set(threadId, timer);
+  }
+
+  #disarm(threadId: ThreadId): void {
+    clearTimeout(this.#alarms.get(threadId));
+    this.#alarms.delete(threadId);
+  }
+
+  /** The wake's time has come: "You asked to be woken: <why>" goes to the agent as a turn. */
+  #ring(threadId: ThreadId): void {
+    this.#alarms.delete(threadId);
+    if (this.#closing) return;
+    try {
+      const thread = getThread(this.store, threadId);
+      if (thread.status !== "active") return;
+      const wake = loadFoldState(this.store, threadId).runtime.wake;
+      if (!wake) return;
+      if (Date.parse(wake.at) > Date.now()) {
+        this.#arm(threadId); // a later wake replaced it, or a long one checks again
+        return;
+      }
+      const fired = draft(thread, { type: "wake.fired", payload: { why: wake.why } });
+      const appended = transaction(this.store, () => {
+        const result = appendEvent(this.store, fired);
+        enqueuePrompt(this.store, thread.id, wakePrompt(wake.why));
+        return result;
+      });
+      this.#publish(fired, appended);
+      this.#pump(thread.id);
+      this.#changed(thread.id);
+    } catch (error) {
+      this.#log(`couldn't wake ${threadId}: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Archives a thread whose agent said it landed: worktree removed, branch kept. A refusal
+   * (work left uncommitted after all) is logged on the thread, which stays landing for you.
+   */
+  #archiveLanded(threadId: ThreadId): void {
+    if (this.#closing || this.#landing.has(threadId)) return;
+    this.#landing.add(threadId);
+    void this.archive(threadId)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.#log(`couldn't archive ${threadId}, which landed: ${message}`);
+        try {
+          this.#append(
+            draft(getThread(this.store, threadId), {
+              type: "runtime.error",
+              payload: { message: `Landed, but couldn't archive the thread: ${message}` },
+            }),
+          );
+          this.#changed(threadId);
+        } catch {
+          // The daemon is closing; the next one tries again.
+        }
+      })
+      .finally(() => {
+        this.#landing.delete(threadId);
+        this.#pump(threadId); // not archived: what came in meanwhile goes after all
+      });
+  }
 
   /**
    * Asks the titler for the thread's name, in the background: the thread has started already.
@@ -442,7 +573,7 @@ export class Engine {
 
   /** Sends the thread's next queued prompt if no turn of ours is running, starting the agent. */
   #pump(threadId: ThreadId): void {
-    if (this.#closing || this.#archiving.has(threadId)) return;
+    if (this.#closing || this.#archiving.has(threadId) || this.#landing.has(threadId)) return;
     const thread = getThread(this.store, threadId);
     if (thread.status !== "active") return;
     let live = this.#live.get(threadId);
@@ -499,6 +630,22 @@ export class Engine {
       })(),
       prompts: this.#prompts(),
       attachmentsDir: attachmentsDir(this.store.home, thread.id),
+      host: {
+        phase: () => loadFoldState(this.store, thread.id).runtime.phase,
+        startThread: async (input) => {
+          const started = await this.createThread({
+            ...input,
+            project: input.project ?? projectOf(this.store, thread).name,
+            parent: thread.id,
+          });
+          return {
+            id: started.id,
+            title: started.title,
+            projectName: started.projectName,
+            branch: started.branch,
+          };
+        },
+      },
     });
     const live: Live = {
       threadId: thread.id,
@@ -506,6 +653,7 @@ export class Engine {
       turnId: null,
       standing: [],
       reading: Promise.resolve(),
+      landed: false,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -533,6 +681,8 @@ export class Engine {
         );
       }
       this.#changed(live.threadId);
+      // It landed and ended before its turn did: archive it all the same.
+      if (live.landed) this.#archiveLanded(live.threadId);
       // Prompts that came in while it was ending start a new session.
       this.#pump(live.threadId);
     }
@@ -559,12 +709,23 @@ export class Engine {
     }
     this.#append(event);
     switch (event.type) {
-      case "turn.completed":
-        if (event.turnId === live.turnId) {
+      case "turn.completed": {
+        const ours = event.turnId === live.turnId;
+        if (ours) {
           live.turnId = null;
           live.standing = [];
-          this.#pump(live.threadId);
         }
+        // The turn that landed the thread is over: it archives instead of going on.
+        if (live.landed) this.#archiveLanded(live.threadId);
+        else if (ours) this.#pump(live.threadId);
+        this.#changed(live.threadId);
+        break;
+      }
+      case "thread.landed":
+        live.landed = true;
+        break;
+      case "wake.scheduled":
+        this.#arm(live.threadId);
         this.#changed(live.threadId);
         break;
       case "turn.started":
@@ -683,6 +844,9 @@ export class Engine {
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
       phase: runtime.phase,
+      origin: thread.origin,
+      parentId: thread.parentId,
+      wakeAt: thread.status === "active" ? (runtime.wake?.at ?? null) : null,
       activity: open > 0 ? "needs-you" : working ? "working" : "idle",
       working,
       queued,
@@ -717,8 +881,8 @@ function draft(thread: Thread, event: Draft): RuntimeEvent {
   } as RuntimeEvent;
 }
 
-/** An answer that goes to the agent: everything but finished work's. */
-type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" }>;
+/** An answer that goes to a waiting agent: everything but finished work's and a ready PR's. */
+type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" | "ready" }>;
 
 function respond(
   session: AgentSession,

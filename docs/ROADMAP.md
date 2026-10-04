@@ -24,7 +24,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 
 - [x] #19 Injected MCP server with `propose`; thread prompts discuss ("don't change anything until we agree") and build; proposal card (Build it / Change something); discussing → building
 - [x] #20 Finished card: `report`, `attach`, `expose` (note, check badges, screenshots, live URL)
-- [ ] #21 Review actions: Merge (agent opens PR, waits, fixes comments, merges when mergeable), Open PR (landing prompt + `wake_me`), Needs changes; `start_thread`
+- [x] #21 Review actions: Merge (agent opens PR, waits, fixes comments, merges when mergeable), Open PR (landing prompt + `wake_me`), Needs changes; `start_thread`
 - [ ] #22 Back of the card: why it's asking, the change, what happened so far
 - [ ] #23 Snooze (swipe, 15 min, undo), all-clear screen with Meanwhile, quick vs. review lanes, error cards
 - [ ] Threads list and New thread in the pile language

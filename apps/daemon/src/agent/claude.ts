@@ -12,13 +12,15 @@ import {
 import type {
   RequestId,
   RuntimeEvent,
+  ThreadPhase,
   TurnId,
   UserInputAnswers,
   UserInputQuestion,
 } from "@tenzo/contracts";
-import { liveBase } from "@tenzo/contracts";
+import { liveBase, WebUrl } from "@tenzo/contracts";
 import { MAX_ATTACHMENTS, takeAttachment } from "../attachments.ts";
 import { TenzoError } from "../errors.ts";
+import { hasChanges } from "../git.ts";
 import { randomId } from "../ids.ts";
 import {
   checkListener,
@@ -28,7 +30,7 @@ import {
   lsofListenerDirs,
   probeLive,
 } from "../live.ts";
-import { promptFor, proposalReply } from "../prompts.ts";
+import { promptFor, proposalReply, wakePrompt } from "../prompts.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
   boundedInput,
@@ -46,16 +48,21 @@ import {
   type AttachInput,
   type ExposeInput,
   isTenzoTool,
+  type LandedInput,
   PROPOSE,
   type ProposeInput,
+  parseWait,
   proposalOf,
+  type ReadyInput,
   type ReportInput,
   reportOf,
+  type StartThreadInput,
   TENZO_MCP_SERVER,
   type TenzoToolHost,
   type ToolReply,
   tenzoMcpServer,
   tenzoToolName,
+  type WakeInput,
 } from "./tenzo-mcp.ts";
 
 /**
@@ -88,6 +95,9 @@ export interface ClaudeAdapterOptions {
 
 /** Every filesystem setting source, as the `claude` CLI itself loads them. */
 export const SETTING_SOURCES = ["user", "project", "local"] as const;
+
+/** Threads one session may start with `start_thread`: enough for real work, not a runaway loop. */
+export const MAX_STARTED_THREADS = 10;
 
 /** How long `stop` waits for Claude to exit by itself before closing it. */
 const STOP_GRACE_MS = 5000;
@@ -241,6 +251,14 @@ function startSession(
   };
   /** Where this session's thread is: discussing until a proposal is approved. */
   let phase = input.phase;
+  /**
+   * Where the thread is now: the daemon's log says (your answers move it under a running
+   * session), except that an approval in this session is a moment ahead of it.
+   */
+  const phaseNow = (): ThreadPhase => {
+    const daemon = input.host?.phase();
+    return daemon && daemon !== "discussing" ? daemon : phase;
+  };
 
   /**
    * `report`: finished work becomes a review item at once, with what was attached and exposed
@@ -249,7 +267,7 @@ function startSession(
    */
   let attached = input.pendingAttachments ?? 0;
   const report = async (raw: ReportInput): Promise<ToolReply> => {
-    if (phase === "discussing") {
+    if (phaseNow() === "discussing") {
       return {
         text: "Nothing to report yet: propose first, and report once the approved work is built.",
         isError: true,
@@ -292,7 +310,95 @@ function startSession(
       return `Exposed: the card's "Open live" opens ${url} on Tenzo's live address, forwarded to localhost:${preview.port}. Keep the server running.${warning ? `\nWarning: ${warning}` : ""}`;
     });
 
-  const host: TenzoToolHost = { propose, report, attach, expose };
+  /** `wake_me`: the daemon keeps the time and sends the turn (engine.ts). */
+  const wakeMe = async (raw: WakeInput): Promise<ToolReply> => {
+    const ms = parseWait(raw.in);
+    if (typeof ms === "string") return { text: ms, isError: true };
+    const at = new Date(Date.now() + ms).toISOString();
+    const why = raw.why.trim();
+    emit({ type: "wake.scheduled", ...inTurn(), payload: { at, why } });
+    return {
+      text: `Tenzo wakes you at ${at} (in ${raw.in.trim()}) with "${wakePrompt(why)}". End your turn now; don't wait or poll meanwhile.`,
+    };
+  };
+
+  /** `ready_to_merge`: after Open PR, a quick-lane card with Merge. Nothing waits for you. */
+  const readyToMerge = async (raw: ReadyInput): Promise<ToolReply> => {
+    if (phaseNow() !== "landing") {
+      return {
+        text: "Nothing to merge yet: ready_to_merge is for the PR you opened after the person chose Open PR.",
+        isError: true,
+      };
+    }
+    const url = WebUrl.safeParse(raw.url.trim());
+    if (!url.success) return { text: "The PR's URL must be an http(s) link.", isError: true };
+    const headline = raw.headline?.replaceAll(/\s+/g, " ").trim();
+    emit({
+      type: "merge.ready",
+      requestId: randomId("req"),
+      ...inTurn(),
+      payload: { url: url.data, summary: raw.summary.trim(), ...(headline ? { headline } : {}) },
+    });
+    return {
+      text: "The person has a card with Merge. End your turn now with one short line; their answer comes back to you as a message.",
+    };
+  };
+
+  /** `landed`: the PR is merged; the daemon archives the thread once the turn ends. */
+  const landed = (raw: LandedInput): Promise<ToolReply> =>
+    toolCall(async () => {
+      if (phaseNow() !== "landing") {
+        throw new TenzoError(
+          "Nothing has landed yet: call landed once the PR is merged, after the person chose Merge or Open PR.",
+        );
+      }
+      const given = raw.url?.trim();
+      const url = given ? WebUrl.safeParse(given) : undefined;
+      if (url && !url.success) throw new TenzoError("The PR's URL must be an http(s) link.");
+      if (await hasChanges(input.cwd)) {
+        throw new TenzoError(
+          "The worktree has uncommitted changes, and archiving removes it. Commit them or delete them, then call landed again.",
+        );
+      }
+      const summary = raw.summary?.trim();
+      emit({
+        type: "thread.landed",
+        ...inTurn(),
+        payload: { ...(url ? { url: url.data } : {}), ...(summary ? { summary } : {}) },
+      });
+      return "Landed. Tenzo archives this thread when your turn ends: end it now with one line.";
+    });
+
+  /** `start_thread`: a new thread through the daemon's ordinary create, a few per session. */
+  let started = 0;
+  const startThread = (raw: StartThreadInput): Promise<ToolReply> =>
+    toolCall(async () => {
+      const daemon = input.host;
+      if (!daemon) throw new TenzoError("This thread can't start threads.");
+      if (started >= MAX_STARTED_THREADS) {
+        throw new TenzoError(`A session starts at most ${MAX_STARTED_THREADS} threads.`);
+      }
+      const project = raw.project?.trim();
+      const title = raw.title?.trim();
+      const thread = await daemon.startThread({
+        prompt: raw.prompt.trim(),
+        ...(project ? { project } : {}),
+        ...(title ? { title } : {}),
+      });
+      started++;
+      return `Started ${thread.id} ("${thread.title}") in ${thread.projectName}, on ${thread.branch}. It talks to the person on its own; you won't hear from it.`;
+    });
+
+  const host: TenzoToolHost = {
+    propose,
+    report,
+    attach,
+    expose,
+    wakeMe,
+    readyToMerge,
+    landed,
+    startThread,
+  };
 
   const canUseTool: CanUseTool = async (toolName, toolInput, context) => {
     // Tenzo's own tools are how the agent talks to Tenzo: nothing to ask the user about.

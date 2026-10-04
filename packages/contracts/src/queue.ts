@@ -4,6 +4,7 @@ import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
   AgentKind,
   Fingerprint,
+  MergeDecision,
   RequestId,
   ReviewDecision,
   RuntimeEvent,
@@ -12,6 +13,7 @@ import {
   UserInputAnswers,
   UserInputOption,
   UserInputQuestion,
+  WebUrl,
 } from "./runtime.ts";
 
 /**
@@ -27,7 +29,8 @@ export type QueueItemId = z.infer<typeof QueueItemId>;
 export const Lane = z.enum(["quick", "review"]);
 export type Lane = z.infer<typeof Lane>;
 
-export const QueueItemKind = z.enum(["question", "permission", "proposal", "finished"]);
+/** `ready`: a PR the agent opened can merge (after Open PR); Merge, or say what first. */
+export const QueueItemKind = z.enum(["question", "permission", "proposal", "finished", "ready"]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
 /** How an item left the queue. */
@@ -45,6 +48,12 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("dismissed") }),
   /** Finished work you marked done. */
   z.object({ kind: z.literal("done") }),
+  /** Finished work, or a ready PR, you said to merge: the agent lands it. */
+  z.object({ kind: z.literal("merge") }),
+  /** Finished work you said to open a PR for: the thread is landing. */
+  z.object({ kind: z.literal("pr") }),
+  /** Finished work, or a ready PR, sent back with a note: what needs changing first. */
+  z.object({ kind: z.literal("changes"), note: z.string() }),
   /** Finished work the agent reported again: the newer report replaces it. */
   z.object({ kind: z.literal("superseded") }),
 ]);
@@ -83,6 +92,8 @@ export const QueueItem = z.object({
   proposal: z.object({ headline: z.string(), summary: z.string() }).optional(),
   /** A finished item (review lane): the handoff note, checks, screenshots and live URL. */
   finished: Finished.optional(),
+  /** A ready item (quick lane): the PR and its state. `ask` is the headline. */
+  ready: z.object({ url: WebUrl, summary: z.string() }).optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
   fingerprint: Fingerprint.optional(),
   createdAt: z.iso.datetime(),
@@ -118,17 +129,34 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     decision: z.enum(["build", "change"]),
     note: z.string().optional(),
   }),
-  z.object({ kind: z.literal("finished"), decision: ReviewDecision }),
+  z.object({
+    kind: z.literal("finished"),
+    decision: ReviewDecision,
+    /** Needs changes: what to change. */
+    note: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("ready"),
+    /** Merge it, or not yet: then `note` says what first. */
+    decision: MergeDecision,
+    note: z.string().optional(),
+  }),
 ]);
 export type ItemAnswer = z.infer<typeof ItemAnswer>;
 
 /**
  * Where a thread is in its flow (PRODUCT.md §4). It starts `discussing`: the agent reads, asks
  * and proposes, and changes nothing. *Build it* on its proposal makes it `building`. The agent's
- * `report` makes it `review`: finished work waits for you. Landing comes with #21.
+ * `report` makes it `review`: finished work waits for you. Merge or Open PR makes it `landing`:
+ * pushed and waiting on the outside world (CI, reviewers); Needs changes, `building` again. A
+ * landed thread is archived.
  */
-export const ThreadPhase = z.enum(["discussing", "building", "review"]);
+export const ThreadPhase = z.enum(["discussing", "building", "review", "landing"]);
 export type ThreadPhase = z.infer<typeof ThreadPhase>;
+
+/** Who started a thread: you, or another thread's agent (`start_thread`). */
+export const ThreadOrigin = z.enum(["user", "agent"]);
+export type ThreadOrigin = z.infer<typeof ThreadOrigin>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */
 export const ThreadActivity = z.enum(["idle", "working", "needs-you"]);
@@ -149,6 +177,11 @@ export const ThreadView = z.object({
   updatedAt: z.iso.datetime(),
   archivedAt: z.iso.datetime().nullable(),
   phase: ThreadPhase,
+  origin: ThreadOrigin.default("user"),
+  /** The thread whose agent started this one (origin `agent`). */
+  parentId: ThreadId.nullable().default(null),
+  /** When the agent asked to be woken next (`wake_me`); null when it didn't. */
+  wakeAt: z.iso.datetime().nullable().default(null),
   /** `needs-you` when it has an open item, else `working` while a turn runs or prompts wait. */
   activity: ThreadActivity,
   /** A turn is running or a prompt is waiting to be sent. */

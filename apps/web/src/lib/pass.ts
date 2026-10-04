@@ -43,7 +43,8 @@ export interface Choice {
  * One question on a card. A question item asks one or more (Claude's AskUserQuestion takes up to
  * four); the card asks them one after another and sends the answers together. A permission
  * request is one step: Allow or Deny. So is a proposal: Build it, or say what to change. And
- * finished work: Done (Merge, Open PR and Needs changes join it in #21).
+ * finished work: Merge, Open PR or Done, or say what needs changing. And a ready PR: Merge, or
+ * say what first.
  */
 export interface Step {
 	key: string;
@@ -54,7 +55,7 @@ export interface Step {
 	recommended: boolean;
 	/** The rest, folded behind "N other options". */
 	others: Choice[];
-	/** Quieter actions in a row under the field, always shown (finished work's, from #21). */
+	/** Quieter actions in a row under the field, always shown (finished work's Open PR, Done). */
 	row: Choice[];
 	/** The free-text field's hint; null: the card has no field. */
 	placeholder: string | null;
@@ -69,12 +70,30 @@ export function stepsOf(item: QueueItem): Step[] {
 			{
 				key: 'finished',
 				ask: item.finished?.headline || item.ask,
-				suggested: { label: 'Done', value: 'done', description: '' },
+				// Landing is what finished work is for: the filled button, no "Suggested" over it.
+				suggested: { label: 'Merge', value: 'merge', description: '' },
+				recommended: false,
+				others: [],
+				// Open PR (land it, but ask before merging) and Done (nothing to land), quietly.
+				row: [
+					{ label: 'Open PR', value: 'pr', description: '' },
+					{ label: 'Done', value: 'done', description: '' }
+				],
+				// Words are Needs changes: they go back to the agent, which builds again.
+				placeholder: 'Needs changes'
+			}
+		];
+	}
+	if (item.kind === 'ready') {
+		return [
+			{
+				key: 'ready',
+				ask: item.ask,
+				suggested: { label: 'Merge', value: 'merge', description: '' },
 				recommended: false,
 				others: [],
 				row: [],
-				// Words for finished work are Needs changes, which comes with #21.
-				placeholder: null
+				placeholder: 'Not yet: say what first'
 			}
 		];
 	}
@@ -127,12 +146,22 @@ export function stepsOf(item: QueueItem): Step[] {
 /**
  * The answer to send once every step has a pick, one pick per step in order. A button sends its
  * own `value` (so what it says is what goes); words go as they are. On a permission request,
- * words are a Deny with the reason; on a proposal, what to change.
+ * words are a Deny with the reason; on a proposal, what to change; on finished work, what needs
+ * changing; on a ready PR, what to do before merging.
  */
 export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 	if (item.kind === 'finished') {
-		if (!picks[0]) throw new Error('Finished work needs a decision.');
-		return { kind: 'finished', decision: 'done' };
+		const pick = picks[0];
+		if (!pick) throw new Error('Finished work needs a decision.');
+		if ('text' in pick) return { kind: 'finished', decision: 'changes', note: pick.text.trim() };
+		const value = pick.choice.value;
+		return { kind: 'finished', decision: value === 'pr' || value === 'done' ? value : 'merge' };
+	}
+	if (item.kind === 'ready') {
+		const pick = picks[0];
+		if (!pick) throw new Error('A ready PR needs a decision.');
+		if ('text' in pick) return { kind: 'ready', decision: 'changes', note: pick.text.trim() };
+		return { kind: 'ready', decision: 'merge' };
 	}
 	if (item.kind === 'proposal') {
 		const pick = picks[0];

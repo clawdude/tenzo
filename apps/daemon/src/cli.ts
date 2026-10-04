@@ -39,7 +39,9 @@ Usage:
   tenzo items                            what the threads need from you, oldest first
   tenzo answer <item> <choice|text…>     answer an item: an option's number or label, or your
                                          own words; allow/deny for a permission request;
-                                         build, or what to change, for a proposal
+                                         build, or what to change, for a proposal; merge,
+                                         pr, done, or what needs changing, for finished
+                                         work; merge, or what first, for a ready PR
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -277,7 +279,9 @@ async function answer(args: string[]): Promise<void> {
     answer: answerFromWords(item, words),
   });
   say(
-    result.delivery === "message"
+    result.delivery === "message" && (item.kind === "finished" || item.kind === "ready")
+      ? `Answered ${item.id}; it goes to the agent as its next message.`
+      : result.delivery === "message"
       ? `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`
       : result.item.status === "open"
         ? `Sent your answer to ${item.id}, but the agent hasn't confirmed it; \`tenzo items\` shows whether it is still open.`
@@ -303,7 +307,9 @@ async function follow(
     for (const { seq: s, event, environmentId } of events) {
       console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
       seq = s;
-      if (isAsk(event) || event.type === "report.submitted") asked = true;
+      if (isAsk(event) || event.type === "report.submitted" || event.type === "merge.ready") {
+        asked = true;
+      }
       if (event.type === "turn.completed" && event.payload.state === "failed") process.exitCode = 1;
     }
     if (!forever) {

@@ -16,13 +16,22 @@ import {
   type RuntimeEventOf,
   type RuntimeEventType,
   type ThreadId,
+  type ThreadPhase,
   TurnId,
 } from "@tenzo/contracts";
 import { afterAll, describe, expect, it } from "vitest";
-import { removeTempDirs, tempDir } from "../testing.ts";
-import type { AgentSession, StartSessionInput } from "./agent.ts";
+import { TenzoError } from "../errors.ts";
+import { initRepo, removeTempDirs, tempDir } from "../testing.ts";
+import type { AgentSession, SessionHost, StartSessionInput } from "./agent.ts";
 import { type ListenerDirs, lsofListenerDirs } from "../live.ts";
-import { claudeEnv, createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
+import {
+  claudeEnv,
+  createClaudeAdapter,
+  findClaude,
+  MAX_STARTED_THREADS,
+  parseQuestions,
+} from "./claude.ts";
+import { parseWait } from "./tenzo-mcp.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import {
   assistant,
@@ -40,7 +49,7 @@ afterAll(removeTempDirs);
 
 const THREAD = "thr_abcdefghij0123456789" as ThreadId;
 
-const PROMPTS = { discuss: "Talk first.", build: "Build it now." };
+const PROMPTS = { discuss: "Talk first.", build: "Build it now.", landing: "Land it." };
 
 function start(
   script: Script,
@@ -1025,6 +1034,180 @@ describe("Claude adapter: report, attach, expose", () => {
       page.close();
       tenzo.close();
     }
+  });
+});
+
+describe("Claude adapter: wake_me, ready_to_merge, landed, start_thread", () => {
+  type Reply = { text: string; isError: boolean };
+  const PR = "https://github.com/o/r/pull/12";
+
+  /** A host whose thread is in `phase`, recording the threads it is asked to start. */
+  function host(phase: ThreadPhase = "landing") {
+    const started: { prompt: string; project?: string; title?: string }[] = [];
+    const daemon: SessionHost & { phase: () => ThreadPhase; started: typeof started } = {
+      phase: () => phase,
+      started,
+      startThread: async (input) => {
+        if (input.project === "nope") throw new TenzoError('No project "nope".');
+        started.push(input);
+        return {
+          id: `thr_${String(started.length).repeat(20)}` as ThreadId,
+          title: input.title ?? "Named later",
+          projectName: input.project ?? "app",
+          branch: "tenzo/flaky-test",
+        };
+      },
+    };
+    return daemon;
+  }
+
+  /** Claude calls Tenzo's tools one after another in a turn; the replies are collected. */
+  async function calls(
+    list: [string, Record<string, unknown>][],
+    input: Partial<Omit<StartSessionInput, "threadId">> = {},
+  ) {
+    const replies: Reply[] = [];
+    const fake = fakeQuery(async function* (turn) {
+      yield init();
+      for (const [name, args] of list) replies.push(await turn.callTool("tenzo", name, args));
+      yield result();
+    });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const session = adapter.start({
+      threadId: THREAD,
+      cwd: "/w/thread",
+      phase: "building",
+      prompts: PROMPTS,
+      ...input,
+    });
+    const events = reader(session);
+    session.sendTurn("go");
+    await events.until("turn.completed");
+    await session.stop();
+    await events.rest();
+    return { replies, events: events.seen };
+  }
+
+  it("parses waits from a minute to a week; a bare number is minutes", () => {
+    expect(parseWait("10m")).toBe(600_000);
+    expect(parseWait(" 90s ")).toBe(90_000);
+    expect(parseWait("1.5h")).toBe(5_400_000);
+    expect(parseWait("2 days")).toBe(172_800_000);
+    expect(parseWait("15")).toBe(900_000);
+    for (const bad of ["30s", "8d", "soon", "", "-5m", "10x"]) {
+      expect(parseWait(bad)).toMatch(/between 1 minute and 7 days/);
+    }
+  });
+
+  it("wake_me schedules a wake with why and returns at once; a bad wait is refused", async () => {
+    const before = Date.now();
+    const { replies, events } = await calls([
+      ["wake_me", { in: "10m", why: "  Check CI on PR #12 " }],
+      ["wake_me", { in: "a while", why: "x" }],
+      ["wake_me", { in: "10m", why: "  " }],
+    ]);
+    expect(replies[0]).toMatchObject({
+      isError: false,
+      text: expect.stringMatching(/You asked to be woken: Check CI on PR #12.*End your turn now/s),
+    });
+    expect(replies[1]).toMatchObject({ isError: true, text: expect.stringMatching(/"10m"/) });
+    expect(replies[2]?.isError).toBe(true);
+    const scheduled = events.filter((e) => e.type === "wake.scheduled");
+    expect(scheduled).toHaveLength(1);
+    const wake = scheduled[0] as RuntimeEventOf<"wake.scheduled">;
+    expect(wake.payload.why).toBe("Check CI on PR #12");
+    const at = Date.parse(wake.payload.at);
+    expect(at).toBeGreaterThanOrEqual(before + 600_000);
+    expect(at).toBeLessThan(Date.now() + 600_000 + 1);
+  });
+
+  it("ready_to_merge puts the PR on the Pass while landing, and only then", async () => {
+    const ready = { url: PR, summary: " Checks green. ", headline: " PR #12   can merge " };
+    const landing = await calls(
+      [
+        ["ready_to_merge", ready],
+        ["ready_to_merge", { ...ready, url: "javascript:alert(1)" }],
+      ],
+      { host: host("landing") },
+    );
+    expect(landing.replies[0]).toMatchObject({ isError: false, text: expect.stringMatching(/card with Merge/) });
+    expect(landing.replies[1]).toMatchObject({ isError: true, text: expect.stringMatching(/http\(s\)/) });
+    const opened = landing.events.filter((e) => e.type === "merge.ready");
+    expect(opened.map((e) => e.payload)).toEqual([
+      { url: PR, summary: "Checks green.", headline: "PR #12 can merge" },
+    ]);
+
+    // Before Open PR there's nothing to merge; without a daemon to ask, it isn't landing either.
+    for (const input of [{ host: host("review") }, {}]) {
+      const early = await calls([["ready_to_merge", ready]], input);
+      expect(early.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/Open PR/) });
+      expect(early.events.some((e) => e.type === "merge.ready")).toBe(false);
+    }
+  });
+
+  it("landed says the PR merged, from a clean worktree, while landing", async () => {
+    const cwd = initRepo("landing");
+    const clean = await calls([["landed", { url: PR, summary: " Counter page " }]], {
+      cwd,
+      host: host("landing"),
+    });
+    expect(clean.replies[0]).toMatchObject({ isError: false, text: expect.stringMatching(/^Landed/) });
+    expect(clean.events.filter((e) => e.type === "thread.landed").map((e) => e.payload)).toEqual([
+      { url: PR, summary: "Counter page" },
+    ]);
+
+    writeFileSync(join(cwd, "shot.png"), "stray");
+    const dirty = await calls([["landed", { url: PR }]], { cwd, host: host("landing") });
+    expect(dirty.replies[0]).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(/uncommitted changes/),
+    });
+    const early = await calls([["landed", {}]], { cwd, host: host("building") });
+    expect(early.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/Nothing has landed/) });
+    const badUrl = await calls([["landed", { url: "file:///etc" }]], { cwd, host: host("landing") });
+    expect(badUrl.replies[0]?.isError).toBe(true);
+    for (const run of [dirty, early, badUrl]) {
+      expect(run.events.some((e) => e.type === "thread.landed")).toBe(false);
+    }
+  });
+
+  it("start_thread starts a thread through the daemon, a few per session at most", async () => {
+    const daemon = host("building");
+    const { replies } = await calls(
+      [
+        ["start_thread", { prompt: " Fix the flaky test ", title: " Flaky test " }],
+        ["start_thread", { prompt: "Elsewhere", project: "nope" }],
+        ...Array.from(
+          { length: MAX_STARTED_THREADS },
+          (_, i): [string, Record<string, unknown>] => ["start_thread", { prompt: `Job ${i}` }],
+        ),
+      ],
+      { host: daemon },
+    );
+    expect(replies[0]).toMatchObject({
+      isError: false,
+      text: expect.stringMatching(/^Started thr_1{20} \("Flaky test"\) in app/),
+    });
+    expect(daemon.started[0]).toEqual({ prompt: "Fix the flaky test", title: "Flaky test" });
+    expect(replies[1]).toMatchObject({ isError: true, text: 'No project "nope".' });
+    expect(daemon.started).toHaveLength(MAX_STARTED_THREADS);
+    expect(replies.at(-1)).toMatchObject({ isError: true, text: expect.stringMatching(/at most/) });
+
+    const alone = await calls([["start_thread", { prompt: "x" }]]);
+    expect(alone.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/can't start/) });
+  });
+
+  it("report asks the daemon where the thread is: refused while discussing, taken once building", async () => {
+    const { replies } = await calls(
+      [["report", { summary: "x", how_to_test: "", checks: [] }]],
+      { phase: "discussing", host: host("discussing") },
+    );
+    expect(replies[0]?.isError).toBe(true);
+    const later = await calls(
+      [["report", { summary: "x", how_to_test: "", checks: [] }]],
+      { phase: "discussing", host: host("building") },
+    );
+    expect(later.replies[0]?.isError).toBe(false);
   });
 });
 

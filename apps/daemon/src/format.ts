@@ -34,7 +34,18 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
     }
     if (f.attachments.length > 0) lines.push(`    Screenshots: ${f.attachments.length}`);
     if (f.live) lines.push(`    Live: port ${f.live.port}`);
-    lines.push("    1. Done (suggested)");
+    lines.push(
+      "    1. Merge (suggested)",
+      "    2. Open PR",
+      "    3. Done (nothing to land)",
+      "    Or say what needs changing.",
+    );
+  } else if (item.kind === "ready" && item.ready) {
+    lines.push(`  ✓ ${item.ask}`, `    ${item.ready.url}`);
+    for (const line of item.ready.summary.split("\n")) {
+      if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
+    }
+    lines.push("    1. Merge (suggested)", "    Or say what to do first.");
   } else {
     lines.push(`  ? ${item.ask}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
@@ -131,7 +142,16 @@ function describe(event: RuntimeEvent): string {
         ...event.payload.checks.map((c) => `${c.name} ${c.status}`),
       ].join(" · ");
     case "report.resolved":
-      return event.payload.decision;
+    case "merge.resolved":
+      return event.payload.decision + (event.payload.note ? `: ${event.payload.note}` : "");
+    case "merge.ready":
+      return `${event.payload.headline ?? oneLine(event.payload.summary, 80)} · ${event.payload.url}`;
+    case "wake.scheduled":
+      return `at ${event.payload.at}: ${event.payload.why}`;
+    case "wake.fired":
+      return event.payload.why;
+    case "thread.landed":
+      return [event.payload.url, event.payload.summary].filter(Boolean).join(" · ") || "landed";
     case "runtime.error":
       return event.payload.message;
     case "thread.archived":
