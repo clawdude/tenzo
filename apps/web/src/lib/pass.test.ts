@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type QueueItem, suggestedAnswer } from '@tenzo/client-runtime';
-import { at, item, permission, question } from './fixtures.ts';
+import { at, item, permission, proposal, question } from './fixtures.ts';
 import { ageLabel, answerOf, othersLabel, pileEdges, pileOf, stepsOf } from './pass.ts';
 
 describe('pileEdges', () => {
@@ -57,6 +57,19 @@ describe('stepsOf', () => {
 		expect(stepsOf(permission('p', null))[0]?.suggested?.label).toBe('Allow');
 	});
 
+	it('offers Build it on a proposal, the headline as the ask; the field changes something', () => {
+		expect(stepsOf(proposal('p'))).toEqual([
+			{
+				key: 'proposal',
+				ask: 'Add CONTRIBUTING.md',
+				suggested: { label: 'Build it', value: 'build', description: '' },
+				recommended: false,
+				others: [],
+				placeholder: 'Change something'
+			}
+		]);
+	});
+
 	it('has no filled button for a question without options', () => {
 		const [step] = stepsOf(item('a', { questions: [question('Anything else?', [])] }));
 		expect(step?.suggested).toBeNull();
@@ -75,7 +88,8 @@ describe('answerOf', () => {
 			})
 		],
 		['a permission request', permission('p')],
-		['a permission request with no suggestion', permission('q', null)]
+		['a permission request with no suggestion', permission('q', null)],
+		['a proposal', proposal('r')]
 	];
 
 	it.each(cases)('sends exactly what the filled buttons say, for %s', (_, asked) => {
@@ -118,6 +132,17 @@ describe('answerOf', () => {
 		expect(answerOf(permission('p'), [{ choice: step!.others[0]! }])).toEqual({
 			kind: 'permission',
 			decision: 'deny'
+		});
+	});
+
+	it('builds a proposal with the button, and sends words as what to change', () => {
+		const p = proposal('p');
+		const [step] = stepsOf(p);
+		expect(answerOf(p, [{ choice: step!.suggested! }])).toEqual({ kind: 'proposal', decision: 'build' });
+		expect(answerOf(p, [{ text: ' Five rules, not three ' }])).toEqual({
+			kind: 'proposal',
+			decision: 'change',
+			note: 'Five rules, not three'
 		});
 	});
 

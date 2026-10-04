@@ -108,6 +108,8 @@ function progress(event: RuntimeEvent): string | undefined {
       return `  !  asks permission: ${event.payload.detail}`;
     case "user-input.requested":
       return "  !  asks a question";
+    case "proposal.requested":
+      return `  !  proposes: ${event.payload.headline}`;
     case "runtime.error":
       return `  !  ${event.payload.message}`;
     case "turn.completed":

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type Failure, fresh, isNewRefusal, refused, SETTLE_MS, tap, unsent } from './answering.ts';
-import { item, permission, question } from './fixtures.ts';
+import { item, permission, proposal, question } from './fixtures.ts';
 import { stepsOf } from './pass.ts';
 
 const one = item('a');
@@ -46,6 +46,22 @@ describe('tap', () => {
 	it('takes words from the field the same way', () => {
 		const sent = tap(permission('p'), fresh(0), { text: 'use the test db' }, 400);
 		expect(sent.answer).toEqual({ kind: 'permission', decision: 'deny', message: 'use the test db' });
+	});
+});
+
+describe('tap on a proposal', () => {
+	it('keeps the same guards: a proposal that just appeared ignores the tap, then builds once', () => {
+		const p = proposal('p');
+		const build = { choice: stepsOf(p)[0]!.suggested! };
+		expect(tap(p, fresh(1000), build, 1100)).toEqual({ state: fresh(1000), answer: null });
+		const sent = tap(p, fresh(1000), build, 1000 + SETTLE_MS);
+		expect(sent.answer).toEqual({ kind: 'proposal', decision: 'build' });
+		expect(tap(p, sent.state, build, 5000).answer).toBeNull();
+	});
+
+	it('sends a typed note as Change something', () => {
+		const sent = tap(proposal('p'), fresh(0), { text: 'Five rules' }, 400);
+		expect(sent.answer).toEqual({ kind: 'proposal', decision: 'change', note: 'Five rules' });
 	});
 });
 

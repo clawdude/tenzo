@@ -10,7 +10,7 @@ import {
 } from "@tenzo/contracts";
 import { afterAll, describe, expect, it } from "vitest";
 import { removeTempDirs, tempDir } from "../testing.ts";
-import type { AgentSession } from "./agent.ts";
+import type { AgentSession, StartSessionInput } from "./agent.ts";
 import { claudeEnv, createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import {
@@ -29,14 +29,22 @@ afterAll(removeTempDirs);
 
 const THREAD = "thr_abcdefghij0123456789" as ThreadId;
 
+const PROMPTS = { discuss: "Talk first.", build: "Build it now." };
+
 function start(
   script: Script,
-  input: { resumeSessionId?: string; model?: string } = {},
+  input: Partial<Omit<StartSessionInput, "threadId" | "cwd">> = {},
   exitError?: Error,
 ) {
   const fake = fakeQuery(script, exitError ? { exitError } : {});
   const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
-  const session = adapter.start({ threadId: THREAD, cwd: "/w/thread", ...input });
+  const session = adapter.start({
+    threadId: THREAD,
+    cwd: "/w/thread",
+    phase: "building",
+    prompts: PROMPTS,
+    ...input,
+  });
   return { fake, session, events: reader(session) };
 }
 
@@ -83,28 +91,37 @@ const simpleTurn: Script = function* () {
 };
 
 describe("Claude adapter: starting", () => {
-  it("runs the user's own claude with all their settings and Claude Code's own prompt", () => {
-    const { fake, session } = start(simpleTurn);
+  it("runs the user's own claude with all their settings, Claude Code's prompt and Tenzo's after it", () => {
+    const { fake, session } = start(simpleTurn, { phase: "discussing" });
     const options = fake.calls[0];
     expect(options).toMatchObject({
       cwd: "/w/thread",
       pathToClaudeCodeExecutable: "/opt/bin/claude",
       settingSources: ["user", "project", "local"],
-      systemPrompt: { type: "preset", preset: "claude_code" },
-      permissionMode: "acceptEdits",
+      // Discussing: the terminal's default mode, so an edit Claude tries anyway asks first.
+      permissionMode: "default",
       sessionId: session.sessionId,
     });
     expect(TurnId.safeParse(session.sessionId).success).toBe(true); // a UUID, as Claude wants
     expect(options?.resume).toBeUndefined();
-    // Nothing that would narrow what Claude Code can do: no tool lists, no replaced MCP servers,
-    // agents, plugins, skills or settings, no append to its prompt. The environment is ours, only
-    // scrubbed of a parent Claude Code session's variables.
+    // Claude Code's own system prompt, Tenzo's thread prompt appended: added to, never replaced.
+    expect(options?.systemPrompt).toEqual({
+      type: "preset",
+      preset: "claude_code",
+      append: PROMPTS.discuss,
+    });
+    // One MCP server added, Tenzo's, in process. The user's own servers load from their settings
+    // as in a terminal: no strictMcpConfig, nothing else in mcpServers.
+    expect(Object.keys(options?.mcpServers ?? {})).toEqual(["tenzo"]);
+    expect(options?.mcpServers?.tenzo).toMatchObject({ type: "sdk", name: "tenzo" });
+    // Nothing that would narrow what Claude Code can do: no tool lists, no replaced agents,
+    // plugins, skills or settings. The environment is ours, only scrubbed of a parent Claude Code
+    // session's variables.
     expect(options?.env).toEqual(claudeEnv(process.env));
     for (const key of [
       "tools",
       "allowedTools",
       "disallowedTools",
-      "mcpServers",
       "strictMcpConfig",
       "agents",
       "plugins",
@@ -116,7 +133,21 @@ describe("Claude adapter: starting", () => {
     ]) {
       expect(options, key).not.toHaveProperty(key);
     }
-    expect(options?.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
+  });
+
+  it("builds with accept edits and the build prompt", () => {
+    const { fake } = start(simpleTurn, { phase: "building" });
+    expect(fake.calls[0]).toMatchObject({
+      permissionMode: "acceptEdits",
+      systemPrompt: { type: "preset", preset: "claude_code", append: PROMPTS.build },
+    });
+  });
+
+  it("appends nothing when it has no prompts", () => {
+    const fake = fakeQuery(simpleTurn);
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    adapter.start({ threadId: THREAD, cwd: "/w/thread", phase: "discussing" });
+    expect(fake.calls[0]?.systemPrompt).toEqual({ type: "preset", preset: "claude_code" });
   });
 
   it("drops a parent Claude Code session's variables and keeps the user's configuration", () => {
@@ -545,5 +576,108 @@ describe("Claude adapter: permission requests", () => {
     expect(() => session.respondToRequest("req_abcdefghij0123456789", "allow")).toThrow(
       /No open permission request "req_abcdefghij0123456789"/,
     );
+  });
+});
+
+describe("Claude adapter: Tenzo's propose tool", () => {
+  const plan = {
+    headline: "Add CONTRIBUTING.md",
+    summary: "Add CONTRIBUTING.md with three rules.\nCheck: the file renders.",
+  };
+
+  /** Claude calls propose over MCP, then ends the turn with what the tool told it. */
+  function proposing(outcome: { reply?: { text: string; isError: boolean } }): Script {
+    return async function* (turn) {
+      yield init();
+      yield assistant([toolUse("toolu_p", "mcp__tenzo__propose", plan)]);
+      // Claude asks canUseTool first; Tenzo's own tools never become a permission card.
+      const allowed = await turn.canUseTool("mcp__tenzo__propose", plan, "toolu_p");
+      expect(allowed).toEqual({ behavior: "allow", updatedInput: plan });
+      outcome.reply = await turn.callTool("tenzo", "propose", plan);
+      yield toolResult("toolu_p", outcome.reply.text, outcome.reply.isError);
+      yield result();
+    };
+  }
+
+  it("waits for Build it, then tells Claude to build, with the build prompt, under accept edits", async () => {
+    const outcome: { reply?: { text: string; isError: boolean } } = {};
+    const { fake, session, events } = start(proposing(outcome), { phase: "discussing" });
+    const turnId = session.sendTurn("add a CONTRIBUTING.md");
+
+    const requested = await events.until("proposal.requested");
+    expect(requested).toMatchObject({ turnId, payload: plan });
+    expect(requested.payload.fingerprint).toBe(fingerprintOf("mcp__tenzo__propose", plan));
+    expect(events.seen.some((e) => e.type === "request.opened")).toBe(false);
+    // The call is still waiting: nothing has come back to Claude.
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(outcome.reply).toBeUndefined();
+    expect(() => session.respondToRequest(requested.requestId, "allow")).toThrow(/No open permission/);
+
+    session.respondToProposal(requested.requestId, "build");
+    expect((await events.until("proposal.resolved")).payload).toEqual({ decision: "build" });
+    await events.until("turn.completed");
+    expect(outcome.reply).toEqual({
+      text: `Approved, build it.\n\n${PROMPTS.build}`,
+      isError: false,
+    });
+    expect(fake.permissionModes).toEqual(["acceptEdits"]);
+    expect(() => session.respondToProposal(requested.requestId, "build")).toThrow(/No open proposal/);
+    await session.stop();
+  });
+
+  it("Change something sends the note back and asks for a new proposal", async () => {
+    const outcome: { reply?: { text: string; isError: boolean } } = {};
+    const { fake, session, events } = start(proposing(outcome), { phase: "discussing" });
+    session.sendTurn("add a CONTRIBUTING.md");
+    const requested = await events.until("proposal.requested");
+    session.respondToProposal(requested.requestId, "change", "Five rules, not three");
+    expect((await events.until("proposal.resolved")).payload).toEqual({
+      decision: "change",
+      note: "Five rules, not three",
+    });
+    await events.until("turn.completed");
+    expect(outcome.reply).toEqual({
+      text: "Not yet. Five rules, not three\n\nRevise, and propose again.",
+      isError: false,
+    });
+    expect(fake.permissionModes).toEqual([]); // still discussing
+    await session.stop();
+  });
+
+  it("withdraws the proposal when the turn is interrupted", async () => {
+    const outcome: { reply?: { text: string; isError: boolean } } = {};
+    const { session, events } = start(proposing(outcome), { phase: "discussing" });
+    session.sendTurn("add a CONTRIBUTING.md");
+    await events.until("proposal.requested");
+    await session.interrupt();
+    expect((await events.until("proposal.resolved")).payload).toEqual({ decision: "cancel" });
+    await session.stop();
+  });
+
+  it("leaves the proposal open when the session stops: answering it resumes the thread", async () => {
+    const outcome: { reply?: { text: string; isError: boolean } } = {};
+    const { session, events } = start(proposing(outcome), { phase: "discussing" });
+    session.sendTurn("add a CONTRIBUTING.md");
+    await events.until("proposal.requested");
+    await session.stop();
+    const rest = await events.rest();
+    expect(rest.some((e) => e.type === "proposal.resolved")).toBe(false);
+    expect(rest.at(-1)?.type).toBe("session.exited");
+  });
+
+  it("makes a headline from the summary when Claude gives none", async () => {
+    const { session, events } = start(
+      async function* (turn) {
+        await turn.callTool("tenzo", "propose", {
+          summary: "## Plan\nRename the flag to --dry. Then update the docs.",
+        });
+        yield result();
+      },
+      { phase: "discussing" },
+    );
+    session.sendTurn("rename the flag");
+    const requested = await events.until("proposal.requested");
+    expect(requested.payload.headline).toBe("Plan");
+    await session.stop();
   });
 });

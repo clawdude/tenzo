@@ -43,7 +43,7 @@ afterEach(async () => {
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
 function daemon(
   adapter = new FakeAdapter(),
-  options: Pick<EngineOptions, "titler" | "defaultModel"> = {},
+  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts"> = {},
 ) {
   const store = openStore(home);
   stores.push(store);
@@ -476,6 +476,121 @@ describe("Engine: items", () => {
       d.engine.answer(item?.id ?? "", { kind: "question", answers: { "Which color?": " " } }),
     ).rejects.toThrow(/needs an answer/);
     expect(d.engine.snapshot().items).toHaveLength(1);
+  });
+});
+
+const PROMPTS = { discuss: "Talk first.", build: "Build it now." };
+
+/** Starts a thread whose agent, on its first prompt, reads the repo and proposes. */
+async function threadProposing(d: ReturnType<typeof daemon>) {
+  d.adapter.onStart = (session) => {
+    session.onPrompt = () => {
+      if (session.prompts.length > 1) return;
+      session.say("I read the repo.");
+      session.propose("Add CONTRIBUTING.md with three rules.", "Add CONTRIBUTING.md");
+    };
+  };
+  const thread = await d.engine.createThread({ project: "app", prompt: "add a CONTRIBUTING.md" });
+  await settle();
+  return thread;
+}
+
+describe("Engine: discuss, propose, build", () => {
+  it("a new thread discusses with the discuss prompt; its proposal becomes a card", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const thread = await threadProposing(d);
+    expect(d.adapter.last.input).toMatchObject({ phase: "discussing", prompts: PROMPTS });
+    const [item] = d.engine.snapshot().items;
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      lane: "quick",
+      kind: "proposal",
+      ask: "Add CONTRIBUTING.md",
+      context: "I read the repo.",
+      suggested: "build",
+      proposal: { headline: "Add CONTRIBUTING.md", summary: "Add CONTRIBUTING.md with three rules." },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({ phase: "discussing", activity: "needs-you" });
+  });
+
+  it("Build it reaches the agent and the thread is building, across a restart too", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const thread = await threadProposing(d);
+    const [item] = d.engine.snapshot().items;
+    const result = await d.engine.answer(item?.id ?? "", { kind: "proposal", decision: "build" });
+    expect(result).toMatchObject({
+      delivery: "live",
+      item: { status: "resolved", resolution: { kind: "approved" } },
+      thread: { phase: "building" },
+    });
+    expect(d.adapter.last.answered).toEqual([{ requestId: item?.requestId, decision: "build" }]);
+    expect(d.changes.some((c) => c.type === "thread" && c.thread.phase === "building")).toBe(true);
+
+    // The next session (a resume, here after a restart) starts building, with the build prompt.
+    d.adapter.last.complete();
+    await settle();
+    kill(d);
+    const next = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    expect(next.engine.view(thread.id).phase).toBe("building");
+    next.engine.send(thread.id, "also add a code of conduct");
+    expect(next.adapter.last.input).toMatchObject({ phase: "building", prompts: PROMPTS });
+  });
+
+  it("Change something sends the note; the thread keeps discussing and can propose again", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const thread = await threadProposing(d);
+    const [item] = d.engine.snapshot().items;
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "proposal", decision: "change", note: "" }),
+    ).rejects.toThrow("Say what to change.");
+    const result = await d.engine.answer(item?.id ?? "", {
+      kind: "proposal",
+      decision: "change",
+      note: "Five rules",
+    });
+    expect(result.item.resolution).toEqual({ kind: "revise", note: "Five rules" });
+    expect(d.adapter.last.answered).toEqual([
+      { requestId: item?.requestId, decision: "change", note: "Five rules" },
+    ]);
+    expect(d.engine.view(thread.id).phase).toBe("discussing");
+    d.adapter.last.propose("Add CONTRIBUTING.md with five rules.", "Five rules");
+    await settle();
+    expect(d.engine.snapshot().items).toMatchObject([{ kind: "proposal", ask: "Five rules" }]);
+  });
+
+  it("a proposal left open by a kill: Build it resumes the agent building, told it's approved", async () => {
+    const first = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const thread = await threadProposing(first);
+    const sessionId = first.adapter.last.sessionId;
+    kill(first);
+
+    const second = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const [item] = second.engine.snapshot().items;
+    expect(item).toMatchObject({ kind: "proposal", status: "open", detached: true });
+    const result = await second.engine.answer(item?.id ?? "", {
+      kind: "proposal",
+      decision: "build",
+    });
+    expect(result).toMatchObject({ delivery: "message", thread: { phase: "building" } });
+    const resumed = second.adapter.last;
+    expect(resumed.input).toMatchObject({ resumeSessionId: sessionId, phase: "building" });
+    expect(resumed.prompts[0]).toBe(
+      "Your session ended while you were waiting for my answer to your proposal: Add CONTRIBUTING.md\nApproved, build it. Carry on from where you left off.",
+    );
+    expect(second.engine.view(thread.id).phase).toBe("building");
+  });
+
+  it("reads the prompts as each session starts, so an edit applies to the next one", async () => {
+    let discuss = "v1";
+    const d = daemon(new FakeAdapter(), { prompts: () => ({ discuss, build: "b" }) });
+    await threadProposing(d);
+    expect(d.adapter.last.input.prompts?.discuss).toBe("v1");
+    discuss = "v2";
+    d.adapter.last.crash();
+    await settle();
+    const thread = d.engine.threads()[0];
+    d.engine.send(thread?.id ?? "", "go on");
+    expect(d.adapter.last.input.prompts?.discuss).toBe("v2");
   });
 });
 

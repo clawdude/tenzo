@@ -19,6 +19,9 @@ export const FIXTURE = {
   hookLog: ".parity/hooks.jsonl",
 } as const;
 
+/** Tenzo's own MCP server, which every thread gets beside the user's (PRODUCT.md §4). */
+export const TENZO_SERVER = { name: "tenzo", tool: "mcp__tenzo__propose" } as const;
+
 /** The one prompt the thread gets. `word` is fresh per run, so the pong can't be guessed. */
 export function parityPrompt(word: string): string {
   return [
@@ -178,6 +181,7 @@ export function checkParity(
     checkSkill(configured, calls, threadText(events)),
     checkHook(hooks),
     checkMcp(configured, calls, word),
+    checkTenzoServer(configured),
     checkTurn(events, calls),
   ];
 }
@@ -280,16 +284,39 @@ function checkMcp(configured: Configured | undefined, calls: ToolCall[], word: s
 }
 
 /**
+ * Tenzo injects its own MCP server into every thread. It must sit beside the user's servers, not
+ * replace them: both connected in the same session, Tenzo's tools listed.
+ */
+function checkTenzoServer(configured: Configured | undefined): Check {
+  const name = "Tenzo's server";
+  if (!configured) return fail(name, "the session never reported its configuration");
+  const names = configured.mcpServers.map((s) => s.name);
+  for (const wanted of [TENZO_SERVER.name, FIXTURE.mcpServer]) {
+    const server = configured.mcpServers.find((s) => s.name === wanted);
+    if (!server) return fail(name, `${wanted} isn't loaded; servers: ${list(names)}`);
+    if (server.status !== "connected") return fail(name, `${wanted} is ${server.status}`);
+  }
+  if (!configured.tools.includes(TENZO_SERVER.tool)) {
+    return fail(name, `${TENZO_SERVER.name} connected, but ${TENZO_SERVER.tool} isn't listed`);
+  }
+  return pass(
+    name,
+    `${TENZO_SERVER.name} connected beside ${FIXTURE.mcpServer}, ${TENZO_SERVER.tool} listed`,
+  );
+}
+
+/**
  * How the run answers the thread's items (`tenzo answer`): `y` (allow) for the fixture's MCP
  * tool (the only prompt a fresh, untrusted copy of the fixture gets, exactly as in a
- * terminal), a reason to deny anything else, and null for a question: the run ends there.
- * Undefined: the event asks nothing.
+ * terminal), a reason to deny anything else, and null for a question or a proposal (the prompt
+ * asks to change nothing, so there is nothing to propose): the run ends there. Undefined: the
+ * event asks nothing.
  */
 export function answerFor(event: RuntimeEvent): string | null | undefined {
   if (event.type === "request.opened") {
     return event.payload.toolName === FIXTURE.mcpTool ? "y" : "Not part of the parity check.";
   }
-  if (event.type === "user-input.requested") return null;
+  if (event.type === "user-input.requested" || event.type === "proposal.requested") return null;
   return undefined;
 }
 
@@ -301,7 +328,9 @@ function checkTurn(events: readonly RuntimeEvent[], calls: readonly ToolCall[]):
       ? [`permission for ${e.payload.detail}`]
       : e.type === "user-input.requested"
         ? [`an answer to: ${e.payload.questions.map((q) => q.question).join("; ")}`]
-        : [],
+        : e.type === "proposal.requested"
+          ? [`a go-ahead for: ${e.payload.headline}`]
+          : [],
   );
   const errors = events.flatMap((e) => (e.type === "runtime.error" ? [e.payload.message] : []));
   const done = events.find(

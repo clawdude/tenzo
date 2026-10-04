@@ -1,3 +1,5 @@
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type {
   Options,
   PermissionResult,
@@ -119,8 +121,40 @@ export interface Turn {
     input: Record<string, unknown>,
     toolUseID: string,
   ): Promise<PermissionResult | null>;
-  /** Aborts the pending `canUseTool` calls, as Claude does on interrupt. */
+  /**
+   * Calls a tool of an in-process MCP server from `options.mcpServers` over MCP, the way Claude
+   * does; the turn's abort cancels it. Resolves with the tool's text and error flag.
+   */
+  callTool(
+    server: string,
+    name: string,
+    args: Record<string, unknown>,
+  ): Promise<{ text: string; isError: boolean }>;
+  /** Aborts the pending `canUseTool` and tool calls, as Claude does on interrupt. */
   abort(): void;
+}
+
+/** One MCP client per in-process server instance (an instance connects once). */
+const clients = new WeakMap<object, Promise<Client>>();
+
+async function clientFor(options: Options, server: string): Promise<Client> {
+  const config = options.mcpServers?.[server];
+  if (!config || config.type !== "sdk" || !("instance" in config)) {
+    throw new Error(`no in-process MCP server "${server}"`);
+  }
+  const instance = config.instance;
+  let client = clients.get(instance);
+  if (!client) {
+    client = (async () => {
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await instance.connect(serverSide);
+      const c = new Client({ name: "fake-claude", version: "0" });
+      await c.connect(clientSide);
+      return c;
+    })();
+    clients.set(instance, client);
+  }
+  return client;
 }
 
 export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMessage>;
@@ -132,6 +166,7 @@ export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMes
  */
 export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
   const calls: Options[] = [];
+  const permissionModes: string[] = [];
   let interrupts = 0;
   let closed = false;
   const query = ((params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
@@ -153,6 +188,18 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
               requestId: `ctl_${toolUseID}`,
             });
           },
+          callTool: async (server, name, args) => {
+            const client = await clientFor(options, server);
+            const reply = await client.callTool({ name, arguments: args }, undefined, {
+              signal: controller.signal,
+              timeout: 60_000,
+            });
+            const content = (reply.content ?? []) as { type: string; text?: string }[];
+            return {
+              text: content.map((c) => c.text ?? "").join(""),
+              isError: reply.isError === true,
+            };
+          },
           abort: () => controller.abort(),
         };
         for await (const message of script(turn)) {
@@ -171,11 +218,16 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
       close: () => {
         closed = true;
       },
+      setPermissionMode: async (mode: string) => {
+        permissionModes.push(mode);
+      },
     }) as unknown as Query;
   }) as unknown as typeof sdkQuery;
   return {
     query,
     calls,
+    /** Modes set with `setPermissionMode` while running, in order. */
+    permissionModes,
     get interrupts() {
       return interrupts;
     },

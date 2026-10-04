@@ -1,6 +1,6 @@
 # Feature-parity check
 
-Tenzo must never reduce what Claude Code can do (PRODUCT.md). This check proves it for the four things people configure most: a **subagent**, a **skill**, a **hook** and an **MCP server**, each defined in a project's `.claude/` folder the way a user would. One real thread runs in a scratch `tenzo` daemon, driven through the real `tenzo` CLI, and has to use all four.
+Tenzo must never reduce what Claude Code can do (PRODUCT.md). This check proves it for the four things people configure most: a **subagent**, a **skill**, a **hook** and an **MCP server**, each defined in a project's `.claude/` folder the way a user would. One real thread runs in a scratch `tenzo` daemon, driven through the real `tenzo` CLI, and has to use all four. It also checks that Tenzo's own injected MCP server, `tenzo`, sits beside the user's servers instead of replacing them.
 
 Re-run it after every change to the Claude adapter (`apps/daemon/src/agent/`), the thread runner, or the Agent SDK version.
 
@@ -23,12 +23,13 @@ What it does:
 4. Stops at the end of the first turn, stops the daemon (always, also on a failure; it stops the thread's `claude`), reads the events and the hook's log in the thread's worktree, prints the table, and exits 0 on a pass. On a pass the temp directory is deleted; on a failure it's kept with `events.jsonl` (every event) and `tenzo.stderr` (the daemon's and the CLI's output).
 
 ```
-Check       Result  Detail
-Subagent    PASS    Agent → parity-agent (background) said lantern-42 in the thread
-Skill       PASS    listed, invoked by name, reply has compass-17
-Hook        PASS    PostToolUse ran 4× (Skill, Agent, ToolSearch, mcp__parity__ping), wrote .parity/hooks.jsonl
-MCP server  PASS    parity connected, mcp__parity__ping returned pong:110cb60c:tenzo-parity-mcp
-Turn        PASS    completed on claude-haiku-4-5-20251001, allowed mcp__parity__ping when asked (1×), $0.0415, 10.0s
+Check           Result  Detail
+Subagent        PASS    Agent → parity-agent (background) said lantern-42 in the thread
+Skill           PASS    listed, invoked by name, reply has compass-17
+Hook            PASS    PostToolUse ran 4× (Skill, Agent, ToolSearch, mcp__parity__ping), wrote .parity/hooks.jsonl
+MCP server      PASS    parity connected, mcp__parity__ping returned pong:b80fee2b:tenzo-parity-mcp
+Tenzo's server  PASS    tenzo connected beside parity, mcp__tenzo__propose listed
+Turn            PASS    completed on claude-haiku-4-5-20251001, allowed mcp__parity__ping when asked (1×), $0.0715, 12.8s
 
 PASS: the thread had everything the terminal has.
 ```
@@ -56,7 +57,8 @@ The prompt (`parityPrompt` in `tools/parity/src/checks.ts`) asks for the four st
 | Skill | `session.configured` lists `parity-skill`; a `Skill` tool item invoked it by name and completed; `compass-17` appears in Claude's reply; the main thread didn't peek | project skills are listed and invokable by name, and their content reaches the model |
 | Hook | `.parity/hooks.jsonl` exists in the thread's worktree with a `PostToolUse` entry for `mcp__parity__ping` | project hooks run, in the worktree, with the hook input on stdin, for MCP tools too |
 | MCP server | `session.configured` shows `parity` as `connected`; the `mcp__parity__ping` tool item completed with this run's pong | project MCP servers start and their tools work, through Tenzo's permission prompt |
-| Turn | the turn completed, with no runtime error, no prompt other than the MCP tool's, and no main-thread tool outside the four steps | the run is clean: nothing failed around the four |
+| Tenzo's server | `session.configured` shows both `tenzo` and `parity` as `connected` in the same session, and lists `mcp__tenzo__propose` | Tenzo's injected server is added to the user's MCP servers, never in place of them |
+| Turn | the turn completed, with no runtime error, no prompt or proposal other than the MCP tool's permission prompt, and no main-thread tool outside the four steps | the run is clean: nothing failed around the four |
 
 The checks are pure functions over the events (`tools/parity/src/checks.ts`), unit-tested in `checks.test.ts`. `fixture.test.ts` copies the fixture the way the run does, then runs its MCP server and hook directly to keep them honest without Claude.
 
@@ -66,4 +68,5 @@ The checks are pure functions over the events (`tools/parity/src/checks.ts`), un
 - **MCP approval.** Without a person to ask, Claude Code (the SDK, `claude -p`) starts `.mcp.json` servers without approval. `enabledMcpjsonServers` is in the fixture so an interactive `claude` in the copy behaves the same, for comparison.
 - **Background subagents.** Claude Code 2.1 runs `Agent` calls in the background by default: the tool result is "Async agent launched", and the subagent's answer arrives as its own messages. The check accepts that as well as a foreground result. The daemon keeps a thread's session up after its turn ends, so background work keeps reporting; the check itself reads only up to the end of the first turn and then stops its scratch daemon. Here the subagent finishes first.
 - **Your config loads too.** The thread gets your user settings, plugins, skills and MCP connectors, as a real thread does. A user-level hook or permission rule can change the outcome; the table says which check it broke. Claude keeps its transcript of the run under `~/.claude/projects/`, as for any session.
+- **Discussing.** A new thread starts in discuss (PRODUCT.md §4): Tenzo's discuss prompt is appended to Claude Code's and the session runs in Claude Code's default permission mode. The parity prompt changes nothing, so the discuss prompt's "just do it, no proposal" applies; a `propose` call would fail the Turn check.
 - **The model can wander.** The prompt is explicit, but a small model can still skip a step or drop a codeword. A single failure where Claude didn't do what it was asked is the model, not Tenzo: re-run, or try `--model sonnet`. The same failure twice is a finding.

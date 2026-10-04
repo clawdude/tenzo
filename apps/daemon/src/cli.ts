@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { setTimeout as sleep } from "node:timers/promises";
 import type { Command, CommandResult, QueueItem } from "@tenzo/contracts";
-import { answerFromWords } from "./answers.ts";
+import { answerFromWords, isAsk } from "./answers.ts";
 import { VERSION } from "./app.ts";
 import { parseArgs } from "./args.ts";
 import { callDaemon } from "./client.ts";
@@ -38,7 +38,8 @@ Usage:
                                          thread whose repo was moved or deleted)
   tenzo items                            what the threads need from you, oldest first
   tenzo answer <item> <choice|text…>     answer an item: an option's number or label, or your
-                                         own words; allow/deny for a permission request
+                                         own words; allow/deny for a permission request;
+                                         build, or what to change, for a proposal
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -221,6 +222,7 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
             t.id,
             t.projectName,
             t.status === "archived" ? "archived" : t.activity,
+            t.phase,
             t.branch,
             t.title,
           ]),
@@ -301,7 +303,7 @@ async function follow(
     for (const { seq: s, event, environmentId } of events) {
       console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
       seq = s;
-      if (event.type === "user-input.requested" || event.type === "request.opened") asked = true;
+      if (isAsk(event)) asked = true;
       if (event.type === "turn.completed" && event.payload.state === "failed") process.exitCode = 1;
     }
     if (!forever) {

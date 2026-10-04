@@ -117,6 +117,80 @@ describe("answerFromWords", () => {
   });
 });
 
+const proposal: QueueItem = {
+  ...base,
+  kind: "proposal",
+  ask: "Add CONTRIBUTING.md",
+  options: [{ label: "Build it", value: "build", description: "", recommended: true }],
+  suggested: "build",
+  questions: [],
+  proposal: { headline: "Add CONTRIBUTING.md", summary: "Three rules." },
+  fingerprint: fingerprintOf("mcp__tenzo__propose", { summary: "Three rules." }),
+};
+
+describe("answering a proposal", () => {
+  it("reads build, or anything else as what to change", () => {
+    for (const yes of ["build", "Build it", "y", "1"]) {
+      expect(answerFromWords(proposal, yes.split(" "))).toEqual({
+        kind: "proposal",
+        decision: "build",
+      });
+    }
+    expect(answerFromWords(proposal, ["five", "rules"])).toEqual({
+      kind: "proposal",
+      decision: "change",
+      note: "five rules",
+    });
+    expect(() => answerFromWords(proposal, [])).toThrow(/build, or say what to change/);
+  });
+
+  it("wants a note to change something, and drops one sent with Build it", () => {
+    expect(checkAnswer(proposal, { kind: "proposal", decision: "build", note: "x" })).toEqual({
+      kind: "proposal",
+      decision: "build",
+    });
+    expect(
+      checkAnswer(proposal, { kind: "proposal", decision: "change", note: " Five rules " }),
+    ).toEqual({ kind: "proposal", decision: "change", note: "Five rules" });
+    expect(() => checkAnswer(proposal, { kind: "proposal", decision: "change", note: " " })).toThrow(
+      "Say what to change.",
+    );
+    expect(() => checkAnswer(proposal, { kind: "permission", decision: "allow" })).toThrow(
+      /is a proposal; answer it with build, or what to change/,
+    );
+    expect(() => checkAnswer(permission, { kind: "proposal", decision: "build" })).toThrow(
+      /permission request/,
+    );
+  });
+
+  it("tells a resumed agent the decision", () => {
+    expect(deliveryPrompt(proposal, { kind: "proposal", decision: "build" })).toBe(
+      "Your session ended while you were waiting for my answer to your proposal: Add CONTRIBUTING.md\nApproved, build it. Carry on from where you left off.",
+    );
+    expect(
+      deliveryPrompt(proposal, { kind: "proposal", decision: "change", note: "Five rules" }),
+    ).toMatch(/proposal: Add CONTRIBUTING.md\nNot yet. Five rules\nRevise, and propose again.$/);
+  });
+
+  it("answers the same proposal again for you, and nothing else", () => {
+    const reply = standingReply(proposal, { kind: "proposal", decision: "build" });
+    expect(reply).toEqual({ kind: "proposal", fingerprint: proposal.fingerprint, decision: "build" });
+    const proposedAgain = (fingerprint: string) =>
+      ({
+        eventId: "evt_abcdefghij0123456789",
+        threadId: base.threadId,
+        agent: "claude",
+        createdAt: base.createdAt,
+        type: "proposal.requested",
+        requestId: "req_zzzzzzzzzzzzzzzzzzzz",
+        payload: { headline: "Add CONTRIBUTING.md", summary: "Three rules.", fingerprint },
+      }) as const;
+    const replies = reply ? [reply] : [];
+    expect(matchReply(replies, proposedAgain(proposal.fingerprint ?? ""))).toBe(0);
+    expect(matchReply(replies, proposedAgain(fingerprintOf("mcp__tenzo__propose", {})))).toBe(-1);
+  });
+});
+
 describe("checkAnswer", () => {
   it("wants an answer of the item's kind, for every question, trimmed", () => {
     expect(() => checkAnswer(permission, { kind: "question", answers: {} })).toThrow(

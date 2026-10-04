@@ -2,11 +2,13 @@ import type {
   Fingerprint,
   ItemAnswer,
   QueueItem,
+  RuntimeEvent,
   RuntimeEventOf,
   UserInputAnswers,
   UserInputQuestion,
 } from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
+import { APPROVED } from "./prompts.ts";
 
 /**
  * Answers to items: checking them, and delivering one to an agent that is no longer waiting.
@@ -23,14 +25,26 @@ import { TenzoError } from "./errors.ts";
 /** An answer waiting for the agent to ask again, matched by `fingerprint`. */
 export type StandingReply =
   | { kind: "question"; fingerprint: Fingerprint; answers: UserInputAnswers }
-  | { kind: "permission"; fingerprint: Fingerprint; decision: "allow" | "deny"; message?: string };
+  | { kind: "permission"; fingerprint: Fingerprint; decision: "allow" | "deny"; message?: string }
+  | { kind: "proposal"; fingerprint: Fingerprint; decision: "build" | "change"; note?: string };
+
+const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
+  question: { name: "a question", answer: "an answer to each question" },
+  permission: { name: "a permission request", answer: "allow or deny" },
+  proposal: { name: "a proposal", answer: "build, or what to change" },
+};
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
 export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
   if (answer.kind !== item.kind) {
-    throw new TenzoError(
-      `${item.id} is a ${item.kind === "question" ? "question" : "permission request"}; answer it with ${item.kind === "question" ? "an answer to each question" : "allow or deny"}.`,
-    );
+    const { name, answer: how } = KINDS[item.kind];
+    throw new TenzoError(`${item.id} is ${name}; answer it with ${how}.`);
+  }
+  if (answer.kind === "proposal") {
+    if (answer.decision === "build") return { kind: "proposal", decision: "build" };
+    const note = answer.note?.trim();
+    if (!note) throw new TenzoError("Say what to change.");
+    return { kind: "proposal", decision: "change", note };
   }
   if (answer.kind === "permission") {
     const message = answer.message?.trim();
@@ -54,29 +68,61 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
 export function standingReply(item: QueueItem, answer: ItemAnswer): StandingReply | null {
   const fingerprint = item.fingerprint;
   if (!fingerprint) return null;
-  return answer.kind === "question"
-    ? { kind: "question", fingerprint, answers: answer.answers }
-    : {
+  switch (answer.kind) {
+    case "question":
+      return { kind: "question", fingerprint, answers: answer.answers };
+    case "permission":
+      return {
         kind: "permission",
         fingerprint,
         decision: answer.decision,
         ...(answer.message ? { message: answer.message } : {}),
       };
+    case "proposal":
+      return {
+        kind: "proposal",
+        fingerprint,
+        decision: answer.decision,
+        ...(answer.note ? { note: answer.note } : {}),
+      };
+  }
+}
+
+/** An event that opens an item: what a standing reply can answer. */
+export type AskEvent =
+  | RuntimeEventOf<"user-input.requested">
+  | RuntimeEventOf<"request.opened">
+  | RuntimeEventOf<"proposal.requested">;
+
+export function isAsk(event: RuntimeEvent): event is AskEvent {
+  return (
+    event.type === "user-input.requested" ||
+    event.type === "request.opened" ||
+    event.type === "proposal.requested"
+  );
 }
 
 /** The standing reply for this request, if one matches it exactly and is of its kind. */
-export function matchReply(
-  replies: readonly StandingReply[],
-  event: RuntimeEventOf<"user-input.requested"> | RuntimeEventOf<"request.opened">,
-): number {
+export function matchReply(replies: readonly StandingReply[], event: AskEvent): number {
   const fingerprint = event.payload.fingerprint;
   if (!fingerprint) return -1;
-  const kind = event.type === "user-input.requested" ? "question" : "permission";
+  const kind =
+    event.type === "user-input.requested"
+      ? "question"
+      : event.type === "request.opened"
+        ? "permission"
+        : "proposal";
   return replies.findIndex((r) => r.kind === kind && r.fingerprint === fingerprint);
 }
 
 /** The message that tells a resumed agent what it asked before it stopped, and the answer. */
 export function deliveryPrompt(item: QueueItem, answer: ItemAnswer): string {
+  if (answer.kind === "proposal") {
+    const head = `Your session ended while you were waiting for my answer to your proposal: ${item.proposal?.headline ?? item.ask}`;
+    return answer.decision === "build"
+      ? `${head}\n${APPROVED} Carry on from where you left off.`
+      : `${head}\nNot yet. ${answer.note ?? ""}\nRevise, and propose again.`;
+  }
   if (answer.kind === "question") {
     const lines = item.questions.flatMap((q) => [
       `You asked: ${q.question || q.header}`,
@@ -110,6 +156,12 @@ function labelOf(q: UserInputQuestion, value: string): string {
  * the reason.
  */
 export function answerFromWords(item: QueueItem, words: readonly string[]): ItemAnswer {
+  if (item.kind === "proposal") {
+    const text = words.join(" ").trim();
+    if (/^(1|y|yes|build|build it)$/i.test(text)) return { kind: "proposal", decision: "build" };
+    if (text === "") throw new TenzoError("Answer with build, or say what to change.");
+    return { kind: "proposal", decision: "change", note: text };
+  }
   if (item.kind === "permission") {
     const text = words.join(" ").trim();
     if (/^(1|y|yes|allow)$/i.test(text)) return { kind: "permission", decision: "allow" };

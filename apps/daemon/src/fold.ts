@@ -7,6 +7,7 @@ import type {
   RequestId,
   RuntimeEvent,
   RuntimeEventOf,
+  ThreadPhase,
   TurnId,
   UserInputOption,
 } from "@tenzo/contracts";
@@ -28,6 +29,8 @@ export interface ThreadRuntime {
   readonly turnId: TurnId | null;
   /** What the agent said last in the current turn, trimmed: the context of its next item. */
   readonly context: string;
+  /** Discussing until a proposal is approved, then building. */
+  readonly phase: ThreadPhase;
 }
 
 export interface FoldState {
@@ -55,6 +58,7 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   sessionId: null,
   turnId: null,
   context: "",
+  phase: "discussing",
 };
 export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
@@ -66,6 +70,16 @@ export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
   { label: "Allow", value: "allow", description: "", recommended: true },
   { label: "Deny", value: "deny", description: "", recommended: false },
 ];
+
+/** A proposal's one button. Changing something is the free text under it. */
+export const PROPOSAL_OPTIONS: readonly UserInputOption[] = [
+  { label: "Build it", value: "build", description: "", recommended: true },
+];
+
+type Asking =
+  | RuntimeEventOf<"user-input.requested">
+  | RuntimeEventOf<"request.opened">
+  | RuntimeEventOf<"proposal.requested">;
 
 export function foldEvent(
   state: FoldState,
@@ -109,7 +123,8 @@ export function foldEvent(
       return same({ ...state, runtime: { ...runtime, context: trimContext(p.text) } });
     }
     case "user-input.requested":
-    case "request.opened": {
+    case "request.opened":
+    case "proposal.requested": {
       // Seen before, even if long resolved: never a second item for it.
       if (state.known.has(event.requestId)) return same(state);
       const item = openItem(event, runtime.context, environmentId);
@@ -139,6 +154,21 @@ export function foldEvent(
           ? { kind: "allowed" }
           : decision === "deny"
             ? { kind: "denied", ...(message ? { message } : {}) }
+            : { kind: "cancelled" },
+      );
+    }
+    case "proposal.resolved": {
+      const { decision, note } = event.payload;
+      // Approved is approved, whether or not its item is still open here: the thread builds.
+      const next =
+        decision === "build" ? { ...state, runtime: { ...runtime, phase: "building" as const } } : state;
+      return resolve(
+        next,
+        event,
+        decision === "build"
+          ? { kind: "approved" }
+          : decision === "change"
+            ? { kind: "revise", note: note ?? "" }
             : { kind: "cancelled" },
       );
     }
@@ -215,7 +245,7 @@ function cutFromStart(text: string, limit: number): string {
 }
 
 function openItem(
-  event: RuntimeEventOf<"user-input.requested"> | RuntimeEventOf<"request.opened">,
+  event: Asking,
   context: string,
   environmentId: EnvironmentId,
 ): QueueItem {
@@ -234,6 +264,18 @@ function openItem(
     resolvedAt: null,
     resolution: null,
   };
+  if (event.type === "proposal.requested") {
+    const { headline, summary } = event.payload;
+    return {
+      ...common,
+      kind: "proposal",
+      ask: headline,
+      options: [...PROPOSAL_OPTIONS],
+      suggested: "build",
+      questions: [],
+      proposal: { headline, summary },
+    };
+  }
   if (event.type === "user-input.requested") {
     const questions = event.payload.questions;
     const first = questions[0];
@@ -267,7 +309,10 @@ function openItem(
 
 function resolve(
   state: FoldState,
-  event: RuntimeEventOf<"user-input.resolved"> | RuntimeEventOf<"request.resolved">,
+  event:
+    | RuntimeEventOf<"user-input.resolved">
+    | RuntimeEventOf<"request.resolved">
+    | RuntimeEventOf<"proposal.resolved">,
   resolution: QueueItemResolution,
 ): Folded {
   const found = state.open.find((item) => item.requestId === event.requestId);

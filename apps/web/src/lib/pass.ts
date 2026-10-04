@@ -41,7 +41,7 @@ export interface Choice {
 /**
  * One question on a card. A question item asks one or more (Claude's AskUserQuestion takes up to
  * four); the card asks them one after another and sends the answers together. A permission
- * request is one step: Allow or Deny.
+ * request is one step: Allow or Deny. So is a proposal: Build it, or say what to change.
  */
 export interface Step {
 	key: string;
@@ -60,6 +60,19 @@ export interface Step {
 export type Pick = { choice: Choice } | { text: string };
 
 export function stepsOf(item: QueueItem): Step[] {
+	if (item.kind === 'proposal') {
+		return [
+			{
+				key: 'proposal',
+				ask: item.proposal?.headline || item.ask,
+				// Building is what a proposal is for: the filled button, no "Suggested" over it.
+				suggested: { label: 'Build it', value: 'build', description: '' },
+				recommended: false,
+				others: [],
+				placeholder: 'Change something'
+			}
+		];
+	}
 	if (item.kind === 'permission') {
 		const decision = suggestedDecision(item);
 		const choices = item.options.map(choiceOf);
@@ -93,9 +106,15 @@ export function stepsOf(item: QueueItem): Step[] {
 /**
  * The answer to send once every step has a pick, one pick per step in order. A button sends its
  * own `value` (so what it says is what goes); words go as they are. On a permission request,
- * words are a Deny with the reason.
+ * words are a Deny with the reason; on a proposal, what to change.
  */
 export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
+	if (item.kind === 'proposal') {
+		const pick = picks[0];
+		if (!pick) throw new Error('A proposal needs a decision.');
+		if ('text' in pick) return { kind: 'proposal', decision: 'change', note: pick.text.trim() };
+		return { kind: 'proposal', decision: 'build' };
+	}
 	if (item.kind === 'permission') {
 		const pick = picks[0];
 		if (!pick) throw new Error('A permission request needs a decision.');

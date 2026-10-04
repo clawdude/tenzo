@@ -6,6 +6,7 @@ import {
   RuntimeEvent,
   type StoredEvent,
   type ThreadId,
+  ThreadPhase,
   type TurnId,
 } from "@tenzo/contracts";
 import type { StandingReply } from "./answers.ts";
@@ -48,10 +49,10 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
     const r = folded.state.runtime;
     store.db
       .prepare(
-        `UPDATE threads SET live = ?, agent = ?, session_id = ?, turn_id = ?, context = ?
+        `UPDATE threads SET live = ?, agent = ?, session_id = ?, turn_id = ?, context = ?, phase = ?
          WHERE id = ?`,
       )
-      .run(r.live ? 1 : 0, r.agent, r.sessionId, r.turnId, r.context, event.threadId);
+      .run(r.live ? 1 : 0, r.agent, r.sessionId, r.turnId, r.context, r.phase, event.threadId);
     // A request id seen before never opens an item again, even one already resolved.
     const changes = folded.changes.filter(
       (change) => change.type !== "opened" || !getItem(store, change.item.id),
@@ -64,7 +65,7 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
 /** A thread's runtime and open items, as the last fold left them. */
 export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
   const row = store.db
-    .prepare("SELECT live, agent, session_id, turn_id, context FROM threads WHERE id = ?")
+    .prepare("SELECT live, agent, session_id, turn_id, context, phase FROM threads WHERE id = ?")
     .get(threadId);
   if (!row) throw new Error(`No thread ${threadId} for an event`);
   return {
@@ -74,6 +75,7 @@ export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
       sessionId: row.session_id === null ? null : String(row.session_id),
       turnId: row.turn_id === null ? null : (String(row.turn_id) as TurnId),
       context: String(row.context ?? ""),
+      phase: ThreadPhase.catch("discussing").parse(row.phase),
     },
     open: queryItems(store, "WHERE thread_id = ? AND status = 'open'", threadId),
     known: new Set(

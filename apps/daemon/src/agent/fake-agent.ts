@@ -13,10 +13,11 @@ import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "
 import { boundedInput, summarizeTool } from "./claude-events.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
+import { PROPOSE, tenzoToolName } from "./tenzo-mcp.ts";
 
 /**
  * Test-only: an agent adapter a test drives by hand. Each session reports what the test tells it
- * to (`say`, `ask`, `askPermission`, `complete`, `crash`) and records the prompts and answers it
+ * to (`say`, `ask`, `askPermission`, `propose`, `complete`, `crash`) and records the prompts and answers it
  * gets, keeping the adapter contract: one turn at a time, answers only to open requests, no
  * `*.resolved` after the session ends.
  */
@@ -46,8 +47,9 @@ export class FakeAdapter implements AgentAdapter {
 export interface Answered {
   requestId: RequestId;
   answers?: UserInputAnswers;
-  decision?: "allow" | "deny";
+  decision?: "allow" | "deny" | "build" | "change";
   message?: string;
+  note?: string;
 }
 
 export class FakeSession implements AgentSession {
@@ -57,7 +59,7 @@ export class FakeSession implements AgentSession {
   readonly events = new AsyncQueue<RuntimeEvent>();
   readonly prompts: string[] = [];
   readonly answered: Answered[] = [];
-  readonly pending = new Map<RequestId, "question" | "permission">();
+  readonly pending = new Map<RequestId, "question" | "permission" | "proposal">();
   turnId: TurnId | null = null;
   stopped = false;
   #ended = false;
@@ -143,6 +145,23 @@ export class FakeSession implements AgentSession {
     return requestId;
   }
 
+  /** Like Claude calling Tenzo's `propose`: a proposal that waits for Build it or a note. */
+  propose(summary: string, headline = summary.split(".")[0] ?? summary): RequestId {
+    const requestId = randomId("req");
+    this.pending.set(requestId, "proposal");
+    this.emit({
+      type: "proposal.requested",
+      ...this.#inTurn(),
+      requestId,
+      payload: {
+        headline,
+        summary,
+        fingerprint: fingerprintOf(tenzoToolName(PROPOSE), { summary, headline }),
+      },
+    });
+    return requestId;
+  }
+
   complete(state: "completed" | "failed" | "interrupted" = "completed"): void {
     if (!this.turnId) throw new Error("no turn to complete");
     this.emit({ type: "turn.completed", turnId: this.turnId, payload: { state } });
@@ -177,17 +196,29 @@ export class FakeSession implements AgentSession {
     });
   }
 
+  respondToProposal(requestId: RequestId, decision: "build" | "change", note?: string): void {
+    if (this.pending.get(requestId) !== "proposal") {
+      throw new TenzoError(`No open proposal "${requestId}".`);
+    }
+    this.pending.delete(requestId);
+    this.answered.push({ requestId, decision, ...(note ? { note } : {}) });
+    this.emit({
+      type: "proposal.resolved",
+      ...this.#inTurn(),
+      requestId,
+      payload: { decision, ...(note ? { note } : {}) },
+    });
+  }
+
   async interrupt(): Promise<void> {
     for (const [requestId, kind] of this.pending) {
+      const turn = this.#inTurn();
       this.emit(
         kind === "question"
-          ? {
-              type: "user-input.resolved",
-              ...this.#inTurn(),
-              requestId,
-              payload: { answers: {}, cancelled: true },
-            }
-          : { type: "request.resolved", ...this.#inTurn(), requestId, payload: { decision: "cancel" } },
+          ? { type: "user-input.resolved", ...turn, requestId, payload: { answers: {}, cancelled: true } }
+          : kind === "proposal"
+            ? { type: "proposal.resolved", ...turn, requestId, payload: { decision: "cancel" } }
+            : { type: "request.resolved", ...turn, requestId, payload: { decision: "cancel" } },
       );
     }
     this.pending.clear();

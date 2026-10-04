@@ -127,6 +127,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE UNIQUE INDEX threads_by_client_key ON threads (client_key);
     `,
   },
+  {
+    name: "thread phase",
+    sql: `
+      -- Projection of the thread's events (fold.ts): 'discussing' until a proposal is approved,
+      -- then 'building'. Threads that ran before Tenzo had a discuss step were building all along.
+      ALTER TABLE threads ADD COLUMN phase TEXT NOT NULL DEFAULT 'discussing';
+      UPDATE threads SET phase = 'building' WHERE session_id IS NOT NULL;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */
