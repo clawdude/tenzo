@@ -1,4 +1,4 @@
-import type { ProjectView, QueueItem, ThreadView } from "@tenzo/contracts";
+import type { ProjectView, QueueItem, StoredEvent, ThreadView } from "@tenzo/contracts";
 
 /**
  * Test-only doubles: a WebSocket the test drives by hand, a clock the test advances, and
@@ -165,6 +165,23 @@ export function item(tag: string, threadTag: string, overrides: Partial<QueueIte
     resolution: null,
     snoozedUntil: null,
     ...overrides,
+  };
+}
+
+/** A stored event of the thread tagged `threadTag`: an assistant line saying `text`. */
+export function stored(seq: number, threadTag: string, text = `line ${seq}`): StoredEvent {
+  return {
+    seq,
+    environmentId,
+    event: {
+      type: "item.completed",
+      eventId: `evt_${String(seq).padStart(20, "0")}`,
+      threadId: id("thr", threadTag) as StoredEvent["event"]["threadId"],
+      agent: "claude",
+      createdAt: at,
+      itemId: `m${seq}`,
+      payload: { itemType: "assistant_message", status: "completed", text },
+    },
   };
 }
 

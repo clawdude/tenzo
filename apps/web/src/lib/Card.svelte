@@ -1,8 +1,20 @@
+<script lang="ts" module>
+	/**
+	 * The card whose back was left for the timeline (one tap deeper leaves the Pass): coming
+	 * back, it is still turned over. Used once, by the next card drawn, whichever it is; a card
+	 * that leaves any other way (answered, snoozed, swiped) comes back front up.
+	 */
+	let returnTo: string | null = null;
+</script>
+
 <script lang="ts">
-	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
-	import { onDestroy } from 'svelte';
+	import type { ItemAnswer, QueueItem, ThreadView } from '@tenzo/client-runtime';
+	import { onDestroy, tick, untrack } from 'svelte';
 	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
+	import { backLabels } from '#lib/back.ts';
+	import CardBack from '#lib/CardBack.svelte';
 	import { finishedView, type Shot } from '#lib/finished.ts';
+	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { ageLabel, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
@@ -17,10 +29,39 @@
 		compact?: boolean;
 		/** Where threads' live apps are, for Open live; null: no link. */
 		liveOrigin?: string | null;
+		/** The item's thread, for the back (its worktree, its title). */
+		threadView?: ThreadView | undefined;
 		/** Sends the answer; false when it couldn't go (offline), and the card stays. */
 		onanswer: (answer: ItemAnswer) => boolean;
 	}
-	let { item, thread, now, failure, compact = false, liveOrigin = null, onanswer }: Props = $props();
+	let {
+		item,
+		thread,
+		now,
+		failure,
+		compact = false,
+		liveOrigin = null,
+		threadView = undefined,
+		onanswer
+	}: Props = $props();
+
+	/** What the More pill and the back's header say. */
+	const labels = $derived(backLabels(item));
+	/** Showing its back. A card is one item for its life (the Pass keys it), so read it once. */
+	let flipped = $state(untrack(() => returnTo !== null && returnTo === item.id));
+	returnTo = null;
+	let turning = false;
+	let card = $state<HTMLElement | null>(null);
+
+	async function turn(toBack: boolean) {
+		if (turning) return;
+		turning = true;
+		await turnOver(card, toBack, async () => {
+			flipped = toBack;
+			await tick();
+		});
+		turning = false;
+	}
 
 	const steps = $derived(stepsOf(item));
 	/** Finished work's content; null on every other card. */
@@ -37,7 +78,6 @@
 		}))
 	);
 	let showOthers = $state(false);
-	let more = $state(false);
 	let text = $state('');
 	let stopListening = $state.raw<(() => void) | null>(null);
 	let dictation = $state(canDictate());
@@ -97,7 +137,24 @@
 	data-testid="card"
 	data-id={item.id}
 	data-kind={item.kind}
+	data-side={flipped ? 'back' : 'front'}
+	bind:this={card}
 >
+	{#if flipped}
+		<!-- The back: Back turns it to the front again; the answers below stay where they are. -->
+		<header class="flex shrink-0 items-center justify-between gap-4 pt-3.5 pr-[22px] pl-3">
+			<button
+				type="button"
+				class="opt flex min-h-11 items-center gap-1 px-2 text-[17px] text-clay"
+				onclick={() => turn(false)}
+				data-testid="front"
+			>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>
+				Back
+			</button>
+			<span class="truncate text-[13px] font-semibold tracking-[0.06em] text-mute uppercase">{labels.title}</span>
+		</header>
+	{:else}
 	<header class="flex shrink-0 items-center justify-between gap-4 px-[22px] pt-5">
 		<span
 			class={[
@@ -108,23 +165,32 @@
 		>
 		<span class="shrink-0 text-[13px] text-faint">{ageLabel(item.createdAt, now)}</span>
 	</header>
+	{/if}
 
 	<!-- Text scrolls in here and fades out above the answers, which never move. -->
 	<div
 		class="scroll min-h-0 grow touch-pan-y overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
 	>
+		{#if flipped}
+			<CardBack
+				{item}
+				thread={threadView}
+				{liveOrigin}
+				onenlarge={(shot) => (enlarged = shot)}
+				ondeeper={() => (returnTo = item.id)}
+			/>
+		{:else}
 		{#if item.context && !compact && !view}
 			<!--
-				Three lines until More, one while the options are out. The end is what leads into the
-				question (the daemon keeps the end too), so a long context shows its last lines,
-				fading in at the top.
+				Three lines, one while the options are out; all of it is on the back. The end is what
+				leads into the question (the daemon keeps the end too), so a long context shows its last
+				lines, fading in at the top.
 			-->
 			<div
 				class={[
 					'mb-3.5 flex flex-col justify-end overflow-hidden',
-					!more && (showOthers ? 'max-h-[calc(1.45*18px)]' : 'max-h-[calc(3*1.45*18px)]'),
-					!more &&
-						contextHeight > contextBox + 1 &&
+					showOthers ? 'max-h-[calc(1.45*18px)]' : 'max-h-[calc(3*1.45*18px)]',
+					contextHeight > contextBox + 1 &&
 						'[mask-image:linear-gradient(to_bottom,transparent,#000_1.2em)]'
 				]}
 				bind:clientHeight={contextBox}
@@ -250,44 +316,16 @@
 			{/if}
 		{/if}
 
-		<!-- Proposals, finished work, ready PRs and errors show all they have; their backs come with #22. -->
-		{#if item.kind !== 'proposal' && item.kind !== 'finished' && item.kind !== 'ready' && item.kind !== 'error'}
-			<button
-				type="button"
-				class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"
-				aria-expanded={more}
-				onclick={() => (more = !more)}
-				data-testid="more"
-			>
-				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
-				{more ? 'Less' : item.kind === 'permission' ? 'What exactly' : "Why it's asking"}
-			</button>
-		{/if}
-
-		{#if more}
-			<div class="mt-4 flex flex-col gap-3 text-[15px] leading-snug" data-testid="details">
-				{#if item.permission}
-					{#if item.permission.reason}
-						<p class="text-ink-soft">{item.permission.reason}</p>
-					{/if}
-					<p class="text-mute">{item.permission.toolName}</p>
-					<pre
-						class="rounded-2xl bg-fill px-4 py-3 font-mono text-[13px] break-words whitespace-pre-wrap text-ink-soft">{JSON.stringify(
-							item.permission.input,
-							null,
-							2
-						)}</pre>
-				{:else if step}
-					{#each [step.suggested, ...step.others] as choice (choice?.value)}
-						{#if choice}
-							<div>
-								<p class="font-semibold">{choice.label}</p>
-								{#if choice.description}<p class="text-ink-soft">{choice.description}</p>{/if}
-							</div>
-						{/if}
-					{/each}
-				{/if}
-			</div>
+		<!-- More: turns the card over to its back (CardBack.svelte). -->
+		<button
+			type="button"
+			class={['opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium', view && 'mt-4']}
+			onclick={() => turn(true)}
+			data-testid="more"
+		>
+			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
+			{labels.pill}
+		</button>
 		{/if}
 	</div>
 

@@ -1,6 +1,7 @@
 export * from "./answers.ts";
 export * from "./client.ts";
 export * from "./connection.ts";
+export * from "./feed.ts";
 export * from "./state.ts";
 export type { Log } from "./notify.ts";
 export { isSnoozed } from "@tenzo/contracts";
@@ -12,11 +13,15 @@ export type {
   CheckStatus,
   Command,
   CommandResult,
+  DiffFile,
   Finished,
   LiveInfo,
   ItemAnswer,
   ProjectView,
   QueueItem,
+  RuntimeEvent,
+  StoredEvent,
+  ThreadDiff,
   ThreadView,
   UserInputOption,
   UserInputQuestion,

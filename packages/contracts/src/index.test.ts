@@ -5,6 +5,7 @@ import {
   EnvironmentId,
   liveOriginFor,
   liveUrl,
+  MAX_EVENT_PAGE,
   ProjectId,
   ServerFrame,
   ThreadId,
@@ -33,6 +34,27 @@ describe("contracts", () => {
     });
     expect(hello.type).toBe("hello");
     expect(ServerFrame.safeParse({ type: "nope" }).success).toBe(false);
+  });
+
+  it("carries a watched thread's events, validated, and bounds a watch's backlog", () => {
+    const event = {
+      seq: 7,
+      environmentId: "env_abcdefghij0123456789",
+      event: {
+        type: "thread.archived",
+        eventId: "evt_abcdefghij0123456789",
+        threadId: "thr_abcdefghij0123456789",
+        agent: "claude",
+        createdAt: "2026-10-02T00:00:00.000Z",
+        payload: {},
+      },
+    };
+    expect(ServerFrame.parse({ type: "event", event }).type).toBe("event");
+    expect(ServerFrame.safeParse({ type: "event", event: { ...event, seq: 0 } }).success).toBe(false);
+    const watch = { type: "thread.watch", threadId: "thr_x" };
+    expect(Command.safeParse({ ...watch, after: 3, limit: MAX_EVENT_PAGE }).success).toBe(true);
+    expect(Command.safeParse({ ...watch, limit: MAX_EVENT_PAGE + 1 }).success).toBe(false);
+    expect(Command.safeParse({ type: "thread.events", threadId: "t", before: 0 }).success).toBe(false);
   });
 
   it("parses commands, and an answer's shape by its kind", () => {
