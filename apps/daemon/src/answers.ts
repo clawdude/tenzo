@@ -33,6 +33,7 @@ const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
   permission: { name: "a permission request", answer: "allow or deny" },
   proposal: { name: "a proposal", answer: "build, or what to change" },
   finished: { name: "finished work", answer: "done" },
+  error: { name: "an error", answer: "retry, archive, or what to tell the agent" },
 };
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
@@ -42,6 +43,12 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     throw new TenzoError(`${item.id} is ${name}; answer it with ${how}.`);
   }
   if (answer.kind === "finished") return { kind: "finished", decision: answer.decision };
+  if (answer.kind === "error") {
+    if (answer.action !== "tell") return { kind: "error", action: answer.action };
+    const text = answer.text?.trim();
+    if (!text) throw new TenzoError("Say what to tell it.");
+    return { kind: "error", action: "tell", text };
+  }
   if (answer.kind === "proposal") {
     if (answer.decision === "build") return { kind: "proposal", decision: "build" };
     const note = answer.note?.trim();
@@ -71,6 +78,8 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
   const fingerprint = item.fingerprint;
   if (!fingerprint) return null;
   switch (answer.kind) {
+    case "error":
+      return null; // no agent asked it, so it can't ask again
     case "question":
       return { kind: "question", fingerprint, answers: answer.answers };
     case "permission":
@@ -119,11 +128,61 @@ export function matchReply(replies: readonly StandingReply[], event: AskEvent): 
   return replies.findIndex((r) => r.kind === kind && r.fingerprint === fingerprint);
 }
 
+/** What part of a carry-on message is about checking, so nothing with side effects runs twice. */
+const CHECK_FIRST =
+  "Check what is already done and don't redo it (commits, pushes, comments, anything with side effects), then carry on from where you stopped.";
+
+/**
+ * What the daemon sends a thread whose turn it cut short by restarting (engine.ts): the agent
+ * resumes its session and picks up where it was. Sent once; if this turn is cut short too, the
+ * thread gets an error card instead.
+ */
+export const RESTART_PROMPT = `Tenzo restarted while you were working, which cut your last turn short. ${CHECK_FIRST}`;
+
+/**
+ * The prompts an answer to an error item sends. Tell it something sends your words. Retry
+ * depends on what went wrong: prompts that never reached the agent (it couldn't start) go
+ * again as they were; a turn that failed or was cut short already did part of its work, which
+ * the resumed session's transcript shows, so it gets a message saying so (`carryOn`), never its
+ * prompt again.
+ */
+export function errorPrompts(
+  item: QueueItem,
+  answer: Extract<ItemAnswer, { kind: "error" }>,
+): string[] {
+  if (answer.action === "tell") return [answer.text ?? ""];
+  const error = item.error;
+  if (error?.cause === "start" && error.prompts.length > 0) return error.prompts;
+  return [carryOn(error)];
+}
+
+/** Retry for a turn that failed or was cut short: what happened, what it was, check first. */
+export function carryOn(error: QueueItem["error"]): string {
+  const asked = error?.prompts[0];
+  return [
+    error?.message
+      ? `Your last turn didn't finish: ${oneLine(error.message, 400)}`
+      : "Your last turn didn't finish.",
+    ...(asked ? [`It began with my message: "${oneLine(asked, 300)}"`] : []),
+    CHECK_FIRST,
+  ].join("\n");
+}
+
+function oneLine(text: string, limit: number): string {
+  const flat = text.replaceAll(/\s+/g, " ").trim();
+  return flat.length <= limit ? flat : `${flat.slice(0, limit - 1)}…`;
+}
+
 /**
  * The message that tells a resumed agent what it asked before it stopped, and the answer.
  * Finished work is never delivered this way: the engine answers it itself.
  */
-export function deliveryPrompt(item: QueueItem, answer: Exclude<ItemAnswer, { kind: "finished" }>): string {
+export function deliveryPrompt(
+  item: QueueItem,
+  answer: Exclude<ItemAnswer, { kind: "finished" }>,
+): string {
+  // The engine sends an error's answer as `errorPrompts`; here only for completeness.
+  if (answer.kind === "error") return errorPrompts(item, answer).join("\n\n");
   if (answer.kind === "proposal") {
     const head = `Your session ended while you were waiting for my answer to your proposal: ${item.proposal?.headline ?? item.ask}`;
     return answer.decision === "build"
@@ -167,6 +226,13 @@ export function answerFromWords(item: QueueItem, words: readonly string[]): Item
     const text = words.join(" ").trim();
     if (/^(1|y|yes|done|ok)$/i.test(text)) return { kind: "finished", decision: "done" };
     throw new TenzoError("Answer finished work with done.");
+  }
+  if (item.kind === "error") {
+    const text = words.join(" ").trim();
+    if (/^(1|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
+    if (/^(2|archive)$/i.test(text)) return { kind: "error", action: "archive" };
+    if (text === "") throw new TenzoError("Answer with retry, archive, or what to tell it.");
+    return { kind: "error", action: "tell", text };
   }
   if (item.kind === "proposal") {
     const text = words.join(" ").trim();

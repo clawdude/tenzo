@@ -90,6 +90,7 @@ export async function startDaemon(
     adapters: deps.adapters ?? { claude: createClaudeAdapter() },
     ...(titler ? { titler } : {}),
     ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
+    ...(config.snoozeMs ? { snoozeMs: config.snoozeMs } : {}),
   });
   const environmentId = store.environmentId;
   const app = createApp({

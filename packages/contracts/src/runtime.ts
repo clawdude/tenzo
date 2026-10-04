@@ -310,6 +310,38 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     payload: z.object({
       message: z.string(),
       detail: z.unknown().optional(),
+      /** The agent couldn't be started: the prompts that were waiting for it, now dropped. */
+      unsent: z.array(z.string()).optional(),
+    }),
+  }),
+  /**
+   * Recorded by the daemon: you swiped the item away until `until`. The item is the one opened
+   * for `requestId`. Its thread doesn't need you meanwhile.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("item.snoozed"),
+    payload: z.object({ until: z.iso.datetime() }),
+  }),
+  /** Recorded by the daemon: the snoozed item is back, because its time came or you undid it. */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("item.unsnoozed"),
+    payload: z.object({ reason: z.enum(["returned", "undo"]) }),
+  }),
+  /**
+   * Recorded by the daemon: you answered an error item. `retry` sends what failed again, `tell`
+   * sends `text`; either is queued as the thread's next prompt.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("error.resolved"),
+    payload: z.object({
+      action: z.enum(["retry", "tell"]),
+      text: z.string().optional(),
     }),
   }),
 ]);

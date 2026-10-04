@@ -53,6 +53,7 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 | `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads started without one (e.g. `haiku` for cheap trial runs) |
+| `TENZO_SNOOZE_MS` | 15 minutes | how long a swipe snoozes a card, in ms (e.g. `20000` to watch one come back) |
 
 ### Keep it running (macOS)
 

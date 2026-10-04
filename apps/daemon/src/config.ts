@@ -40,6 +40,11 @@ export interface DaemonConfig {
    * `TENZO_DEFAULT_MODEL`; unset, the agent's own default (the user's config).
    */
   defaultModel?: string;
+  /**
+   * How long a swipe snoozes an item, in ms. `TENZO_SNOOZE_MS`, for trying snooze without
+   * waiting; unset, 15 minutes (engine.ts).
+   */
+  snoozeMs?: number;
 }
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
@@ -63,7 +68,16 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
     devOrigins: readOrigins(env.TENZO_DEV_ORIGIN, "TENZO_DEV_ORIGIN", "http://localhost:5173"),
     ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
+    ...(env.TENZO_SNOOZE_MS?.trim() ? { snoozeMs: readSnooze(env.TENZO_SNOOZE_MS.trim()) } : {}),
   };
+}
+
+function readSnooze(raw: string): number {
+  const ms = Number(raw);
+  if (!Number.isInteger(ms) || ms < 1_000 || ms > 24 * 60 * 60_000) {
+    throw new Error(`TENZO_SNOOZE_MS must be a whole number of ms from 1000 to 86400000, got "${raw}"`);
+  }
+  return ms;
 }
 
 function readOrigins(raw: string | undefined, name: string, example: string): string[] {

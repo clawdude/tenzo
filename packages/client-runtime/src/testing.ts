@@ -160,6 +160,7 @@ export function item(tag: string, threadTag: string, overrides: Partial<QueueIte
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
     ...overrides,
   };
 }
