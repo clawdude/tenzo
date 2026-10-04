@@ -1,12 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { Connection, type ConnectionOptions, type ConnectionSnapshot } from "./connection.ts";
+import {
+  Connection,
+  type ConnectionOptions,
+  type ConnectionSnapshot,
+  pageWakeups,
+  type Wakeup,
+} from "./connection.ts";
 import { FakeClock, FakeSocket, hello } from "./testing.ts";
 
 function setup(options: Partial<ConnectionOptions> = {}) {
   FakeSocket.reset();
   const clock = new FakeClock();
   const logged: string[] = [];
-  let wake: (() => void) | null = null;
+  let wake: ((wakeup?: Wakeup) => void) | null = null;
   const conn = new Connection({
     url: "ws://test/ws",
     WebSocket: FakeSocket as unknown as typeof WebSocket,
@@ -54,7 +60,7 @@ function setup(options: Partial<ConnectionOptions> = {}) {
     retry,
     connected,
     logged,
-    wake: () => wake?.(),
+    wake: (wakeup?: Wakeup) => wake?.(wakeup),
     wakeSubscribed: () => wake !== null,
   };
 }
@@ -340,5 +346,136 @@ describe("Connection", () => {
     sockets[0]!.serverOpens();
     expect(conn.send({ type: "ping", at: "b" })).toBe(true);
     expect(sockets[0]!.sent).toEqual([JSON.stringify({ type: "ping", at: "b" })]);
+  });
+
+  it("stays closed when a listener closes it on hearing it is reconnecting", () => {
+    const { conn, clock, sockets, connected, wakeSubscribed } = setup();
+    const seen: string[] = [];
+    conn.subscribe((s) => {
+      if (s.state === "reconnecting") conn.close(); // "give up" view
+    });
+    conn.subscribe((s) => seen.push(s.state));
+    conn.connect();
+    connected();
+    sockets[0]!.serverDrops();
+    expect(conn.current.state).toBe("closed");
+    expect(clock.pending.size).toBe(0); // no retry armed
+    clock.advance(60_000);
+    expect(sockets).toHaveLength(1);
+    expect(wakeSubscribed()).toBe(false);
+    // The later listener heard "closed" and never a stale "reconnecting" after it.
+    expect(seen.at(-1)).toBe("closed");
+    expect(seen).not.toContain("reconnecting");
+  });
+
+  it("opens nothing when a listener closes it on hearing it is connecting", () => {
+    const { conn, clock, sockets } = setup();
+    conn.subscribe((s) => {
+      if (s.state === "connecting") conn.close();
+    });
+    conn.connect();
+    expect(conn.current.state).toBe("closed");
+    expect(sockets).toHaveLength(0);
+    expect(clock.pending.size).toBe(0);
+  });
+
+  it("stays closed when a listener closes it during an immediate retry", () => {
+    const { conn, clock, sockets, connected, wake } = setup({ pingInterval: 60_000 });
+    conn.subscribe((s) => {
+      if (s.state === "reconnecting") conn.close();
+    });
+    conn.connect();
+    connected();
+    wake({ away: 60_000 }); // replaced at once: reconnecting, immediately
+    expect(conn.current.state).toBe("closed");
+    expect(sockets).toHaveLength(1);
+    expect(clock.pending.size).toBe(0);
+  });
+
+  it("replaces the socket at once, without probing, after a long time away", () => {
+    const { conn, sockets, latest, connected, wake } = setup({
+      pingInterval: 60_000,
+      replaceAfter: 30_000,
+    });
+    conn.connect();
+    connected();
+    wake({ away: 45_000 }); // the phone was in a pocket
+    expect(sockets[0]!.sent).toEqual([]); // no ping on the old one
+    expect(sockets[0]!.closed).toBe(true);
+    expect(sockets).toHaveLength(2);
+    expect(conn.current.state).toBe("reconnecting");
+    latest().serverOpens();
+    latest().serverSends(hello);
+    expect(conn.current.state).toBe("connected");
+  });
+
+  it("probes after a short time away, and says so until the probe is answered", () => {
+    const { conn, sockets, connected, wake } = setup({ pingInterval: 60_000 });
+    conn.connect();
+    connected();
+    expect(conn.current.probing).toBe(false);
+    wake({ away: 5_000 });
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]!.frames.map((f) => f.type)).toEqual(["ping"]);
+    expect(conn.current).toMatchObject({ state: "connected", probing: true });
+    sockets[0]!.serverSends({ type: "pong", at: "x" });
+    expect(conn.current).toMatchObject({ state: "connected", probing: false });
+  });
+
+  it("stops probing when the probe fails and the socket is replaced", () => {
+    const { conn, clock, connected, wake } = setup({ pingInterval: 60_000 });
+    conn.connect();
+    connected();
+    wake();
+    clock.advance(200);
+    expect(conn.current).toMatchObject({ state: "reconnecting", probing: false });
+  });
+});
+
+describe("pageWakeups", () => {
+  function page(visibility: DocumentVisibilityState = "visible") {
+    const document = Object.assign(new EventTarget(), { visibilityState: visibility });
+    const window = new EventTarget();
+    let now = 1_000;
+    const wakes: (Wakeup | undefined)[] = [];
+    const stop = pageWakeups({ document, window, now: () => now })((w) => wakes.push(w));
+    const show = (state: DocumentVisibilityState) => {
+      document.visibilityState = state;
+      document.dispatchEvent(new Event("visibilitychange"));
+    };
+    return { window, wakes, stop, show, later: (ms: number) => (now += ms) };
+  }
+
+  it("says how long the page was hidden when it is shown again", () => {
+    const { wakes, show, later } = page();
+    show("hidden");
+    later(42_000);
+    show("visible");
+    expect(wakes).toEqual([{ away: 42_000 }]);
+  });
+
+  it("counts from when it was first hidden", () => {
+    const { wakes, show, later } = page("hidden");
+    later(10_000);
+    show("hidden");
+    later(5_000);
+    show("visible");
+    expect(wakes).toEqual([{ away: 15_000 }]);
+  });
+
+  it("treats a page restored from the back-forward cache as away for long", () => {
+    const { window, wakes } = page();
+    window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: true }));
+    window.dispatchEvent(Object.assign(new Event("pageshow"), { persisted: false }));
+    window.dispatchEvent(new Event("online"));
+    expect(wakes).toEqual([{ away: Number.POSITIVE_INFINITY }, {}, undefined]);
+  });
+
+  it("stops listening when unsubscribed", () => {
+    const { window, wakes, stop, show } = page();
+    stop();
+    show("visible");
+    window.dispatchEvent(new Event("online"));
+    expect(wakes).toEqual([]);
   });
 });

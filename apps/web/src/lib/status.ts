@@ -1,6 +1,9 @@
 import type { ConnectionSnapshot } from '@tenzo/client-runtime';
 
-/** What the shell says about the daemon connection, in one short line. */
+/**
+ * What the Pass says about the daemon connection, in a word or two. Quiet on purpose: the pile
+ * dims while the data isn't live, and this line only says why.
+ */
 export function connectionLabel(snapshot: ConnectionSnapshot): string {
 	switch (snapshot.state) {
 		case 'closed':
@@ -10,20 +13,7 @@ export function connectionLabel(snapshot: ConnectionSnapshot): string {
 		case 'connected':
 			return snapshot.serverVersion ? `Connected · daemon ${snapshot.serverVersion}` : 'Connected';
 		case 'reconnecting':
-			return snapshot.attempt > 1 ? `Reconnecting (attempt ${snapshot.attempt})…` : 'Reconnecting…';
-	}
-}
-
-/** The status dot: live when the daemon said hello, waiting while trying, off when closed. */
-export function connectionTone(snapshot: ConnectionSnapshot): 'live' | 'waiting' | 'off' {
-	switch (snapshot.state) {
-		case 'connected':
-			return 'live';
-		case 'connecting':
-		case 'reconnecting':
-			return 'waiting';
-		case 'closed':
-			return 'off';
+			return 'Reconnecting…';
 	}
 }
 

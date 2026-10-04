@@ -20,10 +20,21 @@ export interface ConnectionSnapshot {
    */
   environmentId: EnvironmentId | null;
   serverVersion: string | null;
+  /**
+   * A wakeup's probe is out: the connection looked up, but the page was away and the socket may
+   * have died meanwhile. Until anything arrives on it, what it delivered may be stale.
+   */
+  probing: boolean;
+}
+
+/** A "look again now" moment. */
+export interface Wakeup {
+  /** How long the page was away (hidden, suspended) before this, in ms, when known. */
+  away?: number;
 }
 
 /** Subscribes `wake` to whatever means "look again now"; returns an unsubscribe. */
-export type WakeupSource = (wake: () => void) => () => void;
+export type WakeupSource = (wake: (wakeup?: Wakeup) => void) => () => void;
 
 export interface ConnectionOptions {
   url: string;
@@ -43,6 +54,12 @@ export interface ConnectionOptions {
   pongTimeout?: number;
   /** The same, for the ping sent on a wakeup: the person is looking, so decide fast. */
   probeTimeout?: number;
+  /**
+   * A page away at least this long gets a new socket at once when it comes back, without probing
+   * the old one: a phone suspends sockets in the background, and by then the daemon's heartbeat
+   * has dropped it anyway (after T3 Code's "long background suspension forces replacement").
+   */
+  replaceAfter?: number;
   /**
    * When to check the connection right away: the page became visible, the network came back.
    * Defaults to the browser's `visibilitychange`, `pageshow` and `online` events when there is a
@@ -82,6 +99,7 @@ export class Connection {
   readonly #pingInterval: number;
   readonly #pongTimeout: number;
   readonly #probeTimeout: number;
+  readonly #replaceAfter: number;
   readonly #wakeups: WakeupSource | null;
   readonly #random: () => number;
   readonly #setTimeout: typeof setTimeout;
@@ -99,6 +117,7 @@ export class Connection {
     attempt: 0,
     environmentId: null,
     serverVersion: null,
+    probing: false,
   };
   readonly #listeners = new Set<Listener<ConnectionSnapshot>>();
   readonly #frameListeners = new Set<Listener<ServerFrame>>();
@@ -113,6 +132,7 @@ export class Connection {
     this.#pingInterval = options.pingInterval ?? 15_000;
     this.#pongTimeout = options.pongTimeout ?? 10_000;
     this.#probeTimeout = options.probeTimeout ?? 3_000;
+    this.#replaceAfter = options.replaceAfter ?? 30_000;
     this.#wakeups =
       options.wakeups !== undefined
         ? options.wakeups
@@ -145,24 +165,32 @@ export class Connection {
   connect(): void {
     if (this.#wanted) return;
     this.#wanted = true;
-    this.#unwake = this.#wakeups?.(() => this.wake()) ?? null;
+    this.#unwake = this.#wakeups?.((wakeup) => this.wake(wakeup)) ?? null;
     this.#update({ state: "connecting", attempt: 0 });
+    // A listener may have called close() on hearing it.
+    if (!this.#wanted) return;
     this.#open();
   }
 
   /**
    * "Look again now": the page came back to the foreground, or the network returned. A waiting
-   * retry happens at once; a connection that looks up is pinged and replaced at once if it
-   * doesn't answer within `probeTimeout` (a suspended phone's socket can look open for minutes).
-   * An attempt in progress is left alone.
+   * retry happens at once. A connection that looks up is replaced at once if the page was away
+   * for `replaceAfter` or longer; otherwise it is pinged, `probing` while the ping is out, and
+   * replaced at once if it doesn't answer within `probeTimeout` (a suspended phone's socket can
+   * look open for minutes). An attempt in progress is left alone.
    */
-  wake(): void {
+  wake({ away = 0 }: Wakeup = {}): void {
     if (!this.#wanted) return;
     if (this.#timers.has("retry")) {
       this.#clear("retry");
       this.#open();
     } else if (this.#socket && this.#snapshot.state === "connected") {
+      if (away >= this.#replaceAfter) {
+        this.#lost({ immediately: true });
+        return;
+      }
       this.#ping(this.#probeTimeout, { immediately: true });
+      this.#update({ probing: true });
     }
   }
 
@@ -181,7 +209,7 @@ export class Connection {
     this.#unwake = null;
     this.#clear("retry");
     this.#drop();
-    this.#update({ state: "closed", attempt: 0 });
+    this.#update({ state: "closed", attempt: 0, probing: false });
   }
 
   #open(): void {
@@ -232,6 +260,8 @@ export class Connection {
       });
     }
     notify(this.#frameListeners, frame, this.#log);
+    // The probe is answered: the connection was alive, so everything it delivered still holds.
+    if (this.#snapshot.probing && this.#socket) this.#update({ probing: false });
   }
 
   /** Waits `pingInterval`, then pings. */
@@ -269,7 +299,9 @@ export class Connection {
 
   #retry({ immediately = false } = {}): void {
     const attempt = this.#snapshot.attempt + 1;
-    this.#update({ state: "reconnecting", attempt });
+    this.#update({ state: "reconnecting", attempt, probing: false });
+    // A listener may have called close() on hearing it: then nothing must reopen a socket.
+    if (!this.#wanted) return;
     if (immediately) this.#open();
     else this.#arm("retry", this.#delay(attempt), () => this.#open());
   }
@@ -299,22 +331,50 @@ export class Connection {
   }
 
   #update(patch: Partial<ConnectionSnapshot>): void {
-    this.#snapshot = { ...this.#snapshot, ...patch };
-    notify(this.#listeners, this.#snapshot, this.#log);
+    const snapshot = { ...this.#snapshot, ...patch };
+    this.#snapshot = snapshot;
+    notify(this.#listeners, snapshot, this.#log, () => this.#snapshot === snapshot);
   }
 }
 
-/** The browser's "look again" moments: the tab is shown again, restored from cache, back online. */
-export const browserWakeups: WakeupSource = (wake) => {
-  const onVisibility = () => {
-    if (document.visibilityState === "visible") wake();
+/** The parts of a page `pageWakeups` listens to. */
+export interface PageEvents {
+  document: Pick<Document, "visibilityState" | "addEventListener" | "removeEventListener">;
+  window: Pick<EventTarget, "addEventListener" | "removeEventListener">;
+  now: () => number;
+}
+
+/**
+ * A page's "look again" moments: it is shown again (saying how long it was hidden), restored
+ * from the back-forward cache (away for an unknown time, so treated as long), or back online.
+ */
+export function pageWakeups(page: PageEvents): WakeupSource {
+  return (wake) => {
+    let hiddenAt: number | null = page.document.visibilityState === "hidden" ? page.now() : null;
+    const onVisibility = () => {
+      if (page.document.visibilityState === "hidden") {
+        hiddenAt ??= page.now();
+        return;
+      }
+      const away = hiddenAt === null ? 0 : page.now() - hiddenAt;
+      hiddenAt = null;
+      wake({ away });
+    };
+    const onPageShow = (event: Event) => {
+      wake((event as PageTransitionEvent).persisted ? { away: Number.POSITIVE_INFINITY } : {});
+    };
+    const onOnline = () => wake();
+    page.document.addEventListener("visibilitychange", onVisibility);
+    page.window.addEventListener("pageshow", onPageShow);
+    page.window.addEventListener("online", onOnline);
+    return () => {
+      page.document.removeEventListener("visibilitychange", onVisibility);
+      page.window.removeEventListener("pageshow", onPageShow);
+      page.window.removeEventListener("online", onOnline);
+    };
   };
-  document.addEventListener("visibilitychange", onVisibility);
-  globalThis.addEventListener?.("pageshow", wake);
-  globalThis.addEventListener?.("online", wake);
-  return () => {
-    document.removeEventListener("visibilitychange", onVisibility);
-    globalThis.removeEventListener?.("pageshow", wake);
-    globalThis.removeEventListener?.("online", wake);
-  };
-};
+}
+
+/** The browser's "look again" moments (`pageWakeups` on this page). */
+export const browserWakeups: WakeupSource = (wake) =>
+  pageWakeups({ document, window: globalThis, now: Date.now })(wake);

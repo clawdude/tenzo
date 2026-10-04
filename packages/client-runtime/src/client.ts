@@ -13,8 +13,9 @@ import { applyFrame, type Data, EMPTY } from "./state.ts";
 export interface TenzoState extends Data {
   connection: ConnectionSnapshot;
   /**
-   * The data is the daemon's as of now: this connection's snapshot has arrived. False while
-   * connecting or reconnecting, when `threads` and `items` are the last known ones (or empty).
+   * The data is the daemon's as of now: this connection's snapshot has arrived and the connection
+   * is known to be alive. False while connecting or reconnecting, when `threads` and `items` are
+   * the last known ones (or empty), and while a wakeup's probe is out (`connection.probing`).
    */
   synced: boolean;
 }
@@ -54,6 +55,8 @@ export class TenzoClient {
   readonly #listeners = new Set<(state: TenzoState) => void>();
   readonly #pending = new Map<string, Pending>();
   #nextId = 1;
+  /** This connection's snapshot has arrived. */
+  #snapshotted = false;
   #state: TenzoState;
 
   constructor(options: ConnectionOptions) {
@@ -62,9 +65,16 @@ export class TenzoClient {
     this.#state = { ...EMPTY, connection: this.connection.current, synced: false };
     this.connection.onFrame((frame) => this.#receive(frame));
     this.connection.subscribe((connection) => {
-      if (connection.state !== "connected") this.#disconnected();
-      this.#set({ connection, synced: connection.state === "connected" && this.#state.synced });
+      if (connection.state !== "connected") {
+        this.#snapshotted = false;
+        this.#disconnected();
+      }
+      this.#set({ connection, synced: this.#synced(connection) });
     });
+  }
+
+  #synced(connection: ConnectionSnapshot): boolean {
+    return this.#snapshotted && connection.state === "connected" && !connection.probing;
   }
 
   get state(): TenzoState {
@@ -113,7 +123,11 @@ export class TenzoClient {
   #receive(frame: ServerFrame): void {
     switch (frame.type) {
       case "snapshot":
-        this.#set({ ...applyFrame(this.#state, frame), synced: true });
+        this.#snapshotted = true;
+        this.#set({
+          ...applyFrame(this.#state, frame),
+          synced: this.#synced(this.connection.current),
+        });
         return;
       case "thread":
       case "item":
@@ -172,6 +186,6 @@ export class TenzoClient {
       return;
     }
     this.#state = next;
-    notify(this.#listeners, this.#state, this.#log);
+    notify(this.#listeners, next, this.#log, () => this.#state === next);
   }
 }

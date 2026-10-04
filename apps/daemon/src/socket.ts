@@ -70,14 +70,19 @@ export function socketHandlers({
         return;
       }
       const { id, command } = frame.value;
-      void executeCommand(engine, command).then((outcome) => {
-        send(
-          ws,
-          outcome.ok
-            ? { type: "ok", id, result: outcome.result }
-            : { type: "error", id, error: outcome.error },
-        );
-      });
+      void executeCommand(engine, command)
+        .then((outcome) => {
+          send(
+            ws,
+            outcome.ok
+              ? { type: "ok", id, result: outcome.result }
+              : { type: "error", id, error: outcome.error },
+          );
+        })
+        // Sending the answer failed (a result that won't serialise, say): log it rather than
+        // crash the daemon on an unhandled rejection. The client's command fails when the
+        // socket does, or waits; it never gets a half-answer.
+        .catch((error: unknown) => log(`couldn't answer command ${id}: ${String(error)}`));
     },
     onClose() {
       unsubscribe?.();

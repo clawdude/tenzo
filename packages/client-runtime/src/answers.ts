@@ -1,18 +1,33 @@
-import type { ItemAnswer, QueueItem } from "@tenzo/contracts";
+import type { ItemAnswer, QueueItem, UserInputOption } from "@tenzo/contracts";
 
 /**
- * The answer the filled button sends: the agent's suggestion for every question, or the
- * suggested decision on a permission request. Null when some question has no suggestion, so
- * there is nothing to send with one tap.
+ * The option for the filled button: the one the agent recommends, else the first. Claude marks
+ * a recommendation only sometimes, and the card always offers one tap. Null without options.
+ */
+export function suggestedOption<T extends Pick<UserInputOption, "recommended">>(
+  options: readonly T[],
+): T | null {
+  return options.find((o) => o.recommended) ?? options[0] ?? null;
+}
+
+/**
+ * The decision the filled button sends on a permission request: the item's suggestion when it
+ * has one, else Allow, as in Claude Code's own prompt.
+ */
+export function suggestedDecision(item: QueueItem): "allow" | "deny" {
+  return item.suggested === "deny" ? "deny" : "allow";
+}
+
+/**
+ * The answer that taking every suggestion sends: each question's `suggestedOption`, or the
+ * `suggestedDecision` on a permission request. Null when some question has no options, so there
+ * is nothing to send with one tap.
  */
 export function suggestedAnswer(item: QueueItem): ItemAnswer | null {
-  if (item.kind === "permission") {
-    if (item.suggested !== "allow" && item.suggested !== "deny") return null;
-    return { kind: "permission", decision: item.suggested };
-  }
+  if (item.kind === "permission") return { kind: "permission", decision: suggestedDecision(item) };
   const answers: Record<string, string> = {};
   for (const question of item.questions) {
-    const option = question.options.find((o) => o.recommended);
+    const option = suggestedOption(question.options);
     if (!option) return null;
     answers[question.id] = option.value;
   }

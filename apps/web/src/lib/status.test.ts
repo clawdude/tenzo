@@ -1,12 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import type { ConnectionSnapshot } from '@tenzo/client-runtime';
-import { connectionLabel, connectionTone, daemonSocketUrl } from './status.ts';
+import { connectionLabel, daemonSocketUrl } from './status.ts';
 
 const base: ConnectionSnapshot = {
 	state: 'closed',
 	attempt: 0,
 	environmentId: null,
-	serverVersion: null
+	serverVersion: null,
+	probing: false
 };
 
 describe('connectionLabel', () => {
@@ -28,19 +29,8 @@ describe('connectionLabel', () => {
 		expect(connectionLabel(away)).toBe('Reconnecting…');
 	});
 
-	it('shows the attempt count once retries pile up', () => {
-		expect(connectionLabel({ ...base, state: 'reconnecting', attempt: 3 })).toBe(
-			'Reconnecting (attempt 3)…'
-		);
-	});
-});
-
-describe('connectionTone', () => {
-	it('is live only when connected', () => {
-		expect(connectionTone({ ...base, state: 'connected' })).toBe('live');
-		expect(connectionTone({ ...base, state: 'connecting' })).toBe('waiting');
-		expect(connectionTone({ ...base, state: 'reconnecting', attempt: 2 })).toBe('waiting');
-		expect(connectionTone(base)).toBe('off');
+	it('stays quiet about how many retries it took', () => {
+		expect(connectionLabel({ ...base, state: 'reconnecting', attempt: 7 })).toBe('Reconnecting…');
 	});
 });
 
