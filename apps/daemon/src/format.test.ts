@@ -87,6 +87,28 @@ describe("formatItem", () => {
     );
   });
 
+  it("shows a proposal: headline, summary, Build it or what to change", () => {
+    const proposal: QueueItem = {
+      ...item,
+      kind: "proposal",
+      ask: "Add CONTRIBUTING.md",
+      suggested: "build",
+      questions: [],
+      proposal: { headline: "Add CONTRIBUTING.md", summary: "Three rules.\n\nCheck: it renders." },
+    };
+    expect(formatItem(proposal, "Contributing")).toBe(
+      [
+        "itm_abcdefghij0123456789 · Contributing · proposal",
+        "  I read the repo.",
+        "  ! Add CONTRIBUTING.md",
+        "    Three rules.",
+        "    Check: it renders.",
+        "    1. Build it (suggested)",
+        "    Or say what to change.",
+      ].join("\n"),
+    );
+  });
+
   it("says when answering resumes a stopped agent", () => {
     expect(formatItem({ ...item, detached: true })).toMatch(/answering resumes it/);
   });

@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import {
   type CanUseTool,
   type Options,
+  type PermissionMode,
   type PermissionResult,
   query as sdkQuery,
   type SDKUserMessage,
@@ -18,6 +19,7 @@ import type {
 } from "@tenzo/contracts";
 import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
+import { promptFor, proposalReply } from "../prompts.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
   boundedInput,
@@ -31,15 +33,30 @@ import {
 } from "./claude-events.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
+import {
+  isTenzoTool,
+  PROPOSE,
+  type ProposeInput,
+  proposalOf,
+  TENZO_MCP_SERVER,
+  type TenzoToolHost,
+  type ToolReply,
+  tenzoMcpServer,
+  tenzoToolName,
+} from "./tenzo-mcp.ts";
 
 /**
  * Claude Code behind the agent boundary, through `@anthropic-ai/claude-agent-sdk`.
  *
  * Tenzo runs the user's own `claude` binary with the user's own configuration, untouched: user,
  * project and local settings, CLAUDE.md, subagents, skills, hooks, MCP servers and plugins all
- * load exactly as in the terminal, and the system prompt is Claude Code's own. Tenzo adds only
- * the permission mode (accept edits) and a `canUseTool` hook, which is how questions
- * (`AskUserQuestion`) and permission prompts reach the Pass instead of a terminal.
+ * load exactly as in the terminal, and the system prompt is Claude Code's own. Tenzo adds:
+ * - its thread prompt for the phase, appended to Claude Code's (prompts.ts);
+ * - its own MCP server, `tenzo`, next to the user's (tenzo-mcp.ts), whose `propose` waits for
+ *   your decision the way a permission prompt does;
+ * - the permission mode: the terminal's default while discussing, accept edits once building;
+ * - a `canUseTool` hook, which is how questions (`AskUserQuestion`) and permission prompts reach
+ *   the Pass instead of a terminal.
  */
 export interface ClaudeAdapterOptions {
   /** The SDK's `query`. Tests pass a fake, so they never spawn Claude. */
@@ -63,7 +80,7 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): AgentAd
 }
 
 interface Pending {
-  kind: "request" | "user-input";
+  kind: "request" | "user-input" | "proposal";
   settle: (outcome: Settled) => void;
 }
 
@@ -74,7 +91,21 @@ interface Pending {
  */
 type Settled =
   | { kind: "request"; decision: "allow" | "deny" | "cancel"; message?: string; ended?: true }
-  | { kind: "user-input"; answers: UserInputAnswers | null; ended?: true };
+  | { kind: "user-input"; answers: UserInputAnswers | null; ended?: true }
+  | { kind: "proposal"; decision: "build" | "change" | "cancel"; note?: string; ended?: true };
+
+/** How a request of `kind` ends when nobody answers it: cancelled, or `ended` with the session. */
+function unanswered(kind: Pending["kind"], ended: boolean): Settled {
+  const flag = ended ? { ended: true as const } : {};
+  switch (kind) {
+    case "request":
+      return { kind, decision: "cancel", ...flag };
+    case "user-input":
+      return { kind, answers: null, ...flag };
+    case "proposal":
+      return { kind, decision: "cancel", ...flag };
+  }
+}
 
 function startSession(
   query: typeof sdkQuery,
@@ -106,8 +137,7 @@ function startSession(
   /** Waits for an answer to a request; an abort (interrupt, stop) settles it as cancelled. */
   const waitFor = (requestId: RequestId, kind: Pending["kind"], signal: AbortSignal) =>
     new Promise<Settled>((resolve) => {
-      const cancelled: Settled =
-        kind === "request" ? { kind, decision: "cancel" } : { kind, answers: null };
+      const cancelled = unanswered(kind, false);
       const settle = (outcome: Settled) => {
         if (!pending.delete(requestId)) return;
         signal.removeEventListener("abort", onAbort);
@@ -149,7 +179,44 @@ function startSession(
     return { behavior: "allow", updatedInput: { ...toolInput, answers } };
   };
 
+  /**
+   * `propose`: the proposal becomes an item, and the tool call returns only once you've decided,
+   * like a permission prompt. Build it also lifts the session to accept edits, in place.
+   */
+  const propose = async (raw: ProposeInput, signal: AbortSignal | undefined): Promise<ToolReply> => {
+    const requestId = randomId("req");
+    emit({
+      type: "proposal.requested",
+      requestId,
+      ...inTurn(),
+      payload: { ...proposalOf(raw), fingerprint: fingerprintOf(tenzoToolName(PROPOSE), raw) },
+    });
+    const outcome = await waitFor(requestId, "proposal", signal ?? new AbortController().signal);
+    if (outcome.ended) return { text: "The session ended.", isError: true };
+    const decision = outcome.kind === "proposal" ? outcome.decision : "cancel";
+    const note = outcome.kind === "proposal" ? outcome.note : undefined;
+    emit({
+      type: "proposal.resolved",
+      requestId,
+      ...inTurn(),
+      payload: { decision, ...(note ? { note } : {}) },
+    });
+    if (decision === "cancel") return { text: "Withdrawn: the turn was interrupted.", isError: true };
+    if (decision === "change") {
+      return { text: proposalReply({ decision, note: note ?? "" }, input.prompts) };
+    }
+    try {
+      await run.setPermissionMode(permissionModeFor("building"));
+    } catch {
+      // The session is ending; the next one starts building, with accept edits.
+    }
+    return { text: proposalReply({ decision }, input.prompts) };
+  };
+  const host: TenzoToolHost = { propose };
+
   const canUseTool: CanUseTool = async (toolName, toolInput, context) => {
+    // Tenzo's own tools are how the agent talks to Tenzo: nothing to ask the user about.
+    if (isTenzoTool(toolName)) return { behavior: "allow", updatedInput: toolInput };
     if (toolName === "AskUserQuestion") {
       return askUser(toolInput, context.signal, context.toolUseID);
     }
@@ -188,13 +255,17 @@ function startSession(
     };
   };
 
+  const append = input.prompts ? promptFor(input.prompts, input.phase) : "";
   const options: Options = {
     cwd: input.cwd,
     pathToClaudeCodeExecutable: claudePath,
     settingSources: [...SETTING_SOURCES],
-    // Claude Code's own system prompt. Without this the SDK would run with a minimal one.
-    systemPrompt: { type: "preset", preset: "claude_code" },
-    permissionMode: "acceptEdits",
+    // Claude Code's own system prompt (without this the SDK would run with a minimal one), and
+    // Tenzo's thread prompt after it.
+    systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
+    // Added to the servers of the user's own config, which load as in a terminal.
+    mcpServers: { [TENZO_MCP_SERVER]: tenzoMcpServer(host) },
+    permissionMode: permissionModeFor(input.phase),
     canUseTool,
     env: claudeEnv(process.env),
     ...(resumed ? { resume: sessionId } : { sessionId }),
@@ -205,14 +276,7 @@ function startSession(
 
   /** Settles every open request: cancelled (an interrupt), or left unanswered (`ended`). */
   const cancelPending = (ended: boolean) => {
-    const flag = ended ? { ended: true as const } : {};
-    for (const { kind, settle } of [...pending.values()]) {
-      settle(
-        kind === "request"
-          ? { kind, decision: "cancel", ...flag }
-          : { kind, answers: null, ...flag },
-      );
-    }
+    for (const { kind, settle } of [...pending.values()]) settle(unanswered(kind, ended));
   };
 
   let stopping = false;
@@ -245,7 +309,12 @@ function startSession(
   const answer = (requestId: RequestId, outcome: Settled): void => {
     const open = pending.get(requestId);
     if (!open || open.kind !== outcome.kind) {
-      const what = outcome.kind === "request" ? "permission request" : "question";
+      const what =
+        outcome.kind === "request"
+          ? "permission request"
+          : outcome.kind === "proposal"
+            ? "proposal"
+            : "question";
       throw new TenzoError(`No open ${what} "${requestId}".`);
     }
     open.settle(outcome);
@@ -278,6 +347,9 @@ function startSession(
     respondToUserInput(requestId, answers) {
       answer(requestId, { kind: "user-input", answers });
     },
+    respondToProposal(requestId, decision, note) {
+      answer(requestId, { kind: "proposal", decision, ...(note ? { note } : {}) });
+    },
     async interrupt() {
       cancelPending(false);
       await run.interrupt().catch(() => {}); // already finished: nothing to interrupt
@@ -298,6 +370,14 @@ function startSession(
       await done;
     },
   };
+}
+
+/**
+ * Discussing, Claude asks before it edits, as a terminal does by default: the discuss prompt
+ * says not to, and if it tries anyway you see it on the Pass. Building, it edits freely.
+ */
+export function permissionModeFor(phase: StartSessionInput["phase"]): PermissionMode {
+  return phase === "discussing" ? "default" : "acceptEdits";
 }
 
 /**

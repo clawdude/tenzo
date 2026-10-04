@@ -119,6 +119,7 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
     createdAt: at,
     updatedAt: at,
     archivedAt: null,
+    phase: "discussing",
     activity: "working",
     working: true,
     queued: 0,

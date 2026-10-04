@@ -52,6 +52,10 @@ export type TurnState = z.infer<typeof TurnState>;
 export const RequestDecision = z.enum(["allow", "deny", "cancel"]);
 export type RequestDecision = z.infer<typeof RequestDecision>;
 
+/** How a proposal was answered: build it, change something (with a note), or withdrawn. */
+export const ProposalDecision = z.enum(["build", "change", "cancel"]);
+export type ProposalDecision = z.infer<typeof ProposalDecision>;
+
 export const UserInputOption = z.object({
   /** What to show. */
   label: z.string(),
@@ -214,6 +218,33 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       /** Empty when the question was cancelled (turn interrupted, session stopped). */
       answers: UserInputAnswers,
       cancelled: z.boolean(),
+    }),
+  }),
+  /**
+   * The agent says what it is going to do and waits for your go (Tenzo's `propose` tool): build
+   * it, or change something first. Nothing is changed before you answer.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("proposal.requested"),
+    payload: z.object({
+      /** A few words: what the card's heading says. */
+      headline: z.string(),
+      /** What it will change, and how it will check it. */
+      summary: z.string(),
+      itemId: ItemId.optional(),
+      fingerprint: Fingerprint.optional(),
+    }),
+  }),
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("proposal.resolved"),
+    payload: z.object({
+      /** `build`: go ahead (the thread starts building). `change`: `note` says what to revise. */
+      decision: ProposalDecision,
+      note: z.string().optional(),
     }),
   }),
   /**

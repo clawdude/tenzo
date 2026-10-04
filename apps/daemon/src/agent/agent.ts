@@ -3,9 +3,11 @@ import type {
   RequestId,
   RuntimeEvent,
   ThreadId,
+  ThreadPhase,
   TurnId,
   UserInputAnswers,
 } from "@tenzo/contracts";
+import type { ThreadPrompts } from "../prompts.ts";
 
 /**
  * The boundary between Tenzo and a coding agent. Everything agent-specific (SDK messages, the
@@ -26,6 +28,16 @@ export interface StartSessionInput {
   resumeSessionId?: string;
   /** A model name the agent understands, e.g. "haiku". Default: the agent's own default. */
   model?: string;
+  /**
+   * Where the thread is. Discussing: the agent may not edit unasked (it asks permission, as in a
+   * terminal's default mode). Building: it edits freely (accept edits).
+   */
+  phase: ThreadPhase;
+  /**
+   * Tenzo's thread prompts: the one for `phase` is appended to the agent's own system prompt,
+   * and an approved proposal carries the build prompt (prompts.ts). None: nothing is appended.
+   */
+  prompts?: ThreadPrompts;
 }
 
 /** One running agent process for one thread. */
@@ -41,6 +53,11 @@ export interface AgentSession {
   respondToRequest(requestId: RequestId, decision: "allow" | "deny", message?: string): void;
   /** Answers a `user-input.requested`, one answer per question id. */
   respondToUserInput(requestId: RequestId, answers: UserInputAnswers): void;
+  /**
+   * Answers a `proposal.requested`: build it (the agent goes ahead, and may now edit freely), or
+   * change something, with a note saying what. The agent's `propose` call returns with it.
+   */
+  respondToProposal(requestId: RequestId, decision: "build" | "change", note?: string): void;
   /**
    * Stops the running turn; the session stays up for the next one. Open questions and requests
    * are cancelled (`*.resolved` with cancel).

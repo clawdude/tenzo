@@ -69,13 +69,23 @@ export function groupOf(thread: ThreadView, now: number): GroupKey {
 	return sameDay(Date.parse(thread.activeAt), now) ? 'today' : 'earlier';
 }
 
-/** The thread's dot and word: asking, allow?, working, done, or new (never started). */
+/** What a thread needing you is waiting for, in a word. */
+const ASKS: Record<QueueItem['kind'], string> = {
+	question: 'asking',
+	permission: 'allow?',
+	proposal: 'build?'
+};
+
+/**
+ * The thread's dot and word: what it waits for (asking, allow?, build?), what it is doing
+ * (discussing, building), done, or new (never started).
+ */
 export function rowOf(thread: ThreadView, items: readonly QueueItem[]): Row {
 	if (thread.activity === 'needs-you') {
 		const first = items.find((i) => i.threadId === thread.id);
-		return { thread, tone: 'clay', word: first?.kind === 'permission' ? 'allow?' : 'asking' };
+		return { thread, tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
 	}
-	if (thread.activity === 'working') return { thread, tone: 'working', word: 'working' };
+	if (thread.activity === 'working') return { thread, tone: 'working', word: thread.phase };
 	if (thread.lastSeq === 0) return { thread, tone: 'quiet', word: 'new' };
 	// Idle after a failed turn reads "done" too, until failures become items of their own (M2).
 	return { thread, tone: 'done', word: 'done' };

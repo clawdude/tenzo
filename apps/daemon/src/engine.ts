@@ -15,6 +15,7 @@ import type { AgentAdapter, AgentSession } from "./agent/agent.ts";
 import {
   checkAnswer,
   deliveryPrompt,
+  isAsk,
   matchReply,
   type StandingReply,
   standingReply,
@@ -39,6 +40,7 @@ import {
 import { type ItemChange, itemIdFor } from "./fold.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
+import { loadThreadPrompts, type ThreadPrompts } from "./prompts.ts";
 import { type Store, transaction } from "./store.ts";
 import {
   archiveThread,
@@ -75,6 +77,11 @@ export interface EngineOptions {
   titler?: Titler;
   /** The model for threads started without one (`TENZO_DEFAULT_MODEL`). Default: the agent's. */
   defaultModel?: string;
+  /**
+   * Tenzo's thread prompts, read as each session starts so an edit applies to the next one.
+   * Default: the files in `apps/daemon/prompts` (prompts.ts).
+   */
+  prompts?: () => ThreadPrompts;
   log?: (message: string) => void;
 }
 
@@ -128,6 +135,7 @@ export class Engine {
   readonly #quiet = new Set<QueueItemId>();
   readonly #titler: Titler | undefined;
   readonly #defaultModel: string | undefined;
+  readonly #prompts: () => ThreadPrompts;
   /** Names being thought of; `close` stops and waits for them. */
   readonly #naming = new Set<Promise<void>>();
   readonly #stopNaming = new AbortController();
@@ -141,6 +149,7 @@ export class Engine {
     this.#answerTimeoutMs = options.answerTimeoutMs ?? 10_000;
     this.#titler = options.titler;
     this.#defaultModel = options.defaultModel;
+    this.#prompts = options.prompts ?? (() => loadThreadPrompts());
     this.#log = options.log ?? ((message) => console.error(`tenzo: ${message}`));
   }
 
@@ -327,21 +336,8 @@ export class Engine {
 
     const reply = standingReply(item, checked);
     const resolution = draft(thread, {
-        ...(item.turnId ? { turnId: item.turnId } : {}),
-        ...(checked.kind === "question"
-          ? {
-              type: "user-input.resolved",
-              requestId: item.requestId,
-              payload: { answers: checked.answers, cancelled: false },
-            }
-          : {
-              type: "request.resolved",
-              requestId: item.requestId,
-              payload: {
-                decision: checked.decision,
-                ...(checked.message ? { message: checked.message } : {}),
-              },
-            }),
+      ...(item.turnId ? { turnId: item.turnId } : {}),
+      ...resolutionOf(item, checked),
     } as Draft);
     // Both or neither: a crash in between must not leave the item answered and the answer unsent.
     const appended = transaction(this.store, () => {
@@ -453,6 +449,8 @@ export class Engine {
       cwd: thread.worktreePath,
       ...(thread.sessionId ? { resumeSessionId: thread.sessionId } : {}),
       ...(thread.model ? { model: thread.model } : {}),
+      phase: loadFoldState(this.store, thread.id).runtime.phase,
+      prompts: this.#prompts(),
     });
     const live: Live = {
       threadId: thread.id,
@@ -493,7 +491,7 @@ export class Engine {
   }
 
   #ingest(live: Live, event: RuntimeEvent): void {
-    if (event.type === "user-input.requested" || event.type === "request.opened") {
+    if (isAsk(event)) {
       const index = matchReply(live.standing, event);
       const [reply] = index === -1 ? [] : live.standing.splice(index, 1);
       if (reply) {
@@ -626,6 +624,7 @@ export class Engine {
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
+      phase: runtime.phase,
       activity: open > 0 ? "needs-you" : working ? "working" : "idle",
       working,
       queued,
@@ -665,6 +664,40 @@ function respond(
   requestId: QueueItem["requestId"],
   answer: ItemAnswer | StandingReply,
 ): void {
-  if (answer.kind === "question") session.respondToUserInput(requestId, answer.answers);
-  else session.respondToRequest(requestId, answer.decision, answer.message);
+  switch (answer.kind) {
+    case "question":
+      return session.respondToUserInput(requestId, answer.answers);
+    case "permission":
+      return session.respondToRequest(requestId, answer.decision, answer.message);
+    case "proposal":
+      return session.respondToProposal(requestId, answer.decision, answer.note);
+  }
+}
+
+/** The event that records an answer the daemon delivers itself (the agent had stopped). */
+function resolutionOf(item: QueueItem, answer: ItemAnswer): Draft {
+  const requestId = item.requestId;
+  switch (answer.kind) {
+    case "question":
+      return {
+        type: "user-input.resolved",
+        requestId,
+        payload: { answers: answer.answers, cancelled: false },
+      };
+    case "permission":
+      return {
+        type: "request.resolved",
+        requestId,
+        payload: {
+          decision: answer.decision,
+          ...(answer.message ? { message: answer.message } : {}),
+        },
+      };
+    case "proposal":
+      return {
+        type: "proposal.resolved",
+        requestId,
+        payload: { decision: answer.decision, ...(answer.note ? { note: answer.note } : {}) },
+      };
+  }
 }

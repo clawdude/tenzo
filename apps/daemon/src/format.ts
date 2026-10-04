@@ -4,9 +4,7 @@ import type { QueueItem, RuntimeEvent } from "@tenzo/contracts";
 
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */
 export function formatItem(item: QueueItem, threadTitle?: string): string {
-  const head = [item.id, threadTitle, item.kind === "question" ? "question" : "permission"]
-    .filter(Boolean)
-    .join(" · ");
+  const head = [item.id, threadTitle, item.kind].filter(Boolean).join(" · ");
   const lines = [head];
   if (item.context) lines.push(`  ${oneLine(item.context, 300)}`);
   const questions = item.kind === "question" && item.questions.length > 0 ? item.questions : null;
@@ -19,6 +17,12 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
         lines.push(`    ${i + 1}. ${o.label}${suggested}${description}`);
       });
     }
+  } else if (item.kind === "proposal") {
+    lines.push(`  ! ${item.ask}`);
+    for (const line of (item.proposal?.summary ?? "").split("\n")) {
+      if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
+    }
+    lines.push("    1. Build it (suggested)", "    Or say what to change.");
   } else {
     lines.push(`  ? ${item.ask}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
@@ -99,6 +103,10 @@ function describe(event: RuntimeEvent): string {
         .join("; ");
     case "user-input.resolved":
       return event.payload.cancelled ? "cancelled" : JSON.stringify(event.payload.answers);
+    case "proposal.requested":
+      return event.payload.headline;
+    case "proposal.resolved":
+      return event.payload.decision + (event.payload.note ? `: ${event.payload.note}` : "");
     case "runtime.error":
       return event.payload.message;
     case "thread.archived":

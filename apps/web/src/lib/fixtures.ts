@@ -62,6 +62,7 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		createdAt: at,
 		updatedAt: at,
 		archivedAt: null,
+		phase: 'discussing',
 		activity: 'idle',
 		working: false,
 		queued: 0,
@@ -92,5 +93,16 @@ export function permission(tag: string, suggested: string | null = 'allow'): Que
 		suggested,
 		questions: [],
 		permission: { toolKind: 'command', toolName: 'Bash', detail: 'uname -a', input: {} }
+	});
+}
+
+export function proposal(tag: string, summary = 'Add CONTRIBUTING.md with three rules.'): QueueItem {
+	return item(tag, {
+		kind: 'proposal',
+		ask: 'Add CONTRIBUTING.md',
+		options: [{ label: 'Build it', value: 'build', description: '', recommended: true }],
+		suggested: 'build',
+		questions: [],
+		proposal: { headline: 'Add CONTRIBUTING.md', summary }
 	});
 }

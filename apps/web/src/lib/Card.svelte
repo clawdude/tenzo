@@ -140,17 +140,26 @@
 				class="mb-4 rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft">{item
 					.permission.detail}</pre>
 		{/if}
+		{#if item.proposal}
+			<!-- What it will change, where, and how it will check: what Build it says yes to. -->
+			<p
+				class="text-[17px] leading-[1.45] break-words whitespace-pre-line text-ink-soft"
+				data-testid="proposal-summary">{item.proposal.summary}</p>
+		{/if}
 
-		<button
-			type="button"
-			class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"
-			aria-expanded={more}
-			onclick={() => (more = !more)}
-			data-testid="more"
-		>
-			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
-			{more ? 'Less' : item.kind === 'permission' ? 'What exactly' : "Why it's asking"}
-		</button>
+		<!-- A proposal shows all it has; its back (what it looked at) comes with the card backs. -->
+		{#if item.kind !== 'proposal'}
+			<button
+				type="button"
+				class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"
+				aria-expanded={more}
+				onclick={() => (more = !more)}
+				data-testid="more"
+			>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
+				{more ? 'Less' : item.kind === 'permission' ? 'What exactly' : "Why it's asking"}
+			</button>
+		{/if}
 
 		{#if more}
 			<div class="mt-4 flex flex-col gap-3 text-[15px] leading-snug" data-testid="details">

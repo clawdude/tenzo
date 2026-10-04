@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. A system prompt is fixed for a session's life, so *Build it* reaches a running session as `propose`'s result (the approval plus the build prompt) and lifts it to accept edits in place; every later session of the thread starts with the build prompt.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
@@ -158,7 +158,7 @@ Out (for now): Automations screen, video capture, daemon-verified checks, multi-
 
 ## 12. Open
 
-- Exact wording of the thread prompts (discuss, build, landing) and how "ask only if needed" is tuned.
+- Tuning the thread prompts (`apps/daemon/prompts/`: discuss and build exist; landing comes with #21) and how "ask only if needed" is tuned.
 - Threads list, New thread, and PC layout in the pile language.
 - Automations screen (post-MVP).
 - License (MIT suggested).

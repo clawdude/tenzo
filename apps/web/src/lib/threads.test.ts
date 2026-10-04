@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { item, permission, thread } from './fixtures.ts';
+import { item, permission, proposal, thread } from './fixtures.ts';
 import { groupThreads, rowOf } from './threads.ts';
 
 // Local times, so "today" means the same wherever the tests run.
@@ -47,7 +47,7 @@ describe('groupThreads', () => {
 });
 
 describe('rowOf', () => {
-	it('says one word: asking, allow?, working, done or new', () => {
+	it('says one word: asking, allow?, build?, discussing, building, done or new', () => {
 		const asking = thread('a', { activity: 'needs-you' });
 		expect(rowOf(asking, [item('x', { threadId: asking.id })])).toMatchObject({
 			tone: 'clay',
@@ -55,9 +55,15 @@ describe('rowOf', () => {
 		});
 		const allow = { ...permission('y'), threadId: asking.id };
 		expect(rowOf(asking, [allow]).word).toBe('allow?');
+		const build = { ...proposal('z'), threadId: asking.id };
+		expect(rowOf(asking, [build]).word).toBe('build?');
 		expect(rowOf(thread('b', { activity: 'working' }), [])).toMatchObject({
 			tone: 'working',
-			word: 'working'
+			word: 'discussing'
+		});
+		expect(rowOf(thread('b', { activity: 'working', phase: 'building' }), [])).toMatchObject({
+			tone: 'working',
+			word: 'building'
 		});
 		expect(rowOf(thread('c'), [])).toMatchObject({ tone: 'done', word: 'done' });
 		expect(rowOf(thread('d', { lastSeq: 0 }), [])).toMatchObject({ tone: 'quiet', word: 'new' });

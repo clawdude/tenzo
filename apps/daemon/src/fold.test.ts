@@ -225,6 +225,95 @@ describe("foldEvent: permission requests", () => {
   });
 });
 
+const REQ3 = "req_cccccccccccccccccccc" as RequestId;
+const proposed = (requestId = REQ3) =>
+  ev({
+    type: "proposal.requested",
+    turnId: TURN,
+    requestId,
+    payload: {
+      headline: "Add CONTRIBUTING.md",
+      summary: "Add CONTRIBUTING.md with three rules.\nCheck: it renders.",
+    },
+  });
+const proposalAnswered = (decision: string, note?: string, requestId = REQ3) =>
+  ev({
+    type: "proposal.resolved",
+    turnId: TURN,
+    requestId,
+    payload: { decision, ...(note ? { note } : {}) },
+  });
+
+describe("foldEvent: proposals and the thread's phase", () => {
+  it("a thread starts discussing", () => {
+    expect(fold(started()).state.runtime.phase).toBe("discussing");
+  });
+
+  it("opens a quick-lane proposal item: the headline is the ask, Build it the suggestion", () => {
+    const { items, state } = fold(started(), turnStarted(), said("I read the repo."), proposed());
+    expect(QueueItem.parse(items[0])).toEqual(items[0]);
+    expect(items[0]).toMatchObject({
+      kind: "proposal",
+      lane: "quick",
+      ask: "Add CONTRIBUTING.md",
+      context: "I read the repo.",
+      options: [{ label: "Build it", value: "build", recommended: true }],
+      suggested: "build",
+      questions: [],
+      proposal: {
+        headline: "Add CONTRIBUTING.md",
+        summary: "Add CONTRIBUTING.md with three rules.\nCheck: it renders.",
+      },
+    });
+    expect(state.runtime.phase).toBe("discussing");
+  });
+
+  it("Build it resolves the item approved and the thread is building", () => {
+    const { items, state } = fold(started(), turnStarted(), proposed(), proposalAnswered("build"));
+    expect(state.open).toEqual([]);
+    expect(items[0]?.resolution).toEqual({ kind: "approved" });
+    expect(state.runtime.phase).toBe("building");
+  });
+
+  it("Change something resolves it with the note; the thread keeps discussing", () => {
+    const { items, state } = fold(
+      started(),
+      turnStarted(),
+      proposed(),
+      proposalAnswered("change", "Five rules"),
+    );
+    expect(items[0]?.resolution).toEqual({ kind: "revise", note: "Five rules" });
+    expect(state.runtime.phase).toBe("discussing");
+  });
+
+  it("a withdrawn proposal is cancelled and changes nothing", () => {
+    const { items, state } = fold(started(), turnStarted(), proposed(), proposalAnswered("cancel"));
+    expect(items[0]?.resolution).toEqual({ kind: "cancelled" });
+    expect(state.runtime.phase).toBe("discussing");
+  });
+
+  it("building is for good: a later session, exit or proposal doesn't go back", () => {
+    const { state } = fold(
+      started(),
+      turnStarted(),
+      proposed(),
+      proposalAnswered("build"),
+      completed(),
+      exited("graceful"),
+      started("sess-2"),
+      turnStarted(TURN2),
+      proposed(REQ1),
+      proposalAnswered("change", "smaller", REQ1),
+    );
+    expect(state.runtime.phase).toBe("building");
+  });
+
+  it("a session exit leaves the proposal open, detached, for an answer that resumes it", () => {
+    const { state } = fold(started(), turnStarted(), proposed(), exited());
+    expect(state.open).toMatchObject([{ kind: "proposal", status: "open", detached: true }]);
+  });
+});
+
 describe("foldEvent: several requests", () => {
   it("keeps one item per pending request and resolves each on its own", () => {
     const first = fold(started(), turnStarted(), asked(REQ1), permission(REQ2));

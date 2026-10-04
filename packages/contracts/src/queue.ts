@@ -25,7 +25,7 @@ export type QueueItemId = z.infer<typeof QueueItemId>;
 export const Lane = z.enum(["quick", "review"]);
 export type Lane = z.infer<typeof Lane>;
 
-export const QueueItemKind = z.enum(["question", "permission"]);
+export const QueueItemKind = z.enum(["question", "permission", "proposal"]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
 /** How an item left the queue. */
@@ -33,6 +33,10 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("answered"), answers: UserInputAnswers }),
   z.object({ kind: z.literal("allowed") }),
   z.object({ kind: z.literal("denied"), message: z.string().optional() }),
+  /** A proposal you said to build. */
+  z.object({ kind: z.literal("approved") }),
+  /** A proposal you sent back with a note: what to change. */
+  z.object({ kind: z.literal("revise"), note: z.string() }),
   /** The agent withdrew it: the turn was interrupted. */
   z.object({ kind: z.literal("cancelled") }),
   /** Its thread was archived (`thread.archived`). */
@@ -51,9 +55,9 @@ export const QueueItem = z.object({
   turnId: TurnId.optional(),
   /** What the agent said last before asking, trimmed to a couple of lines. May be empty. */
   context: z.string(),
-  /** The question, or for a permission request what the agent wants to do. */
+  /** The question; for a permission request what the agent wants to do; a proposal's headline. */
   ask: z.string(),
-  /** The answers to offer as buttons. For a permission request: Allow, Deny. */
+  /** The answers to offer as buttons. For a permission request: Allow, Deny; a proposal: Build it. */
   options: z.array(UserInputOption),
   /** The option `value` to put on the filled button, when there is one. */
   suggested: z.string().nullable(),
@@ -69,6 +73,8 @@ export const QueueItem = z.object({
       input: z.unknown(),
     })
     .optional(),
+  /** A proposal item: what the agent is going to do. `ask` is the headline. */
+  proposal: z.object({ headline: z.string(), summary: z.string() }).optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
   fingerprint: Fingerprint.optional(),
   createdAt: z.iso.datetime(),
@@ -84,7 +90,7 @@ export const QueueItem = z.object({
 });
 export type QueueItem = z.infer<typeof QueueItem>;
 
-/** An answer to an item: one per question, or a permission decision. */
+/** An answer to an item: one per question, a permission decision, or a proposal's. */
 export const ItemAnswer = z.discriminatedUnion("kind", [
   z.object({
     kind: z.literal("question"),
@@ -97,8 +103,22 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     /** Goes back to the agent with a deny: why not, or what to do instead. */
     message: z.string().optional(),
   }),
+  z.object({
+    kind: z.literal("proposal"),
+    /** Build it, or change something: then `note` says what, and the agent proposes again. */
+    decision: z.enum(["build", "change"]),
+    note: z.string().optional(),
+  }),
 ]);
 export type ItemAnswer = z.infer<typeof ItemAnswer>;
+
+/**
+ * Where a thread is in its flow (PRODUCT.md §4). It starts `discussing`: the agent reads, asks
+ * and proposes, and changes nothing. *Build it* on its proposal makes it `building`, for good.
+ * Review and landing come with M2's later slices.
+ */
+export const ThreadPhase = z.enum(["discussing", "building"]);
+export type ThreadPhase = z.infer<typeof ThreadPhase>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */
 export const ThreadActivity = z.enum(["idle", "working", "needs-you"]);
@@ -118,6 +138,7 @@ export const ThreadView = z.object({
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   archivedAt: z.iso.datetime().nullable(),
+  phase: ThreadPhase,
   /** `needs-you` when it has an open item, else `working` while a turn runs or prompts wait. */
   activity: ThreadActivity,
   /** A turn is running or a prompt is waiting to be sent. */

@@ -349,6 +349,7 @@ export function summarizeTool(name: string, input: Record<string, unknown>): str
       "url",
       "query",
       "description",
+      "headline", // Tenzo's propose
     ) ??
     (typeof firstQuestion === "string" ? firstQuestion : undefined) ??
     (Object.keys(input).length > 0 ? JSON.stringify(input) : "");

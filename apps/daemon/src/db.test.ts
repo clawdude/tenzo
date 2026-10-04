@@ -142,6 +142,25 @@ describe("openDatabase", () => {
     db.close();
   });
 
+  it("gives threads from before the discuss step a phase: building if they ever ran", () => {
+    const path = join(tempDir(), "tenzo.db");
+    const before = openDatabase(path, MIGRATIONS.slice(0, -1));
+    before.exec(`
+      INSERT INTO projects (id, name, path, default_branch, created_at)
+        VALUES ('prj_1', 'app', '/r/app', 'main', 'now');
+      INSERT INTO threads (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at, session_id)
+        VALUES ('thr_1', 'prj_1', 'Ran', 'ran', 'tenzo/ran', '/w/ran', 'active', 'now', 'now', 'sess-1'),
+               ('thr_2', 'prj_1', 'New', 'new', 'tenzo/new', '/w/new', 'active', 'now', 'now', NULL);
+    `);
+    before.close();
+    const db = openDatabase(path);
+    expect(db.prepare("SELECT id, phase FROM threads ORDER BY id").all()).toEqual([
+      { id: "thr_1", phase: "building" },
+      { id: "thr_2", phase: "discussing" },
+    ]);
+    db.close();
+  });
+
   it("keeps the log append-only", () => {
     const db = openDatabase(join(tempDir(), "tenzo.db"));
     db.exec(`

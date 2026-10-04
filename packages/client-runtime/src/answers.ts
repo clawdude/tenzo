@@ -19,12 +19,13 @@ export function suggestedDecision(item: QueueItem): "allow" | "deny" {
 }
 
 /**
- * The answer that taking every suggestion sends: each question's `suggestedOption`, or the
- * `suggestedDecision` on a permission request. Null when some question has no options, so there
- * is nothing to send with one tap.
+ * The answer that taking every suggestion sends: each question's `suggestedOption`, the
+ * `suggestedDecision` on a permission request, Build it on a proposal. Null when some question
+ * has no options, so there is nothing to send with one tap.
  */
 export function suggestedAnswer(item: QueueItem): ItemAnswer | null {
   if (item.kind === "permission") return { kind: "permission", decision: suggestedDecision(item) };
+  if (item.kind === "proposal") return { kind: "proposal", decision: "build" };
   const answers: Record<string, string> = {};
   for (const question of item.questions) {
     const option = suggestedOption(question.options);

@@ -10,6 +10,7 @@ import {
   parityPrompt,
   parseEvents,
   parseHookLog,
+  TENZO_SERVER,
   toolCalls,
 } from "./checks.ts";
 
@@ -38,8 +39,11 @@ function configured(overrides: Record<string, unknown> = {}): RuntimeEvent {
       cwd: "/tmp/worktree",
       permissionMode: "acceptEdits",
       agentVersion: "2.1.287",
-      tools: ["Agent", "Skill", FIXTURE.mcpTool],
-      mcpServers: [{ name: "parity", status: "connected" }],
+      tools: ["Agent", "Skill", FIXTURE.mcpTool, TENZO_SERVER.tool],
+      mcpServers: [
+        { name: "parity", status: "connected" },
+        { name: "tenzo", status: "connected" },
+      ],
       skills: ["caveman", FIXTURE.skill],
       plugins: [],
       agents: ["general-purpose", FIXTURE.agent],
@@ -172,6 +176,7 @@ describe("checkParity", () => {
       ["Skill", true],
       ["Hook", true],
       ["MCP server", true],
+      ["Tenzo's server", true],
       ["Turn", true],
     ]);
     const c = byName(checks);
@@ -361,6 +366,44 @@ describe("codewords taken from the fixture's files", () => {
     expect(byName(checkParity(stale, HOOKS, WORD))["MCP server"]?.pass).toBe(false);
   });
 
+  it("fails Tenzo's server unless it and the user's server are both connected, its tools listed", () => {
+    const tenzo = (overrides: Record<string, unknown>) =>
+      byName(checkParity([configured(overrides)], HOOKS, WORD))["Tenzo's server"];
+    expect(byName(checkParity(passingRun(), HOOKS, WORD))["Tenzo's server"]?.detail).toBe(
+      "tenzo connected beside parity, mcp__tenzo__propose listed",
+    );
+    // Tenzo's server in place of the user's: the injection replaced their config.
+    expect(tenzo({ mcpServers: [{ name: "tenzo", status: "connected" }] })?.detail).toBe(
+      "parity isn't loaded; servers: tenzo",
+    );
+    expect(tenzo({ mcpServers: [{ name: "parity", status: "connected" }] })?.detail).toBe(
+      "tenzo isn't loaded; servers: parity",
+    );
+    expect(
+      tenzo({
+        mcpServers: [
+          { name: "parity", status: "connected" },
+          { name: "tenzo", status: "failed" },
+        ],
+      })?.detail,
+    ).toBe("tenzo is failed");
+    expect(tenzo({ tools: ["Agent", "Skill", FIXTURE.mcpTool] })?.detail).toBe(
+      "tenzo connected, but mcp__tenzo__propose isn't listed",
+    );
+  });
+
+  it("fails the turn on a proposal: the check changes nothing, so there is nothing to propose", () => {
+    const proposal = event({
+      type: "proposal.requested",
+      requestId: "req_00000000000000000098",
+      payload: { headline: "Tidy the fixture", summary: "Tidy it." },
+    });
+    expect(answerFor(proposal)).toBeNull();
+    expect(byName(checkParity([...passingRun(), proposal], HOOKS, WORD)).Turn?.detail).toBe(
+      "asked for a go-ahead for: Tidy the fixture: not part of the check",
+    );
+  });
+
   it("fails the turn on other prompts, errors, or a turn that didn't complete", () => {
     const bash = [...passingRun(), ...permission("Bash")];
     expect(byName(checkParity(bash, HOOKS, WORD)).Turn?.detail).toContain("permission for Bash");
@@ -381,7 +424,7 @@ describe("codewords taken from the fixture's files", () => {
 
   it("fails everything that needs the configuration when the session never started", () => {
     const checks = byName(checkParity([], null, WORD));
-    for (const name of ["Subagent", "Skill", "MCP server"]) {
+    for (const name of ["Subagent", "Skill", "MCP server", "Tenzo's server"]) {
       expect(checks[name]?.detail).toBe("the session never reported its configuration");
     }
   });
