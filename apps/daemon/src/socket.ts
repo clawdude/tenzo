@@ -70,7 +70,9 @@ export function socketHandlers({
         ...(command.after !== undefined ? { after: command.after } : {}),
         ...(command.limit !== undefined ? { limit: command.limit } : {}),
       });
-      watching.add(backlog.thread.id);
+      // By the id the client gave, as unwatch and the cap check use it (ids are exact: the
+      // backlog found this very thread).
+      watching.add(command.threadId);
       return { type: "ok", id, result: backlog };
     } catch (error) {
       if (error instanceof TenzoError) return { type: "error", id, error: error.message };

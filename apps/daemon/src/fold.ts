@@ -3,6 +3,8 @@ import type {
   Attachment,
   EnvironmentId,
   Preview,
+  EventId,
+  ItemError,
   QueueItem,
   QueueItemId,
   QueueItemResolution,
@@ -37,6 +39,10 @@ export interface ThreadRuntime {
   readonly attachments: readonly Attachment[];
   /** The dev server the agent exposed last; the daemon forwards the thread's live base to it. */
   readonly preview: Preview | null;
+  /** The current (or last) turn's prompt, when Tenzo sent it: what Retry sends again. */
+  readonly prompt: string | null;
+  /** The agent's last `runtime.error` in the current turn: why it failed, if it does. */
+  readonly error: string | null;
 }
 
 export interface FoldState {
@@ -49,7 +55,7 @@ export interface FoldState {
 
 /** Something that happened to an item; `item` is how it is now. */
 export interface ItemChange {
-  type: "opened" | "detached" | "resolved";
+  type: "opened" | "updated" | "detached" | "snoozed" | "unsnoozed" | "resolved";
   item: QueueItem;
 }
 
@@ -67,11 +73,24 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   phase: "discussing",
   attachments: [],
   preview: null,
+  prompt: null,
+  error: null,
 };
 export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
 /** Context kept on an item: about two lines on a phone. */
 export const CONTEXT_LIMIT = 280;
+
+/** An error's message kept on its item: the start says what, a stderr tail may follow. */
+export const ERROR_LIMIT = 1_000;
+
+/** An error's buttons: Retry is the suggestion; telling it something is the free text. */
+export const ERROR_OPTIONS: readonly UserInputOption[] = [
+  { label: "Retry", value: "retry", description: "", recommended: true },
+  { label: "Archive", value: "archive", description: "", recommended: false },
+];
+
+const AGENT_NAMES: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
 
 /** A permission request's buttons: allowing is the suggestion, as in Claude Code's own prompt. */
 export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
@@ -115,23 +134,127 @@ export function foldEvent(
       // Finished work waits on you, not on the agent: it never detaches.
       const changes: ItemChange[] = [];
       const open = state.open.map((item) => {
-        if (item.detached || item.kind === "finished") return item;
+        if (item.detached || item.kind === "finished" || item.kind === "error") return item;
         const detached = { ...item, detached: true };
         changes.push({ type: "detached", item: detached });
         return detached;
       });
+      const ended: FoldState = {
+        ...state,
+        runtime: { ...runtime, live: false, turnId: null },
+        open,
+      };
+      // The agent crashed mid-turn with nothing to ask you: without a card the thread would just
+      // look done, its work half finished. A graceful exit is one Tenzo asked for (an archive, the
+      // daemon stopping, which resumes the turn when it starts again: engine.ts), so no card.
+      if (
+        event.payload.exitKind !== "error" ||
+        runtime.turnId === null ||
+        state.open.length > 0
+      ) {
+        return { state: ended, changes };
+      }
+      const name = AGENT_NAMES[event.agent];
+      return withError(ended, changes, event, runtime, environmentId, {
+        cause: "crash",
+        message:
+          event.payload.reason ?? runtime.error ?? `${name} exited before its turn finished.`,
+        prompts: runtime.prompt === null ? [] : [runtime.prompt],
+      });
+    }
+    case "turn.started": {
+      // A prompt of ours went: whatever failed before is behind it, so its error card goes. A
+      // turn the agent starts by itself (a background task reporting) changes nothing about it.
+      const ours = event.payload.prompt !== undefined;
+      const changes: ItemChange[] = [];
+      const open = state.open.filter((item) => {
+        if (item.kind !== "error" || !ours) return true;
+        changes.push({
+          type: "resolved",
+          item: {
+            ...item,
+            status: "resolved",
+            resolvedAt: event.createdAt,
+            resolution: { kind: "recovered" },
+          },
+        });
+        return false;
+      });
       return {
-        state: { ...state, runtime: { ...runtime, live: false, turnId: null }, open },
+        state: {
+          ...state,
+          runtime: {
+            ...runtime,
+            turnId: event.turnId,
+            context: "",
+            prompt: event.payload.prompt ?? null,
+            error: null,
+          },
+          open,
+        },
         changes,
       };
     }
-    case "turn.started":
-      return same({ ...state, runtime: { ...runtime, turnId: event.turnId, context: "" } });
-    case "turn.completed":
-      return same({
+    case "turn.completed": {
+      const next: FoldState = {
         ...state,
         runtime: { ...runtime, turnId: runtime.turnId === event.turnId ? null : runtime.turnId },
+      };
+      if (event.payload.state !== "failed") return same(next);
+      return withError(next, [], event, runtime, environmentId, {
+        cause: "turn",
+        message: event.payload.errorMessage ?? runtime.error ?? "The turn failed.",
+        prompts: runtime.prompt === null ? [] : [runtime.prompt],
       });
+    }
+    case "runtime.error": {
+      // No session and no turn: the agent couldn't even start (engine.ts drops the prompts that
+      // were waiting, and says which). Otherwise it is why the turn or the session will end.
+      if (runtime.live || runtime.turnId !== null) {
+        return same({ ...state, runtime: { ...runtime, error: event.payload.message } });
+      }
+      // Still can't start: the card it already has says so, now with these prompts too.
+      const unsent = event.payload.unsent ?? [];
+      const card = state.open.find((i) => i.kind === "error" && i.error?.cause === "start");
+      if (card?.error) {
+        const item: QueueItem = {
+          ...card,
+          error: {
+            ...card.error,
+            message: cutMessage(event.payload.message.trim()),
+            prompts: [...card.error.prompts, ...unsent],
+          },
+        };
+        return {
+          state: { ...state, open: state.open.map((i) => (i === card ? item : i)) },
+          changes: [{ type: "updated", item }],
+        };
+      }
+      return withError(state, [], event, runtime, environmentId, {
+        cause: "start",
+        message: event.payload.message,
+        prompts: unsent,
+      });
+    }
+    case "error.resolved": {
+      const { action, text } = event.payload;
+      return resolve(
+        state,
+        event,
+        action === "retry" ? { kind: "retried" } : { kind: "told", text: text ?? "" },
+      );
+    }
+    case "item.snoozed":
+    case "item.unsnoozed": {
+      const found = state.open.find((item) => item.requestId === event.requestId);
+      const until = event.type === "item.snoozed" ? event.payload.until : null;
+      if (!found || found.snoozedUntil === until) return same(state);
+      const item: QueueItem = { ...found, snoozedUntil: until };
+      return {
+        state: { ...state, open: state.open.map((i) => (i === found ? item : i)) },
+        changes: [{ type: event.type === "item.snoozed" ? "snoozed" : "unsnoozed", item }],
+      };
+    }
     case "item.completed": {
       const p = event.payload;
       if (p.itemType !== "assistant_message" || p.parentItemId || !p.text?.trim()) {
@@ -256,7 +379,6 @@ export function foldEvent(
     }
     case "session.configured":
     case "item.started":
-    case "runtime.error":
       return same(state);
   }
 }
@@ -280,6 +402,27 @@ export function foldEvents(
 /** An item's id follows from its request's: replaying the log gives the same ids. */
 export function itemIdFor(requestId: RequestId): QueueItemId {
   return `itm_${requestId.slice("req_".length)}`;
+}
+
+/**
+ * An error item answers no agent request: its request id is made from the event that opened it,
+ * so replaying the log gives the same item again.
+ */
+export function errorRequestId(eventId: EventId): RequestId {
+  return `req_${eventId.slice("evt_".length)}`;
+}
+
+/** What an error item's card says in a few words. */
+export function errorHeadline(cause: ItemError["cause"], agent: AgentKind): string {
+  const name = AGENT_NAMES[agent];
+  switch (cause) {
+    case "turn":
+      return `${name}'s turn failed`;
+    case "crash":
+      return `${name} stopped mid-turn`;
+    case "start":
+      return `${name} couldn't start`;
+  }
 }
 
 /** The last paragraphs of an assistant message that fit in `CONTEXT_LIMIT`, whitespace folded. */
@@ -328,6 +471,7 @@ function openItem(
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
   if (event.type === "proposal.requested") {
     const { headline, summary } = event.payload;
@@ -405,7 +549,51 @@ function finishedItem(
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
+}
+
+/** `state` with an error item opened by `event`, added to `changes`. */
+function withError(
+  state: FoldState,
+  changes: ItemChange[],
+  event: RuntimeEvent,
+  runtime: ThreadRuntime,
+  environmentId: EnvironmentId,
+  error: ItemError,
+): Folded {
+  const requestId = errorRequestId(event.eventId);
+  if (state.known.has(requestId)) return { state, changes };
+  const turnId = event.turnId ?? runtime.turnId;
+  const item: QueueItem = {
+    id: itemIdFor(requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "quick",
+    kind: "error",
+    requestId,
+    ...(turnId ? { turnId } : {}),
+    context: runtime.context,
+    ask: errorHeadline(error.cause, event.agent),
+    options: [...ERROR_OPTIONS],
+    suggested: "retry",
+    questions: [],
+    error: { ...error, message: cutMessage(error.message.trim()) },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  };
+  return {
+    state: { ...state, open: [...state.open, item], known: new Set([...state.known, requestId]) },
+    changes: [...changes, { type: "opened", item }],
+  };
+}
+
+function cutMessage(text: string, limit = ERROR_LIMIT): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 function resolve(
@@ -414,7 +602,8 @@ function resolve(
     | RuntimeEventOf<"user-input.resolved">
     | RuntimeEventOf<"request.resolved">
     | RuntimeEventOf<"proposal.resolved">
-    | RuntimeEventOf<"report.resolved">,
+    | RuntimeEventOf<"report.resolved">
+    | RuntimeEventOf<"error.resolved">,
   resolution: QueueItemResolution,
 ): Folded {
   const found = state.open.find((item) => item.requestId === event.requestId);

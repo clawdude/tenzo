@@ -4,6 +4,7 @@ export * from "./connection.ts";
 export * from "./feed.ts";
 export * from "./state.ts";
 export type { Log } from "./notify.ts";
+export { isSnoozed } from "@tenzo/contracts";
 // The records views draw and the commands they send, so a view needs this package only.
 export { attachmentUrl, liveOriginFor, liveUrl } from "@tenzo/contracts";
 export type {

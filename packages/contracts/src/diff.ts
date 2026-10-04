@@ -26,13 +26,18 @@ export const ThreadDiff = z.object({
   base: z.string(),
   /** Changed files, by path; at most `MAX_DIFF_FILES` of them. */
   files: z.array(DiffFile),
-  /** How many files changed, including any left out of `files`. */
+  /**
+   * How many files changed, including any left out of `files`. At least this many when the
+   * untracked files were too many to list (`truncated`).
+   */
   fileCount: z.number().int().nonnegative(),
   /** Lines added and deleted over every counted file, left-out ones included. */
   added: z.number().int().nonnegative(),
   deleted: z.number().int().nonnegative(),
   /** More files changed than `files` lists. */
   truncated: z.boolean(),
+  /** An archived thread whose branch is in the base already: its change has landed. */
+  merged: z.boolean().default(false),
 });
 export type ThreadDiff = z.infer<typeof ThreadDiff>;
 

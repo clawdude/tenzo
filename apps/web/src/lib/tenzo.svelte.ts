@@ -23,6 +23,7 @@ class Tenzo {
 			attempt: 0,
 			environmentId: null,
 			serverVersion: null,
+			clockOffset: 0,
 			probing: false
 		},
 		synced: false

@@ -3,6 +3,7 @@ import { question, said, stored, tool, TURN } from './fixtures.ts';
 import {
 	clip,
 	clockOf,
+	heldEvents,
 	ROW_PAGE,
 	type Row,
 	runTitle,
@@ -175,6 +176,38 @@ describe('windowOf', () => {
 		expect(first.shown[0]).toBe(1000 - ROW_PAGE);
 		expect(first.hidden).toBe(1000 - ROW_PAGE);
 		expect(windowOf(rows, 2000)).toEqual({ shown: rows, hidden: 0 });
+	});
+});
+
+describe('heldEvents', () => {
+	const range = (from: number, to: number) =>
+		Array.from({ length: to - from + 1 }, (_, i) => said(from + i, `line ${from + i}`));
+	const seqs = (events: readonly { seq: number }[]) => events.map((e) => e.seq);
+
+	it('draws the feed as it is at the end', () => {
+		const latest = range(5, 9);
+		expect(heldEvents(range(1, 4), latest, true)).toEqual({ events: latest, newer: 0 });
+		expect(heldEvents([], latest, false)).toEqual({ events: latest, newer: 0 });
+	});
+
+	it("reading further up at the feed's cap, nothing drawn moves: dropped events stay, new ones wait", () => {
+		// The feed is full: as 3 new events arrive, its 3 oldest go.
+		const shown = range(1, 10);
+		const latest = range(4, 13);
+		const held = heldEvents(shown, latest, false);
+		expect(held.events).toBe(shown);
+		expect(held.newer).toBe(3);
+		// Rows from the held events are the same rows, with the same keys, in the same order.
+		expect(timelineOf(held.events).map((r) => r.key)).toEqual(timelineOf(shown).map((r) => r.key));
+		// Back at the end, the feed is drawn as it is.
+		expect(seqs(heldEvents(held.events, latest, true).events)).toEqual(seqs(latest));
+	});
+
+	it('lets older pages you asked for join in front while you read', () => {
+		const shown = range(10, 12);
+		const held = heldEvents(shown, [...range(7, 9), ...range(10, 14)], false);
+		expect(seqs(held.events)).toEqual([7, 8, 9, 10, 11, 12]);
+		expect(held.newer).toBe(2);
 	});
 });
 

@@ -1,9 +1,9 @@
-import type { QueueItem, ThreadDiff } from '@tenzo/client-runtime';
+import type { ThreadDiff } from '@tenzo/client-runtime';
 import { describe, expect, it } from 'vitest';
 import {
 	backLabels,
 	changeView,
-	errorOf,
+	errorBack,
 	filesOf,
 	FILES_LIMIT,
 	reasoningOf,
@@ -12,7 +12,7 @@ import {
 	weighedOf,
 	whyBack
 } from './back.ts';
-import { finished, item, permission, proposal, question, said, stored, tool } from './fixtures.ts';
+import { failure, finished, item, permission, proposal, question, said, stored, tool } from './fixtures.ts';
 
 const ask = (seq: number, requestId: string) =>
 	stored(seq, {
@@ -27,10 +27,7 @@ describe('backLabels', () => {
 		expect(backLabels(permission('a'))).toMatchObject({ kind: 'why', pill: 'What exactly' });
 		expect(backLabels(proposal('a'))).toMatchObject({ kind: 'why', pill: 'What it looked at' });
 		expect(backLabels(finished('a'))).toMatchObject({ kind: 'change', pill: 'See the change', title: 'The change' });
-		const error = { ...item('a'), kind: 'error' } as unknown as QueueItem;
-		expect(backLabels(error)).toMatchObject({ kind: 'error', title: 'What went wrong' });
-		const unknown = { ...item('a'), kind: 'something-new' } as unknown as QueueItem;
-		expect(backLabels(unknown)).toMatchObject({ kind: 'why' });
+		expect(backLabels(failure('a'))).toMatchObject({ kind: 'error', title: 'What it was doing' });
 	});
 });
 
@@ -137,6 +134,7 @@ describe('changeView', () => {
 		added: files.reduce((s, f) => s + (f.added ?? 0), 0),
 		deleted: files.reduce((s, f) => s + (f.deleted ?? 0), 0),
 		truncated: false,
+		merged: false,
 		...extra
 	});
 	it('says the change in a line, then each file with its +/−', () => {
@@ -151,11 +149,11 @@ describe('changeView', () => {
 		);
 		expect(view.headline).toBe('5 files · +47 −13');
 		expect(view.lines).toEqual([
-			{ path: 'lib/theme.ts', added: '+41', deleted: '', note: 'new' },
-			{ path: 'app.html', added: '+6', deleted: '−4', note: '' },
-			{ path: 'old.ts', added: '', deleted: '−9', note: 'deleted' },
-			{ path: 'new.ts', added: '', deleted: '', note: 'from was.ts' },
-			{ path: 'logo.png', added: '', deleted: '', note: 'new · binary' }
+			{ key: 'untracked:lib/theme.ts', path: 'lib/theme.ts', added: '+41', deleted: '', note: 'new' },
+			{ key: 'modified:app.html', path: 'app.html', added: '+6', deleted: '−4', note: '' },
+			{ key: 'deleted:old.ts', path: 'old.ts', added: '', deleted: '−9', note: 'deleted' },
+			{ key: 'renamed:new.ts', path: 'new.ts', added: '', deleted: '', note: 'from was.ts' },
+			{ key: 'added:logo.png', path: 'logo.png', added: '', deleted: '', note: 'new · binary' }
 		]);
 		expect(view.more).toBe('');
 	});
@@ -166,13 +164,49 @@ describe('changeView', () => {
 		);
 		expect(some.headline).toBe('14 files · +90');
 		expect(some.more).toBe('And 13 more files');
+		const capped = changeView(diff([{ path: 'n/a.js', status: 'untracked', added: 1, deleted: 0 }], { truncated: true }));
+		expect(capped.headline).toBe('1 file+ · +1');
+		expect(capped.more).toBe('And more new files, too many to list');
+	});
+	it('says when an archived branch has landed', () => {
+		expect(changeView(diff([], { merged: true })).headline).toBe('Landed in main');
+	});
+	it('keys lines by status and path, so a path twice never collides', () => {
+		const view = changeView(
+			diff([
+				{ path: 'keep.txt', status: 'deleted', added: 0, deleted: 1 },
+				{ path: 'keep.txt', status: 'untracked', added: 1, deleted: 0 }
+			])
+		);
+		expect(new Set(view.lines.map((l) => l.key)).size).toBe(2);
 	});
 });
 
-describe('errorOf', () => {
-	it("is an error card's message, else its ask", () => {
-		const error = { ...item('a'), kind: 'error', ask: 'The turn failed', error: { message: 'Rate limited', cause: 'turn', prompts: [] } };
-		expect(errorOf(error as unknown as QueueItem)).toBe('Rate limited');
-		expect(errorOf(item('a'))).toBe('Which color?');
+describe('errorBack', () => {
+	it("says what it was doing, not what the front says: what Retry sends, its last words and steps", () => {
+		const back = errorBack(
+			failure('a'),
+			[
+				said(1, 'Looking at the store.'),
+				tool(2, 't1', 'started', { text: 'Read: /w/a.ts', toolKind: 'file_read', toolName: 'Read', input: { file_path: '/w/a.ts' } }),
+				tool(3, 't2', 'started', { text: 'Edit: /w/b.ts', toolKind: 'file_change', toolName: 'Edit', input: { file_path: '/w/b.ts' } }),
+				said(4, 'inner', 'sub'),
+				said(5, 'Now the tests.'),
+				tool(6, 't3', 'started', { text: 'Bash: npm test', toolKind: 'command', toolName: 'Bash' }),
+				tool(7, 't3', 'completed', { text: 'Bash: npm test', toolKind: 'command', toolName: 'Bash', status: 'failed' })
+			],
+			'/w'
+		);
+		expect(back).toEqual({
+			retry: ['Fix it'],
+			lastSaid: 'Now the tests.',
+			lastSteps: [
+				{ summary: 'Read: a.ts', failed: false },
+				{ summary: 'Edit: b.ts', failed: false },
+				{ summary: 'Bash: npm test', failed: true }
+			],
+			files: { changed: ['b.ts'], read: ['a.ts'], moreChanged: 0, moreRead: 0 }
+		});
+		expect(JSON.stringify(back)).not.toContain('529 Overloaded');
 	});
 });

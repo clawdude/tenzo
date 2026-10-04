@@ -69,19 +69,31 @@ export function appendLive(feed: Feed, event: StoredEvent): Feed {
 
 /**
  * An older page (`thread.events` with `before`): put in front, as many as there's room for. What
- * doesn't fit stays on the daemon, so `older` stays true.
+ * doesn't fit stays on the daemon, so `older` stays true. `before` is the seq the page was asked
+ * before: if the feed no longer starts there (a reconnect replaced it meanwhile), the page would
+ * leave a gap, so it is dropped.
  */
-export function prependOlder(feed: Feed, page: readonly StoredEvent[], older: boolean): Feed {
-  const first = feed.events[0]?.seq ?? Number.POSITIVE_INFINITY;
-  const before = page.filter((e) => e.seq < first);
+export function prependOlder(
+  feed: Feed,
+  page: readonly StoredEvent[],
+  older: boolean,
+  before: number,
+): Feed {
+  if (feed.events[0]?.seq !== before) return { ...feed, loadingOlder: false };
+  const fresh = page.filter((e) => e.seq < before);
   const room = Math.max(0, MAX_FEED_EVENTS - feed.events.length);
-  const kept = before.slice(Math.max(0, before.length - room));
+  const kept = fresh.slice(Math.max(0, fresh.length - room));
   return {
     ...feed,
     events: [...kept, ...feed.events],
-    older: older || kept.length < before.length,
+    older: older || kept.length < fresh.length,
     loadingOlder: false,
   };
+}
+
+/** The daemon has earlier events and the feed has room for them: "Earlier" can page them in. */
+export function canLoadOlder(feed: Feed): boolean {
+  return feed.older && feed.events.length > 0 && feed.events.length < MAX_FEED_EVENTS;
 }
 
 /** The feed's events in log order, each once. */

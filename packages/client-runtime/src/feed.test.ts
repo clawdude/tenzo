@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendLive,
   applyBacklog,
+  canLoadOlder,
   emptyFeed,
   type Feed,
   lastSeqOf,
@@ -56,7 +57,7 @@ describe("feed", () => {
 
   it("puts older pages in front, as many as fit, skipping what it has", () => {
     const feed = { ...applyBacklog(emptyFeed("t"), backlog([10, 11], { older: true })), loadingOlder: true };
-    const paged = prependOlder(feed, [7, 8, 10].map((s) => stored(s, "a")), false);
+    const paged = prependOlder(feed, [7, 8, 10].map((s) => stored(s, "a")), false, 10);
     expect(seqs(paged)).toEqual([7, 8, 10, 11]);
     expect(paged).toMatchObject({ older: false, loadingOlder: false });
 
@@ -64,9 +65,20 @@ describe("feed", () => {
       emptyFeed("t"),
       backlog(Array.from({ length: MAX_FEED_EVENTS - 1 }, (_, i) => 100 + i), { older: true }),
     );
-    const topped = prependOlder(full, [97, 98, 99].map((s) => stored(s, "a")), false);
+    const topped = prependOlder(full, [97, 98, 99].map((s) => stored(s, "a")), false, 100);
     expect(topped.events).toHaveLength(MAX_FEED_EVENTS);
     expect(topped.events[0]?.seq).toBe(99);
     expect(topped.older).toBe(true); // 97 and 98 stay on the daemon
+    expect(canLoadOlder(topped)).toBe(false); // full: Earlier has nothing to fetch into
+    expect(canLoadOlder(full)).toBe(true);
+    expect(canLoadOlder(paged)).toBe(false); // nothing older
+  });
+
+  it("drops an older page when a reset replaced the feed while it was on its way", () => {
+    const asked = { ...applyBacklog(emptyFeed("t"), backlog([10, 11], { older: true })), loadingOlder: true };
+    const replaced = { ...applyBacklog(asked, backlog([40, 41], { older: true })), loadingOlder: true };
+    const after = prependOlder(replaced, [7, 8].map((s) => stored(s, "a")), true, 10);
+    expect(seqs(after)).toEqual([40, 41]);
+    expect(after).toMatchObject({ older: true, loadingOlder: false });
   });
 });

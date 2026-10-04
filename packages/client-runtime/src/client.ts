@@ -9,6 +9,7 @@ import { Connection, type ConnectionOptions, type ConnectionSnapshot } from "./c
 import {
   appendLive,
   applyBacklog,
+  canLoadOlder,
   emptyFeed,
   type Feed,
   lastSeqOf,
@@ -176,14 +177,14 @@ export class TenzoClient {
   loadOlder(threadId: string): Promise<void> {
     const entry = this.#feeds.get(threadId);
     const first = entry?.feed.events[0]?.seq;
-    if (!entry || first === undefined || !entry.feed.older || entry.feed.loadingOlder) {
+    if (!entry || first === undefined || !canLoadOlder(entry.feed) || entry.feed.loadingOlder) {
       return Promise.resolve();
     }
     this.#setFeed(entry, { ...entry.feed, loadingOlder: true });
     return this.command({ type: "thread.events", threadId, before: first, limit: OLDER_PAGE }).then(
       (page) => {
         if (this.#feeds.get(threadId) === entry) {
-          this.#setFeed(entry, prependOlder(entry.feed, page.events, page.older));
+          this.#setFeed(entry, prependOlder(entry.feed, page.events, page.older, first));
         }
       },
       (error: unknown) => {

@@ -147,6 +147,16 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE threads ADD COLUMN preview TEXT;
     `,
   },
+  {
+    name: "error items",
+    sql: `
+      -- Projection of the thread's events (fold.ts), for error items: the current turn's prompt
+      -- (what Retry sends again) and the agent's last error in it. Items may now be of kind
+      -- 'error', and carry snoozedUntil in their body; neither needs a column.
+      ALTER TABLE threads ADD COLUMN turn_prompt TEXT;
+      ALTER TABLE threads ADD COLUMN turn_error TEXT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

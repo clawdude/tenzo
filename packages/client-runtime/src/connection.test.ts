@@ -78,6 +78,17 @@ describe("Connection", () => {
     expect(states).toEqual(["closed", "connecting", "connected"]);
   });
 
+  it("learns how far the daemon's clock is from this device's, from its hello", () => {
+    // This device runs 20 minutes ahead of the daemon.
+    const ahead = Date.parse(hello.serverTime) + 20 * 60_000;
+    const { conn, sockets } = setup({ now: () => ahead });
+    expect(conn.current.clockOffset).toBe(0);
+    conn.connect();
+    sockets[0]!.serverOpens();
+    sockets[0]!.serverSends(hello);
+    expect(conn.current.clockOffset).toBe(-20 * 60_000);
+  });
+
   it("keeps backing off when the server accepts and then drops before hello", () => {
     const { conn, latest, retryDelay, retry } = setup();
     conn.connect();

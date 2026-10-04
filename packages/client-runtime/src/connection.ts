@@ -21,6 +21,12 @@ export interface ConnectionSnapshot {
   environmentId: EnvironmentId | null;
   serverVersion: string | null;
   /**
+   * The daemon's clock minus this device's, in ms, from the last hello (0 before one). Add it to
+   * `Date.now()` to count down to a time the daemon set, such as a snooze's end: a phone's clock
+   * can be minutes off the Mac's.
+   */
+  clockOffset: number;
+  /**
    * A wakeup's probe is out: the connection looked up, but the page was away and the socket may
    * have died meanwhile. Until anything arrives on it, what it delivered may be stale.
    */
@@ -70,6 +76,8 @@ export interface ConnectionOptions {
   random?: () => number;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
+  /** This device's clock, for `clockOffset`. Injectable for tests. */
+  now?: () => number;
   /** Where a throwing listener or an invalid frame is reported. Default: the console. */
   log?: Log;
 }
@@ -105,6 +113,7 @@ export class Connection {
   readonly #setTimeout: typeof setTimeout;
   readonly #clearTimeout: typeof clearTimeout;
   readonly #log: Log;
+  readonly #now: () => number;
 
   #socket: WebSocket | null = null;
   #wanted = false;
@@ -117,6 +126,7 @@ export class Connection {
     attempt: 0,
     environmentId: null,
     serverVersion: null,
+    clockOffset: 0,
     probing: false,
   };
   readonly #listeners = new Set<Listener<ConnectionSnapshot>>();
@@ -143,6 +153,7 @@ export class Connection {
     this.#setTimeout = options.setTimeout ?? globalThis.setTimeout.bind(globalThis);
     this.#clearTimeout = options.clearTimeout ?? globalThis.clearTimeout.bind(globalThis);
     this.#log = options.log ?? consoleLog;
+    this.#now = options.now ?? Date.now;
   }
 
   get current(): ConnectionSnapshot {
@@ -253,10 +264,13 @@ export class Connection {
       this.#clear("hello");
       this.#arm("stable", this.#stableAfter, () => this.#update({ attempt: 0 }));
       this.#scheduleBeat();
+      const serverTime = Date.parse(frame.serverTime);
       this.#update({
         state: "connected",
         environmentId: frame.environmentId,
         serverVersion: frame.version,
+        // The hello's few ms in flight don't matter for a countdown in minutes.
+        clockOffset: Number.isFinite(serverTime) ? serverTime - this.#now() : 0,
       });
     }
     notify(this.#frameListeners, frame, this.#log);

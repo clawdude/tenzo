@@ -38,3 +38,44 @@ export function forward(_node: Element): TransitionConfig {
 		css: (_t, u) => `transform: translateY(${-11 * u}px) scale(${1 - 0.035 * u});`
 	};
 }
+
+/** How far aside a swiped card flies (px), and how much it turns on the way (deg). */
+const AWAY = 520;
+const TURN = 14;
+
+/** How a card leaves the top of the pile: lifted (answered), or flung aside (snoozed). */
+export type Departure = { kind: 'lift' } | { kind: 'fling'; direction: -1 | 1; from: number };
+
+/**
+ * A card leaving: lifted up and away when answered, or carried on off the side it was swiped to,
+ * from where the finger let go, when snoozed.
+ */
+export function leave(node: Element, how: Departure | null): TransitionConfig {
+	if (how?.kind !== 'fling') return lift(node);
+	if (still()) return { duration: 0 };
+	const { direction, from } = how;
+	return {
+		duration: 300,
+		easing: ease,
+		css: (t, u) => {
+			const x = from * t + direction * AWAY * u;
+			const turn = (from / 22) * t + direction * TURN * u;
+			return `z-index: 2; transform: translateX(${x}px) rotate(${turn}deg); opacity: ${t};`;
+		}
+	};
+}
+
+/**
+ * A card arriving on top: forward from the pile, or, brought back by Undo, in from the side it
+ * was swiped off to.
+ */
+export function arrive(node: Element, from: -1 | 1 | null): TransitionConfig {
+	if (from === null) return forward(node);
+	if (still()) return { duration: 0 };
+	return {
+		duration: PACE,
+		easing: ease,
+		css: (t, u) =>
+			`transform: translateX(${from * AWAY * u}px) rotate(${from * TURN * u}deg); opacity: ${t};`
+	};
+}

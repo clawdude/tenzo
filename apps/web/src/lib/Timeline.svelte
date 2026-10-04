@@ -1,8 +1,16 @@
 <script lang="ts">
-	import type { Feed } from '@tenzo/client-runtime';
+	import { canLoadOlder, type Feed, type StoredEvent } from '@tenzo/client-runtime';
 	import { type Snippet, tick } from 'svelte';
 	import { renderMarkdown } from '#lib/markdown.ts';
-	import { clip, clockOf, ROW_PAGE, type Row, timelineOf, windowOf } from '#lib/timeline.ts';
+	import {
+		clip,
+		clockOf,
+		heldEvents,
+		ROW_PAGE,
+		type Row,
+		timelineOf,
+		windowOf
+	} from '#lib/timeline.ts';
 	import { loadOlder } from '#lib/tenzo.svelte.ts';
 
 	// What happened so far: a thread's events as a timeline (the mock-up's B2), live. Only the end
@@ -19,18 +27,24 @@
 	}
 	let { feed, working = false, footer, root = '' }: Props = $props();
 
-	const rows = $derived(timelineOf(feed.events, root));
+	/** Following the end: new rows scroll into view. Off once you scroll up to read. */
+	let following = $state(true);
+	/** The events drawn last: reading further up, they stay put (heldEvents). */
+	let drawn: readonly StoredEvent[] = [];
+	const held = $derived.by(() => {
+		const next = heldEvents(drawn, feed.events, following);
+		drawn = next.events;
+		return next;
+	});
+	const rows = $derived(timelineOf(held.events, root));
 	/** How many of the last rows are drawn. */
 	let count = $state(ROW_PAGE);
 	const view = $derived(windowOf(rows, count));
+	/** Earlier events the daemon can still page in (none once the feed is full). */
+	const pageable = $derived(canLoadOlder(feed));
 	/** Rows (and calls, and outputs) opened by a tap, by key. */
 	let opened = $state<Record<string, boolean>>({});
 	let scroller = $state<HTMLElement | null>(null);
-	/** Following the end: new rows scroll into view. Off once you scroll up to read. */
-	let following = true;
-	let seen = 0;
-	/** Rows kept drawn while you read further up and the thread goes on. */
-	const MAX_DRAWN = ROW_PAGE * 8;
 
 	const toggle = (key: string) => (opened[key] = !opened[key]);
 
@@ -39,17 +53,20 @@
 		following = scroller.scrollHeight - scroller.scrollTop - scroller.clientHeight < 80;
 	}
 
-	// New rows: at the end, follow them; reading further up, keep the drawn ones where they are.
+	// At the end, whatever changes (a new row, an output arriving), the end stays in view.
 	$effect.pre(() => {
-		const total = rows.length;
-		const added = total - seen;
-		seen = total;
-		if (added <= 0) return;
-		if (!following) count = Math.max(count, Math.min(count + added, MAX_DRAWN));
+		void held.events;
+		if (!following) return;
 		void tick().then(() => {
 			if (following && scroller) scroller.scrollTop = scroller.scrollHeight;
 		});
 	});
+
+	/** Back to the end, where what waited is drawn. */
+	function toEnd() {
+		following = true;
+		void tick().then(() => scroller && (scroller.scrollTop = scroller.scrollHeight));
+	}
 
 	async function earlier() {
 		const el = scroller;
@@ -99,14 +116,16 @@
 </script>
 
 <div
-	class="scroll min-h-0 grow overflow-y-auto px-6 pb-10"
+	class="scroll min-h-0 grow overflow-y-auto px-6 pb-10 [overflow-anchor:none]"
 	bind:this={scroller}
 	{onscroll}
 	data-testid="timeline"
 	data-rows={rows.length}
+	data-following={following}
+	data-newer={held.newer}
 	data-status={feed.status}
 >
-	{#if view.hidden > 0 || feed.older}
+	{#if view.hidden > 0 || pageable}
 		<button
 			type="button"
 			class="opt mb-2 flex min-h-11 w-full items-center justify-center text-[15px] text-mute"
@@ -116,6 +135,11 @@
 		>
 			{feed.loadingOlder ? 'Loading…' : 'Earlier'}
 		</button>
+	{:else if feed.older}
+		<!-- The feed is full: earlier steps stay on the daemon (and all of it in Claude's transcript). -->
+		<p class="mb-2 py-3 text-center text-[14px] text-faint" data-testid="limit">
+			Earlier steps aren't kept on this screen.
+		</p>
 	{/if}
 
 	{#if feed.status === 'loading' && rows.length === 0}
@@ -129,7 +153,7 @@
 	<ol class="flex flex-col">
 		{#each view.shown as row, i (row.key)}
 			{@const last = i === view.shown.length - 1 && !working}
-			<li class="flex gap-3.5 py-2.5" data-testid="row" data-kind={row.kind}>
+			<li class="flex gap-3.5 py-2.5" data-testid="row" data-kind={row.kind} data-key={row.key}>
 				<div class="flex w-3 shrink-0 flex-col items-center" aria-hidden="true">
 					<span class={['mt-[7px] size-2 rounded-full', DOT[toneOf(row)]]}></span>
 					{#if !last}<span class="mt-1.5 w-px grow bg-fill"></span>{/if}
@@ -241,4 +265,18 @@
 		{/if}
 	</ol>
 	{@render footer?.()}
+	{#if !following && held.newer > 0}
+		<!-- What came in while you read further up: waiting, so nothing you see moves. -->
+		<div class="pointer-events-none sticky bottom-3 flex justify-center">
+			<button
+				type="button"
+				class="opt pointer-events-auto flex min-h-10 items-center gap-1.5 rounded-full bg-fill-strong px-4 text-[14px] font-medium text-ink shadow-[0_8px_24px_rgba(0,0,0,.5)]"
+				onclick={toEnd}
+				data-testid="newer"
+			>
+				<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12l7 7 7-7"></path></svg>
+				{held.newer} new
+			</button>
+		</div>
+	{/if}
 </div>

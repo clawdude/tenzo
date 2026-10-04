@@ -3,7 +3,7 @@ import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FakeAdapter } from "./agent/fake-agent.ts";
-import { countLines, diffStat, parseNameStatus, parseNumstat } from "./diff.ts";
+import { countLines, diffStat, listUntracked, parseRawNumstat } from "./diff.ts";
 import { Engine } from "./engine.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
@@ -50,6 +50,7 @@ describe("diffStat", () => {
       added: 5,
       deleted: 2,
       truncated: false,
+      merged: false,
     });
   });
 
@@ -62,6 +63,7 @@ describe("diffStat", () => {
       added: 0,
       deleted: 0,
       truncated: false,
+      merged: false,
     });
   });
 
@@ -89,24 +91,49 @@ describe("diffStat", () => {
     const diff = await diffStat(worktree, "main");
     expect(diff.files).toEqual([{ path: "a b\tc ü.ts", status: "added", added: 1, deleted: 0 }]);
   });
-});
 
-describe("parsers", () => {
-  it("reads numstat -z, renames and binary files included", () => {
-    expect(parseNumstat("3\t1\tapp.ts\0-\t-\tlogo.png\0" + "0\t0\t\0old.ts\0new.ts\0")).toEqual([
-      { path: "app.ts", added: 3, deleted: 1 },
-      { path: "logo.png", added: null, deleted: null },
-      { path: "new.ts", from: "old.ts", added: 0, deleted: 0 },
-    ]);
+  it("lists a file once when it left the index but is still on disk (git rm --cached)", async () => {
+    const { worktree } = setup();
+    sh(worktree, "rm", "-q", "--cached", "app.ts");
+    const diff = await diffStat(worktree, "main");
+    expect(diff.files).toEqual([{ path: "app.ts", status: "deleted", added: 0, deleted: 3 }]);
+    expect(diff.fileCount).toBe(1);
   });
 
-  it("reads name-status -z", () => {
-    expect([...parseNameStatus("M\0a.ts\0A\0b.ts\0D\0c.ts\0R087\0d.ts\0e.ts\0T\0f\0")]).toEqual([
-      ["a.ts", "modified"],
-      ["b.ts", "added"],
-      ["c.ts", "deleted"],
-      ["e.ts", "renamed"],
-      ["f", "modified"],
+  it("stops listing untracked files at a cap, and says the diff is incomplete", async () => {
+    const { worktree } = setup();
+    mkdirSync(join(worktree, "node_modules"));
+    for (let i = 0; i < 30; i++) writeFileSync(join(worktree, "node_modules", `m${i}.js`), "x\n");
+    const diff = await diffStat(worktree, "main", { maxUntracked: 10 });
+    expect(diff.files).toHaveLength(10);
+    expect(diff).toMatchObject({ fileCount: 10, truncated: true });
+    const listed = await listUntracked(worktree, 100);
+    expect(listed).toMatchObject({ more: false });
+    expect(listed.paths).toHaveLength(30);
+  });
+
+  it("says when an archived branch has landed in main already", async () => {
+    const { repo, worktree } = setup();
+    commitFile(worktree, "feature.ts", "a\n");
+    sh(repo, "merge", "-q", "--ff-only", "tenzo/work");
+    const diff = await diffStat(repo, "main", { head: "refs/heads/tenzo/work" });
+    expect(diff).toMatchObject({ files: [], merged: true });
+  });
+});
+
+describe("parseRawNumstat", () => {
+  it("reads raw records for the status and numstat records for the counts, paths by position", () => {
+    const raw =
+      ":100644 100644 aaa bbb M\0app.ts\0" +
+      ":000000 100644 000 ccc A\0logo.png\0" +
+      ":100644 000000 ddd 000 D\0gone\tx.ts\0" +
+      ":100644 100644 eee fff R087\0old.ts\0new.ts\0";
+    const numstat = "3\t1\tapp.ts\0-\t-\tlogo.png\0" + "0\t2\tgone\tx.ts\0" + "1\t1\t\0old.ts\0new.ts\0";
+    expect(parseRawNumstat(raw + numstat)).toEqual([
+      { path: "app.ts", status: "modified", added: 3, deleted: 1 },
+      { path: "logo.png", status: "added", added: null, deleted: null },
+      { path: "gone\tx.ts", status: "deleted", added: 0, deleted: 2 },
+      { path: "new.ts", from: "old.ts", status: "renamed", added: 1, deleted: 1 },
     ]);
   });
 });
@@ -166,5 +193,8 @@ describe("thread.diff", () => {
     expect(await engine.diff(thread.id)).toMatchObject({
       files: [{ path: "feature.ts", status: "added", added: 2 }],
     });
+    const project = engine.store.db.prepare("SELECT path FROM projects").get() as { path: string };
+    sh(project.path, "branch", "-D", thread.branch);
+    await expect(engine.diff(thread.id)).rejects.toThrow(/is gone \(deleted since the thread was archived\)/);
   });
 });

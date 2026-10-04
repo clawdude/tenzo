@@ -8,7 +8,7 @@ import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
  *
  * - the daemon says `hello`, then sends a `snapshot` (active threads, open items), then streams
  *   a `thread` frame whenever a thread changes and an `item` frame whenever an item opens,
- *   detaches or resolves; a client that applies them in order has what the daemon has;
+ *   detaches, is snoozed or wakes, or resolves; a client that applies them in order has what the daemon has;
  * - a client that watches a thread (`thread.watch`) also gets an `event` frame for each of that
  *   thread's new events, after the watch's answer and in the log's order;
  * - the client sends `command` frames, each with an id of its choosing, and the daemon answers
@@ -45,10 +45,13 @@ export const ServerThread = z.object({
   type: z.literal("thread"),
   thread: ThreadView,
 });
-/** An item opened, detached (its agent ended) or resolved; `item` is how it is now. */
+/**
+ * An item opened, changed (an error card that still holds), detached (its agent ended), was
+ * snoozed or woke up, or resolved; `item` is how it is now.
+ */
 export const ServerItem = z.object({
   type: z.literal("item"),
-  change: z.enum(["opened", "detached", "resolved"]),
+  change: z.enum(["opened", "updated", "detached", "snoozed", "unsnoozed", "resolved"]),
   item: QueueItem,
 });
 /** One new event of a thread this socket watches (`thread.watch`). */

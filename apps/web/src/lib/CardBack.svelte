@@ -6,7 +6,7 @@
 		type ThreadDiff,
 		type ThreadView
 	} from '@tenzo/client-runtime';
-	import { backLabels, changeView, errorOf, whyBack } from '#lib/back.ts';
+	import { backLabels, changeView, errorBack, whyBack } from '#lib/back.ts';
 	import { finishedView, type Shot } from '#lib/finished.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { command, tenzo, watchThread } from '#lib/tenzo.svelte.ts';
@@ -21,20 +21,28 @@
 		liveOrigin: string | null;
 		/** Shows a screenshot full screen (the card's own viewer). */
 		onenlarge: (shot: Shot) => void;
+		/** Leaving for the timeline: the card is to be turned over still when you come back. */
+		ondeeper: () => void;
 	}
-	let { item, thread, liveOrigin, onenlarge }: Props = $props();
+	let { item, thread, liveOrigin, onenlarge, ondeeper }: Props = $props();
 
 	const labels = $derived(backLabels(item));
 
 	// Why it's asking: the thread's events, live while the back is showing.
 	let feed = $state.raw<Feed | null>(null);
 	$effect(() => {
-		if (labels.kind !== 'why') return;
+		if (labels.kind === 'change') return;
 		return watchThread(item.threadId, (next) => (feed = next));
 	});
 	const why = $derived(
 		labels.kind === 'why'
 			? whyBack(item, (feed ?? emptyFeed(item.threadId)).events, thread?.worktreePath ?? '')
+			: null
+	);
+	// What it was doing when it stopped: the same events.
+	const stopped = $derived(
+		labels.kind === 'error'
+			? errorBack(item, (feed ?? emptyFeed(item.threadId)).events, thread?.worktreePath ?? '')
 			: null
 	);
 
@@ -91,7 +99,7 @@
 		{#each why.weighed as w, i (i)}
 			<div class="flex flex-col gap-2.5" data-testid="weighed">
 				{#if w.question}<p class="text-[15px] font-semibold text-ink">{w.question}</p>{/if}
-				{#each w.choices as choice (choice.label)}
+				{#each w.choices as choice, j (j)}
 					<div
 						class={[
 							'rounded-2xl bg-fill px-4 py-3.5',
@@ -134,7 +142,7 @@
 		{/if}
 		{#if change && change.lines.length > 0}
 			<ul class="overflow-hidden rounded-[18px] bg-fill font-mono text-[14px]" data-testid="files">
-				{#each change.lines as line, i (line.path)}
+				{#each change.lines as line, i (line.key)}
 					{#if i > 0}<li class="ml-4 h-px bg-fill-strong" aria-hidden="true"></li>{/if}
 					<li class="flex min-h-[46px] items-center justify-between gap-3 px-4 py-2" data-testid="file">
 						<span class="min-w-0 break-all text-ink">{line.path}</span>
@@ -174,13 +182,49 @@
 				{/if}
 			</div>
 		{/if}
-	{:else}
-		<pre class="rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft" data-testid="error-details">{errorOf(item)}</pre>
+	{:else if stopped}
+		<!-- The front says what went wrong; this says what it was doing. -->
+		{#if stopped.retry.length > 0}
+			<section data-testid="retry">
+				{@render label(stopped.retry.length === 1 ? 'Retry sends' : `Retry sends, in order`)}
+				<ul class="flex flex-col gap-2">
+					{#each stopped.retry as prompt, i (i)}
+						<li class="rounded-2xl bg-fill px-4 py-3 text-[15px] leading-snug break-words whitespace-pre-line text-ink-soft">{prompt}</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
+		{#if stopped.lastSaid}
+			<section data-testid="last-said">
+				{@render label('Last it said')}
+				<div class="md text-[16px] leading-[1.45] text-ink-soft">{@html renderMarkdown(stopped.lastSaid)}</div>
+			</section>
+		{/if}
+		{#if stopped.lastSteps.length > 0}
+			<section data-testid="last-steps">
+				{@render label('Last steps')}
+				<ul class="flex flex-col gap-1 font-mono text-[13px]">
+					{#each stopped.lastSteps as step, i (i)}
+						<li class={['break-words', step.failed ? 'text-fail' : 'text-mute']}>{step.summary}</li>
+					{/each}
+				</ul>
+			</section>
+		{/if}
+		{#if stopped.files.changed.length > 0}
+			<section>
+				{@render label('Changed so far')}
+				{@render chips(stopped.files.changed, stopped.files.moreChanged)}
+			</section>
+		{/if}
+		{#if feed?.status === 'loading' && !stopped.lastSaid}
+			<p class="text-[15px] text-faint">Loading…</p>
+		{/if}
 	{/if}
 
 	<a
 		href={`/threads/${item.threadId}`}
 		class="opt flex min-h-[52px] items-center justify-between rounded-2xl bg-fill px-4 text-[16px] text-ink"
+		onclick={ondeeper}
 		data-testid="so-far"
 	>
 		<span>What happened so far</span>

@@ -1,4 +1,5 @@
 <script lang="ts">
+	import { isSnoozed } from '@tenzo/client-runtime';
 	import { onMount } from 'svelte';
 	import { leaveTo } from '#lib/nav.ts';
 	import { connectionLabel } from '#lib/status.ts';
@@ -9,7 +10,8 @@
 	let now = $state(Date.now());
 	const live = $derived(tenzo.state);
 	const groups = $derived(groupThreads(live.threads, live.items, now));
-	const waiting = $derived(live.items.length);
+	/** What the Pass has for you now: snoozed items wait elsewhere. */
+	const waiting = $derived(live.items.filter((i) => !isSnoozed(i)).length);
 
 	const DOTS: Record<Tone, string> = {
 		clay: 'bg-clay',

@@ -56,6 +56,7 @@
 			</p>
 		</div>
 
+		{#key threadId}
 		<Timeline {feed} root={thread?.worktreePath ?? ''} working={Boolean(thread?.working) && !waiting}>
 			{#snippet footer()}
 				{#if session}
@@ -66,6 +67,7 @@
 				{/if}
 			{/snippet}
 		</Timeline>
+		{/key}
 
 		{#if waiting}
 			<div class="shrink-0 px-4 pt-3 pb-4">

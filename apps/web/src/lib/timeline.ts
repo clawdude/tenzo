@@ -309,6 +309,27 @@ export function windowOf<T>(rows: readonly T[], count: number): { shown: readonl
 	return { shown: hidden > 0 ? rows.slice(hidden) : rows, hidden };
 }
 
+/**
+ * The events the timeline draws, given the feed's (`latest`) and what it drew last (`shown`).
+ * At the end (`following`) it draws the feed as it is. Reading further up, nothing you can see
+ * moves: new events wait (counted in `newer`), and the oldest the feed drops at its cap stay
+ * drawn until you're back at the end, so no row above the one you read goes away. Only older
+ * pages you asked for ("Earlier") join, in front. iOS Safari has no scroll anchoring: this is
+ * what keeps your place there.
+ */
+export function heldEvents(
+	shown: readonly StoredEvent[],
+	latest: readonly StoredEvent[],
+	following: boolean
+): { events: readonly StoredEvent[]; newer: number } {
+	const first = shown[0]?.seq;
+	const last = shown.at(-1)?.seq;
+	if (following || first === undefined || last === undefined) return { events: latest, newer: 0 };
+	const older = latest.filter((e) => e.seq < first);
+	const newer = latest.reduce((n, e) => (e.seq > last ? n + 1 : n), 0);
+	return { events: older.length > 0 ? [...older, ...shown] : shown, newer };
+}
+
 /** How many rows one "Earlier" adds. */
 export const ROW_PAGE = 60;
 

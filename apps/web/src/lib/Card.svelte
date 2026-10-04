@@ -1,9 +1,10 @@
 <script lang="ts" module>
 	/**
-	 * The card last turned to its back. Going one tap deeper (the timeline) leaves the Pass;
-	 * coming back, that card is still turned over.
+	 * The card whose back was left for the timeline (one tap deeper leaves the Pass): coming
+	 * back, it is still turned over. Used once, by the next card drawn, whichever it is; a card
+	 * that leaves any other way (answered, snoozed, swiped) comes back front up.
 	 */
-	let turned: string | null = null;
+	let returnTo: string | null = null;
 </script>
 
 <script lang="ts">
@@ -47,14 +48,14 @@
 	/** What the More pill and the back's header say. */
 	const labels = $derived(backLabels(item));
 	/** Showing its back. A card is one item for its life (the Pass keys it), so read it once. */
-	let flipped = $state(untrack(() => turned !== null && turned === item.id));
+	let flipped = $state(untrack(() => returnTo !== null && returnTo === item.id));
+	returnTo = null;
 	let turning = false;
 	let card = $state<HTMLElement | null>(null);
 
 	async function turn(toBack: boolean) {
 		if (turning) return;
 		turning = true;
-		turned = toBack ? item.id : null;
 		await turnOver(card, toBack, async () => {
 			flipped = toBack;
 			await tick();
@@ -132,7 +133,7 @@
 </script>
 
 <article
-	class="absolute inset-0 flex flex-col overflow-hidden rounded-[28px] bg-card shadow-[0_24px_60px_rgba(0,0,0,.6)]"
+	class="absolute inset-0 flex touch-pan-y flex-col overflow-hidden rounded-[28px] bg-card shadow-[0_24px_60px_rgba(0,0,0,.6)]"
 	data-testid="card"
 	data-id={item.id}
 	data-kind={item.kind}
@@ -168,10 +169,16 @@
 
 	<!-- Text scrolls in here and fades out above the answers, which never move. -->
 	<div
-		class="scroll min-h-0 grow overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
+		class="scroll min-h-0 grow touch-pan-y overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
 	>
 		{#if flipped}
-			<CardBack {item} thread={threadView} {liveOrigin} onenlarge={(shot) => (enlarged = shot)} />
+			<CardBack
+				{item}
+				thread={threadView}
+				{liveOrigin}
+				onenlarge={(shot) => (enlarged = shot)}
+				ondeeper={() => (returnTo = item.id)}
+			/>
 		{:else}
 		{#if item.context && !compact && !view}
 			<!--
@@ -216,6 +223,12 @@
 				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
 				{@html renderMarkdown(item.proposal.summary)}
 			</div>
+		{/if}
+		{#if item.error}
+			<!-- What went wrong, in the agent's (or Tenzo's) own words. -->
+			<pre
+				class="rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft"
+				data-testid="error-message">{item.error.message}</pre>
 		{/if}
 
 		{#if view}
@@ -296,7 +309,7 @@
 		{/if}
 	</div>
 
-	<div class="scroll flex max-h-[58%] shrink-0 flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
+	<div class="scroll flex max-h-[58%] shrink-0 touch-pan-y flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
 		{#if failure}
 			<p class="px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">
 				{failure.message}

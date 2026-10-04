@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { setTimeout as sleep } from "node:timers/promises";
-import type { Command, CommandResult, QueueItem } from "@tenzo/contracts";
+import { type Command, type CommandResult, isSnoozed, type QueueItem } from "@tenzo/contracts";
 import { answerFromWords, isAsk } from "./answers.ts";
 import { VERSION } from "./app.ts";
 import { parseArgs } from "./args.ts";
@@ -39,8 +39,9 @@ Usage:
   tenzo items                            what the threads need from you, oldest first
   tenzo answer <item> <choice|text…>     answer an item: an option's number or label, or your
                                          own words; allow/deny for a permission request;
-                                         build, or what to change, for a proposal
-  tenzo --version                        print the version
+                                         build, or what to change, for a proposal;
+                                         retry, archive, or what to tell it, for an error
+  tenzo --version                       print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
 (--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
@@ -54,6 +55,7 @@ Environment:
                        (e.g. its Tailscale Serve name)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
   TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
+  TENZO_SNOOZE_MS      how long a swipe snoozes an item, for trying it out (default 15 minutes)
 `;
 
 const config = () => readConfig(process.env);
@@ -252,12 +254,18 @@ async function items(args: string[]): Promise<void> {
     for (const item of snapshot.items) console.log(JSON.stringify(item));
     return;
   }
-  if (snapshot.items.length === 0) {
-    console.log("Nothing needs you.");
-    return;
-  }
   const titles = new Map(snapshot.threads.map((t) => [t.id, t.title]));
-  console.log(snapshot.items.map((i) => formatItem(i, titles.get(i.threadId))).join("\n\n"));
+  const now = snapshot.items.filter((i) => !isSnoozed(i));
+  const later = snapshot.items.filter((i) => isSnoozed(i));
+  console.log(
+    now.length === 0
+      ? "Nothing needs you."
+      : now.map((i) => formatItem(i, titles.get(i.threadId))).join("\n\n"),
+  );
+  if (later.length > 0) {
+    console.log(`\nSnoozed (back by themselves; \`tenzo answer\` still takes them):\n`);
+    console.log(later.map((i) => formatItem(i, titles.get(i.threadId))).join("\n\n"));
+  }
 }
 
 async function answer(args: string[]): Promise<void> {
@@ -276,8 +284,14 @@ async function answer(args: string[]): Promise<void> {
     itemId: item.id,
     answer: answerFromWords(item, words),
   });
+  if (result.delivery === "archived") {
+    say(`Archived ${result.thread.id}. Worktree removed; branch ${result.thread.branch} kept.`);
+    return;
+  }
   say(
-    result.delivery === "message"
+    item.kind === "error"
+      ? `Answered ${item.id}; it goes to the agent as its next turn.`
+      : result.delivery === "message"
       ? `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`
       : result.item.status === "open"
         ? `Sent your answer to ${item.id}, but the agent hasn't confirmed it; \`tenzo items\` shows whether it is still open.`
@@ -298,22 +312,34 @@ async function follow(
 ): Promise<void> {
   let seq = after;
   let asked = false;
+  let failed = false;
   for (;;) {
     const { thread, events } = await call({ type: "thread.events", threadId, after: seq });
     for (const { seq: s, event, environmentId } of events) {
       console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
       seq = s;
       if (isAsk(event) || event.type === "report.submitted") asked = true;
-      if (event.type === "turn.completed" && event.payload.state === "failed") process.exitCode = 1;
+      // A failed turn, a crash or an agent that can't start: each leaves an error card.
+      if (
+        (event.type === "turn.completed" && event.payload.state === "failed") ||
+        (event.type === "session.exited" && event.payload.exitKind === "error") ||
+        event.type === "runtime.error"
+      ) {
+        failed = true;
+        process.exitCode = 1;
+      }
     }
     if (!forever) {
-      if (asked && thread.activity === "needs-you") {
+      // Asked something, or stopped on an error: show what it needs (an error card waits as an
+      // item too). Anything else needing you is shown once it has stopped working.
+      if (thread.activity === "needs-you" && (asked || failed || !thread.working)) {
         const { items: open } = await call({ type: "snapshot" });
-        const mine: QueueItem[] = open.filter((i) => i.threadId === thread.id);
+        const mine: QueueItem[] = open.filter((i) => i.threadId === thread.id && !isSnoozed(i));
         const say = json ? console.error : console.log;
         say(`\n${thread.title} needs you:\n`);
         say(mine.map((i) => formatItem(i)).join("\n\n"));
-        say(`\nAnswer with \`tenzo answer ${mine[0]?.id ?? "<item>"} <choice|text>\`.`);
+        const how = mine[0]?.kind === "error" ? "retry|archive|text" : "choice|text";
+        say(`\nAnswer with \`tenzo answer ${mine[0]?.id ?? "<item>"} <${how}>\`.`);
         return;
       }
       if (!thread.working) return;

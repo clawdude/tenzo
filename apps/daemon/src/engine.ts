@@ -21,6 +21,8 @@ import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.t
 import {
   checkAnswer,
   deliveryPrompt,
+  errorPrompts,
+  RESTART_PROMPT,
   isAsk,
   matchReply,
   type StandingReply,
@@ -41,13 +43,14 @@ import {
   nextPrompt,
   openItems,
   queuedCount,
+  queuedPrompts,
   removePrompt,
   threadEvents,
   threadsWithPrompts,
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { type ItemChange, itemIdFor } from "./fold.ts";
-import { resolveBase } from "./git.ts";
+import { branchExists, resolveBase } from "./git.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
 import { loadThreadPrompts, type ThreadPrompts } from "./prompts.ts";
@@ -92,8 +95,13 @@ export interface EngineOptions {
    * Default: the files in `apps/daemon/prompts` (prompts.ts).
    */
   prompts?: () => ThreadPrompts;
+  /** How long a swipe snoozes an item. Default 15 minutes; `TENZO_SNOOZE_MS` for trying it. */
+  snoozeMs?: number;
   log?: (message: string) => void;
 }
+
+/** How long a swipe snoozes an item (PRODUCT.md §5). */
+export const SNOOZE_MS = 15 * 60_000;
 
 /** `thread.create`'s arguments (see the command in contracts). */
 export interface NewThread {
@@ -154,6 +162,9 @@ export class Engine {
   readonly #stopNaming = new AbortController();
   /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
   readonly #creating = new Map<string, { request: string; thread: Promise<ThreadView> }>();
+  readonly #snoozeMs: number;
+  /** A timer per snoozed item, to wake it when its time comes. */
+  readonly #wakers = new Map<QueueItemId, NodeJS.Timeout>();
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -164,6 +175,7 @@ export class Engine {
     this.#titler = options.titler;
     this.#defaultModel = options.defaultModel;
     this.#prompts = options.prompts ?? (() => loadThreadPrompts());
+    this.#snoozeMs = options.snoozeMs ?? SNOOZE_MS;
     this.#log = options.log ?? ((message) => console.error(`tenzo: ${message}`));
   }
 
@@ -173,18 +185,34 @@ export class Engine {
    * are sent, resuming their threads.
    */
   start(): void {
+    // Sessions the last daemon didn't get to stop (it was killed). A turn they were in the
+    // middle of picks up again with RESTART_PROMPT, once: if that resumed turn was itself cut
+    // short like this, it gets an error card instead, so a daemon dying in a loop can't keep
+    // resuming it.
     for (const threadId of liveThreads(this.store)) {
       const thread = getThread(this.store, threadId);
+      const again = loadFoldState(this.store, threadId).runtime.prompt === RESTART_PROMPT;
+      const resume = this.#cutShort(threadId) && !again;
+      if (resume) this.#resumeLater(threadId);
       this.#append(
         draft(thread, {
           type: "session.exited",
-          payload: { exitKind: "error", reason: "Tenzo stopped while this session was running." },
+          payload: resume
+            ? { exitKind: "graceful", reason: "Tenzo stopped while this session was running." }
+            : {
+                exitKind: "error",
+                reason: again
+                  ? "Tenzo stopped twice while this turn ran, so it wasn't resumed again."
+                  : "Tenzo stopped while this session was running.",
+              },
         }),
       );
     }
     for (const threadId of threadsWithPrompts(this.store)) this.#pump(threadId);
     // Names the last daemon stopped thinking of before it had one.
     for (const { id, prompt } of threadsToName(this.store)) this.#name(id, prompt);
+    // Snoozed items wake on time across restarts; any whose time came meanwhile wake now.
+    for (const item of openItems(this.store)) if (item.snoozedUntil) this.#scheduleWake(item);
   }
 
   subscribe(listener: (change: EngineChange) => void): () => void {
@@ -262,17 +290,21 @@ export class Engine {
     // Refuse before stopping anything: a refused archive must not kill the running turn.
     await checkArchivable(this.store, thread, options);
     this.#archiving.add(thread.id); // no new session while its worktree goes away
+    let cutShort = false;
     try {
       const live = this.#live.get(thread.id);
       if (live) {
+        cutShort = this.#cutShort(thread.id);
         await live.session.stop();
         await live.reading;
       }
       await archiveThread(this.store, thread.id, options);
       this.#archiving.delete(thread.id);
     } catch (error) {
-      // Not archived (uncommitted work, say): the thread carries on with what it has queued.
+      // Not archived (uncommitted work, say): the thread carries on with what it has queued,
+      // and a turn the stop cut short picks up again.
       this.#archiving.delete(thread.id);
+      if (cutShort) this.#resumeLater(thread.id);
       this.#pump(thread.id);
       throw error;
     }
@@ -367,6 +399,11 @@ export class Engine {
     if (thread.status === "active" && existsSync(thread.worktreePath)) {
       return diffStat(thread.worktreePath, base, options);
     }
+    if (!(await branchExists(project.path, thread.branch))) {
+      throw new TenzoError(
+        `${thread.branch} is gone (deleted since the thread was archived), so there is no change to show.`,
+      );
+    }
     return diffStat(project.path, base, { ...options, head: `refs/heads/${thread.branch}` });
   }
 
@@ -388,15 +425,16 @@ export class Engine {
   async answer(
     itemId: string,
     answer: ItemAnswer,
-  ): Promise<{ item: QueueItem; delivery: "live" | "message" | "none"; thread: ThreadView }> {
-    const item = getItem(this.store, itemId);
-    if (!item) throw new TenzoError(`No item "${itemId}". \`tenzo items\` lists the open ones.`);
-    if (item.status !== "open") {
-      throw new TenzoError(`${item.id} is no longer open (${item.resolution?.kind ?? "resolved"}).`);
-    }
+  ): Promise<{
+    item: QueueItem;
+    delivery: "live" | "message" | "none" | "archived";
+    thread: ThreadView;
+  }> {
+    const item = this.#openItem(itemId);
     if (this.#answering.has(item.id)) throw new TenzoError(`${item.id} is being answered already.`);
     const thread = this.#active(item.threadId);
     const checked = checkAnswer(item, answer);
+    if (checked.kind === "error") return this.#answerError(item, thread, checked);
     if (checked.kind === "finished") {
       // Nothing waits on a report: the daemon records your answer, and that is all (#21 adds the
       // review actions that go back to the agent).
@@ -456,12 +494,50 @@ export class Engine {
     };
   }
 
+  /**
+   * Swipes an item away for a while (`snoozeMs`, 15 minutes): it leaves the Pass on every device
+   * and comes back by itself when its time comes, even across a restart. Snoozing it again
+   * starts the time again.
+   */
+  snooze(itemId: string): { item: QueueItem; thread: ThreadView } {
+    const item = this.#openItem(itemId);
+    const thread = this.#active(item.threadId);
+    const until = new Date(Date.now() + this.#snoozeMs).toISOString();
+    this.#append(
+      draft(thread, { type: "item.snoozed", requestId: item.requestId, payload: { until } }),
+    );
+    const snoozed = getItem(this.store, item.id) ?? item;
+    this.#scheduleWake(snoozed);
+    return { item: snoozed, thread: this.view(thread.id) };
+  }
+
+  /** Brings a snoozed item back now (Undo). One that is awake already is left as it is. */
+  unsnooze(itemId: string): { item: QueueItem; thread: ThreadView } {
+    const item = this.#openItem(itemId);
+    const thread = this.#active(item.threadId);
+    this.#clearWake(item.id);
+    if (item.snoozedUntil !== null) {
+      this.#append(
+        draft(thread, {
+          type: "item.unsnoozed",
+          requestId: item.requestId,
+          payload: { reason: "undo" },
+        }),
+      );
+    }
+    return { item: getItem(this.store, item.id) ?? item, thread: this.view(thread.id) };
+  }
+
   /** Stops every session, leaving open items for the next daemon. */
   async close(): Promise<void> {
     this.#closing = true;
+    for (const timer of this.#wakers.values()) clearTimeout(timer);
+    this.#wakers.clear();
     this.#stopNaming.abort();
     await Promise.all([
       ...[...this.#live.values()].map(async (live) => {
+        // Tenzo's own restart is no error of the agent's: the turn picks up when it is back.
+        if (this.#cutShort(live.threadId)) this.#resumeLater(live.threadId);
         await live.session.stop();
         await live.reading;
       }),
@@ -470,6 +546,101 @@ export class Engine {
   }
 
   // Internals.
+
+  /** Stopping the thread's session now would cut a turn short that asked you nothing. */
+  #cutShort(threadId: ThreadId): boolean {
+    const { runtime, open } = loadFoldState(this.store, threadId);
+    // A prompt we sent counts even before its turn.started has come back.
+    const sent = Boolean(this.#live.get(threadId)?.turnId);
+    return (runtime.turnId !== null || sent) && open.length === 0;
+  }
+
+  /** The thread's next session starts by picking up the turn a stop of ours cut short. */
+  #resumeLater(threadId: ThreadId): void {
+    enqueuePrompt(this.store, threadId, RESTART_PROMPT, null, { first: true });
+  }
+
+  #openItem(itemId: string): QueueItem {
+    const item = getItem(this.store, itemId);
+    if (!item) throw new TenzoError(`No item "${itemId}". \`tenzo items\` lists the open ones.`);
+    if (item.status !== "open") {
+      throw new TenzoError(`${item.id} is no longer open (${item.resolution?.kind ?? "resolved"}).`);
+    }
+    return item;
+  }
+
+  /**
+   * An error item's answer. Retry and Tell it something resolve it and queue the prompts (what
+   * failed, or your words) as the thread's next turn, which resumes the agent if it has stopped.
+   * Archive archives the thread, which dismisses the item; a refusal (uncommitted work) leaves
+   * both as they were.
+   */
+  async #answerError(
+    item: QueueItem,
+    thread: Thread,
+    answer: Extract<ItemAnswer, { kind: "error" }>,
+  ): Promise<{ item: QueueItem; delivery: "message" | "archived"; thread: ThreadView }> {
+    if (answer.action === "archive") {
+      const archived = await this.archive(thread.id);
+      return { item: getItem(this.store, item.id) ?? item, delivery: "archived", thread: archived };
+    }
+    const resolution = draft(thread, {
+      ...(item.turnId ? { turnId: item.turnId } : {}),
+      ...resolutionOf(item, answer),
+    } as Draft);
+    const appended = transaction(this.store, () => {
+      const result = appendEvent(this.store, resolution);
+      for (const prompt of errorPrompts(item, answer)) enqueuePrompt(this.store, thread.id, prompt);
+      return result;
+    });
+    this.#publish(resolution, appended);
+    this.#pump(thread.id);
+    return {
+      item: getItem(this.store, item.id) ?? item,
+      delivery: "message",
+      thread: this.#changed(thread.id),
+    };
+  }
+
+  /** Wakes the item when its snooze is up (now, if it is already). */
+  #scheduleWake(item: QueueItem): void {
+    this.#clearWake(item.id);
+    if (item.snoozedUntil === null || this.#closing) return;
+    const delay = Math.max(0, Date.parse(item.snoozedUntil) - Date.now());
+    // setTimeout holds at most ~24.8 days; a longer wait just checks again then.
+    const timer = setTimeout(() => this.#wake(item.id), Math.min(delay, 2 ** 31 - 1));
+    timer.unref?.();
+    this.#wakers.set(item.id, timer);
+  }
+
+  #clearWake(itemId: QueueItemId): void {
+    clearTimeout(this.#wakers.get(itemId));
+    this.#wakers.delete(itemId);
+  }
+
+  #wake(itemId: QueueItemId): void {
+    this.#wakers.delete(itemId);
+    if (this.#closing) return;
+    try {
+      const item = getItem(this.store, itemId);
+      if (item?.status !== "open" || item.snoozedUntil === null) return;
+      if (Date.parse(item.snoozedUntil) > Date.now()) {
+        this.#scheduleWake(item); // snoozed again meanwhile, or a timer cut short
+        return;
+      }
+      const thread = getThread(this.store, item.threadId);
+      if (thread.status !== "active") return;
+      this.#append(
+        draft(thread, {
+          type: "item.unsnoozed",
+          requestId: item.requestId,
+          payload: { reason: "returned" },
+        }),
+      );
+    } catch (error) {
+      this.#log(`couldn't wake ${itemId}: ${String(error)}`);
+    }
+  }
 
   /**
    * Asks the titler for the thread's name, in the background: the thread has started already.
@@ -514,13 +685,15 @@ export class Engine {
         live = this.#startSession(thread);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        const waiting = queuedCount(this.store, threadId);
+        const unsent = queuedPrompts(this.store, threadId);
         clearPrompts(this.store, threadId);
+        // The error item it opens keeps the prompts, so Retry can send them again.
         this.#append(
           draft(thread, {
             type: "runtime.error",
             payload: {
-              message: `Couldn't start ${thread.agent ?? "claude"}: ${message} (${waiting} prompt(s) not sent)`,
+              message: `Couldn't start ${thread.agent ?? "claude"}: ${message} (${unsent.length} prompt(s) not sent)`,
+              unsent,
             },
           }),
         );
@@ -654,6 +827,7 @@ export class Engine {
       }
       announced = true;
       if (change.type === "resolved") {
+        this.#clearWake(change.item.id);
         const waiter = this.#answering.get(change.item.id);
         this.#answering.delete(change.item.id);
         waiter?.(change.item);
@@ -720,8 +894,11 @@ export class Engine {
   #viewOf(thread: Thread): ThreadView {
     const runtime = loadFoldState(this.store, thread.id).runtime;
     const queued = queuedCount(this.store, thread.id);
-    // An item being answered for you doesn't make the thread need you, not even for a moment.
-    const open = openItems(this.store, thread.id).filter((i) => !this.#quiet.has(i.id)).length;
+    // An item being answered for you doesn't make the thread need you, not even for a moment;
+    // nor does a snoozed one, until it wakes (`#wake` clears `snoozedUntil` when it does).
+    const items = openItems(this.store, thread.id).filter((i) => !this.#quiet.has(i.id));
+    const open = items.length;
+    const awake = items.filter((i) => i.snoozedUntil === null).length;
     const live = this.#live.get(thread.id);
     const working =
       thread.status === "active" &&
@@ -742,7 +919,7 @@ export class Engine {
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
       phase: runtime.phase,
-      activity: open > 0 ? "needs-you" : working ? "working" : "idle",
+      activity: awake > 0 ? "needs-you" : open > 0 ? "snoozed" : working ? "working" : "idle",
       working,
       queued,
       openItems: open,
@@ -791,6 +968,8 @@ function respond(
       return session.respondToRequest(requestId, answer.decision, answer.message);
     case "proposal":
       return session.respondToProposal(requestId, answer.decision, answer.note);
+    case "error":
+      throw new Error("An error item has no agent waiting on it."); // #answerError's, never here
   }
 }
 
@@ -818,6 +997,15 @@ function resolutionOf(item: QueueItem, answer: AgentAnswer): Draft {
         type: "proposal.resolved",
         requestId,
         payload: { decision: answer.decision, ...(answer.note ? { note: answer.note } : {}) },
+      };
+    case "error":
+      return {
+        type: "error.resolved",
+        requestId,
+        payload: {
+          action: answer.action === "tell" ? "tell" : "retry",
+          ...(answer.text ? { text: answer.text } : {}),
+        },
       };
   }
 }

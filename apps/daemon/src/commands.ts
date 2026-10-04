@@ -84,5 +84,9 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
       return engine.snapshot();
     case "item.answer":
       return engine.answer(command.itemId, command.answer);
+    case "item.snooze":
+      return engine.snooze(command.itemId);
+    case "item.unsnooze":
+      return engine.unsnooze(command.itemId);
   }
 }

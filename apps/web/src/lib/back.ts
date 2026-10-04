@@ -7,7 +7,7 @@ import type { DiffFile, QueueItem, StoredEvent, ThreadDiff } from '@tenzo/client
  * - question, permission, proposal: *why it's asking*: what the agent said leading up to the
  *   ask, the options with what each means, and the files it has changed and read so far;
  * - finished: *the change*: files with +/− (`thread.diff`), how to try it, screenshots;
- * - error: what went wrong, in full.
+ * - error: what it was doing when it stopped (the front says what went wrong, in full).
  */
 
 export type BackKind = 'why' | 'change' | 'error';
@@ -22,8 +22,7 @@ export interface BackLabels {
 }
 
 export function backLabels(item: Pick<QueueItem, 'kind'>): BackLabels {
-	// Kinds a newer daemon may send (an error card) fall through to what fits them best.
-	switch (item.kind as string) {
+	switch (item.kind) {
 		case 'question':
 			return { kind: 'why', pill: "Why it's asking", title: "Why it's asking" };
 		case 'permission':
@@ -33,9 +32,7 @@ export function backLabels(item: Pick<QueueItem, 'kind'>): BackLabels {
 		case 'finished':
 			return { kind: 'change', pill: 'See the change', title: 'The change' };
 		case 'error':
-			return { kind: 'error', pill: 'What went wrong', title: 'What went wrong' };
-		default:
-			return { kind: 'why', pill: 'What happened', title: 'What happened' };
+			return { kind: 'error', pill: 'What it was doing', title: 'What it was doing' };
 	}
 }
 
@@ -171,6 +168,8 @@ export function relativeTo(path: string, root: string): string {
 // The change.
 
 export interface ChangeLine {
+	/** Unique in the list: its status and path. */
+	key: string;
 	path: string;
 	/** "+41", or "" when not counted (binary). */
 	added: string;
@@ -196,16 +195,27 @@ export function changeView(diff: ThreadDiff): ChangeView {
 		.filter(Boolean)
 		.join(' ');
 	const left = diff.fileCount - diff.files.length;
+	const headline = diff.merged
+		? `Landed in ${diff.base}`
+		: diff.fileCount === 0
+			? 'No changes yet'
+			: `${files}${diff.truncated && left === 0 ? '+' : ''}${counts ? ` · ${counts}` : ''}`;
 	return {
-		headline: diff.fileCount === 0 ? 'No changes yet' : counts ? `${files} · ${counts}` : files,
+		headline,
 		lines: diff.files.map(lineOf),
-		more: left > 0 ? `And ${left} more ${left === 1 ? 'file' : 'files'}` : ''
+		more:
+			left > 0
+				? `And ${left} more ${left === 1 ? 'file' : 'files'}`
+				: diff.truncated
+					? 'And more new files, too many to list'
+					: ''
 	};
 }
 
 function lineOf(file: DiffFile): ChangeLine {
 	const binary = file.added === null;
 	return {
+		key: `${file.status}:${file.path}`,
 		path: file.path,
 		added: binary ? '' : file.added ? `+${file.added}` : '',
 		deleted: file.deleted ? `${MINUS}${file.deleted}` : '',
@@ -224,10 +234,62 @@ function lineOf(file: DiffFile): ChangeLine {
 	};
 }
 
-// What went wrong.
+// What it was doing when it stopped.
 
-/** An error card's message (#23 sends them); its ask when it carries none. */
-export function errorOf(item: QueueItem): string {
-	const error = (item as QueueItem & { error?: { message?: unknown } }).error;
-	return typeof error?.message === 'string' && error.message.trim() ? error.message : item.ask;
+export interface ErrorBack {
+	/** What Retry sends again: the failed turn's prompt, or the prompts never sent. */
+	retry: string[];
+	/** The last thing the agent said before it stopped, if anything. */
+	lastSaid: string;
+	/** Its last few tool calls: what it was in the middle of. */
+	lastSteps: { summary: string; failed: boolean }[];
+	files: Files;
+}
+
+/** How many of its last tool calls an error's back lists. */
+export const LAST_STEPS = 5;
+
+/**
+ * An error card's back. The front already says what went wrong, in full, so the back says what
+ * the agent was doing: what Retry would send, what it said and did last, the files it touched.
+ */
+export function errorBack(
+	item: QueueItem,
+	events: readonly StoredEvent[],
+	worktreePath: string
+): ErrorBack {
+	let lastSaid = '';
+	const steps: { summary: string; failed: boolean }[] = [];
+	const started = new Map<string, number>();
+	for (const { event } of events) {
+		if (event.type !== 'item.started' && event.type !== 'item.completed') continue;
+		const p = event.payload;
+		if (p.parentItemId) continue;
+		if (p.itemType === 'assistant_message' && event.type === 'item.completed' && p.text?.trim()) {
+			lastSaid = p.text.trim();
+		} else if (p.itemType === 'tool') {
+			const at = started.get(event.itemId);
+			const step = at === undefined ? undefined : steps[at];
+			if (step) {
+				step.failed = p.status === 'failed';
+			} else {
+				started.set(event.itemId, steps.length);
+				const summary = relativeIn(p.text || p.toolName || 'A tool', worktreePath);
+				steps.push({ summary, failed: p.status === 'failed' });
+			}
+		}
+	}
+	const cut = lastSaid.length - REASONING_LIMIT;
+	return {
+		retry: item.error?.prompts ?? [],
+		lastSaid: cut <= 0 ? lastSaid : `…${lastSaid.slice(cut).trimStart()}`,
+		lastSteps: steps.slice(-LAST_STEPS),
+		files: filesOf(events, worktreePath)
+	};
+}
+
+/** `text` with paths inside the worktree written relative to it. */
+function relativeIn(text: string, root: string): string {
+	const base = root.replace(/\/+$/, '');
+	return base ? text.replaceAll(`${base}/`, '') : text;
 }
