@@ -103,6 +103,12 @@ export const ERROR_OPTIONS: readonly UserInputOption[] = [
 
 const AGENT_NAMES: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
 
+/** A config card's buttons: read it again, or put the card away. Nothing to tell the agent. */
+export const CONFIG_OPTIONS: readonly UserInputOption[] = [
+  { label: "Retry", value: "retry", description: "", recommended: true },
+  { label: "Dismiss", value: "dismiss", description: "", recommended: false },
+];
+
 /** A permission request's buttons: allowing is the suggestion, as in Claude Code's own prompt. */
 export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
   { label: "Allow", value: "allow", description: "", recommended: true },
@@ -280,7 +286,11 @@ export function foldEvent(
       return resolve(
         state,
         event,
-        action === "retry" ? { kind: "retried" } : { kind: "told", text: text ?? "" },
+        action === "retry"
+          ? { kind: "retried" }
+          : action === "dismiss"
+            ? { kind: "acknowledged" }
+            : { kind: "told", text: text ?? "" },
       );
     }
     case "item.snoozed":
@@ -745,7 +755,7 @@ function withError(
     ...(turnId ? { turnId } : {}),
     context: runtime.context,
     ask: errorHeadline(error.cause, event.agent),
-    options: [...ERROR_OPTIONS],
+    options: [...(error.cause === "config" ? CONFIG_OPTIONS : ERROR_OPTIONS)],
     suggested: "retry",
     questions: [],
     error: { ...error, message: cutMessage(error.message.trim()) },
@@ -760,6 +770,11 @@ function withError(
     state: { ...state, open: [...state.open, item], known: new Set([...state.known, requestId]) },
     changes: [...changes, { type: "opened", item }],
   };
+}
+
+/** An error's message as its item keeps it: trimmed, cut to size. */
+export function errorMessage(text: string): string {
+  return cutMessage(text.trim());
 }
 
 function cutMessage(text: string, limit = ERROR_LIMIT): string {

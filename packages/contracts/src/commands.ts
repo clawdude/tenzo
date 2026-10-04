@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { ThinkingLevel } from "./config.ts";
+import { ModelName, ThinkingLevel } from "./config.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
 import { EnvironmentId } from "./ids.ts";
@@ -22,7 +22,7 @@ export const Command = z.discriminatedUnion("type", [
     title: z.string().min(1).optional(),
     prompt: z.string().min(1).optional(),
     /** A model the agent understands, e.g. "haiku". Kept for the thread's later turns. */
-    model: z.string().min(1).optional(),
+    model: ModelName.optional(),
     /**
      * A key the client makes up for this one request (a random id per draft) and sends again
      * when it retries. The daemon answers a key it has seen with the thread it made then, so a
@@ -73,13 +73,14 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("thread.unwatch"), threadId: z.string().min(1) }),
   /**
    * The thread's own model and thinking level, over its project's config, in every phase from
-   * now on. `model` null and no `thinking`: back to the project's config. A running session
-   * switches at once where Claude can; the rest applies from its next session.
+   * now on. `model` null: the project's config decides the model again. `thinking` null: the
+   * same for thinking; left out: the thread's thinking stays as it is. A running session
+   * switches at once where Claude can, else at its next turn (engine.ts).
    */
   z.object({
     type: z.literal("thread.setModel"),
     threadId: z.string().min(1),
-    model: z.string().trim().min(1).nullable(),
+    model: ModelName.nullable(),
     thinking: ThinkingLevel.nullable().optional(),
   }),
   /** What the thread changed against the project's default branch: files with +/−. */

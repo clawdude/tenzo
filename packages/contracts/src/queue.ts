@@ -78,6 +78,8 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("told"), text: z.string() }),
   /** An error that cleared by itself: the thread's next turn started. */
   z.object({ kind: z.literal("recovered") }),
+  /** A config card you dismissed: it stays away until what is wrong changes. */
+  z.object({ kind: z.literal("acknowledged") }),
 ]);
 export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
 
@@ -202,8 +204,12 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("error"),
-    /** Send what failed again; send `text` instead (tell it something); archive the thread. */
-    action: z.enum(["retry", "tell", "archive"]),
+    /**
+     * Send what failed again; send `text` instead (tell it something); archive the thread. A
+     * config card takes only retry (read the config again) and dismiss (it stays away until the
+     * problem changes).
+     */
+    action: z.enum(["retry", "tell", "archive", "dismiss"]),
     text: z.string().optional(),
   }),
 ]);

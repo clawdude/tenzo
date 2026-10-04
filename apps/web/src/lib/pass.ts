@@ -146,6 +146,21 @@ export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[]
 			}
 		];
 	}
+	if (item.kind === 'error' && item.error?.cause === 'config') {
+		// The project's config is wrong: fix the file, then Retry reads it again. Nothing to tell
+		// the agent, and nothing to archive for it.
+		return [
+			{
+				key: 'error',
+				ask: item.ask,
+				suggested: { label: 'Retry', value: 'retry', description: '' },
+				recommended: false,
+				others: [{ label: 'Dismiss', value: 'dismiss', description: '' }],
+				row: [],
+				placeholder: null
+			}
+		];
+	}
 	if (item.kind === 'error') {
 		return [
 			{
@@ -230,7 +245,8 @@ export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 		const pick = picks[0];
 		if (!pick) throw new Error('An error needs a decision.');
 		if ('text' in pick) return { kind: 'error', action: 'tell', text: pick.text.trim() };
-		return { kind: 'error', action: pick.choice.value === 'archive' ? 'archive' : 'retry' };
+		const value = pick.choice.value;
+		return { kind: 'error', action: value === 'archive' || value === 'dismiss' ? value : 'retry' };
 	}
 	if (item.kind === 'proposal') {
 		const pick = picks[0];

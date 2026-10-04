@@ -424,7 +424,7 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     requestId: RequestId,
     type: z.literal("error.resolved"),
     payload: z.object({
-      action: z.enum(["retry", "tell"]),
+      action: z.enum(["retry", "tell", "dismiss"]),
       text: z.string().optional(),
     }),
   }),

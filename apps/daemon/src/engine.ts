@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   type AgentKind,
   type ItemAnswer,
+  ModelName,
   type LiveInfo,
   MAX_EVENT_PAGE,
   Preview,
@@ -17,7 +18,7 @@ import {
   type ThreadView,
   type TurnId,
 } from "@tenzo/contracts";
-import type { AgentAdapter, AgentSession } from "./agent/agent.ts";
+import type { AgentAdapter, AgentSession, SessionSettings } from "./agent/agent.ts";
 import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
 import {
   checkAnswer,
@@ -34,6 +35,7 @@ import {
   type Appended,
   appendEvent,
   clearPrompts,
+  configCards,
   countEventsAfter,
   enqueuePrompt,
   eventPage,
@@ -52,7 +54,7 @@ import {
   threadsWithPrompts,
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
-import { type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
+import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
 import { branchExists, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
@@ -186,6 +188,10 @@ interface Live {
   reading: Promise<void>;
   /** The agent said its work landed (`landed`): the thread archives when the turn ends. */
   landed: boolean;
+  /** Ending at a turn boundary to start again with new settings: nothing more is sent to it. */
+  restarting: boolean;
+  /** Switching model or thinking in place: the next turn waits for it. */
+  switching: boolean;
 }
 
 export class Engine {
@@ -203,6 +209,8 @@ export class Engine {
   readonly #titler: Titler | undefined;
   readonly #defaultModel: string | undefined;
   readonly #prompts: () => ThreadPrompts;
+  /** Threads whose session the daemon ended to change its settings: the next one says so. */
+  readonly #restarted = new Set<ThreadId>();
   /** Projects' `.tenzo/` configs, read again whenever their files change (project-config.ts). */
   readonly #configs = new ProjectConfigs();
   /** Names being thought of; `close` stops and waits for them. */
@@ -361,24 +369,27 @@ export class Engine {
 
   /**
    * Sets the thread's own model and thinking level, over its project's config, for every phase
-   * from now on (null: the config decides again). A running session switches at once where the
-   * agent can; the rest applies from its next session.
+   * from now on (null: the config decides again; `thinking` left out: it stays as it is). A
+   * running session switches at once where the agent can, else at its next turn (`#pump`).
    */
   setModel(
     threadId: string,
     choice: { model: string | null; thinking?: ThinkingLevel | null | undefined },
   ): ThreadView {
     const thread = this.#active(threadId);
-    const model = choice.model?.trim() || null;
-    setThreadModel(this.store, thread.id, { model, thinking: choice.thinking ?? null });
-    const live = this.#live.get(thread.id);
-    if (live) {
-      const updated = getThread(this.store, thread.id);
-      const read = this.#configs.read(projectOf(this.store, updated).path);
-      live.session.setModels(this.#modelsOf(updated, read)).catch((error: unknown) => {
-        this.#log(`couldn't switch the model of ${thread.id}: ${String(error)}`);
-      });
+    let model: string | null = null;
+    if (choice.model !== null) {
+      const parsed = ModelName.safeParse(choice.model);
+      if (!parsed.success) {
+        throw new TenzoError(`"${choice.model.slice(0, 100)}" isn't a model name: ${parsed.error.issues[0]?.message ?? "invalid"}.`);
+      }
+      model = parsed.data;
     }
+    const thinking = choice.thinking === undefined ? thread.thinking : choice.thinking;
+    setThreadModel(this.store, thread.id, { model, thinking });
+    const live = this.#live.get(thread.id);
+    // What can't switch live waits for the turn boundary, where #pump starts it again.
+    if (live && !live.restarting) live.session.reconfigure(this.#settingsOf(getThread(this.store, thread.id)));
     return this.#changed(thread.id);
   }
 
@@ -683,7 +694,7 @@ export class Engine {
       const archived = await this.archive(thread.id);
       return { item: getItem(this.store, item.id) ?? item, delivery: "archived", thread: archived };
     }
-    if (item.error?.cause === "config" && answer.action === "retry") return this.#retryConfig(item, thread);
+    if (item.error?.cause === "config") return this.#answerConfig(item, thread, answer.action);
     const resolution = draft(thread, {
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...resolutionOf(item, answer),
@@ -703,27 +714,27 @@ export class Engine {
   }
 
   /**
-   * Retry on a config card: read the project's config again. Still wrong, a new card says what
-   * is wrong now; fixed, a running session takes its models at once.
+   * A config card's answer. Retry reads the project's config again: still wrong, a new card says
+   * what is wrong now; fixed, a running session takes its settings. Dismiss puts it away until
+   * what is wrong changes. Nothing goes to the agent either way.
    */
-  #retryConfig(
+  #answerConfig(
     item: QueueItem,
     thread: Thread,
+    action: Extract<ItemAnswer, { kind: "error" }>["action"],
   ): { item: QueueItem; delivery: "none"; thread: ThreadView } {
     this.#append(
       draft(thread, {
         ...(item.turnId ? { turnId: item.turnId } : {}),
         type: "error.resolved",
         requestId: item.requestId,
-        payload: { action: "retry" },
+        payload: { action: action === "dismiss" ? "dismiss" : "retry" },
       }),
     );
-    const read = this.#checkConfig(thread);
-    const live = this.#live.get(thread.id);
-    if (live && read.problem === null) {
-      live.session.setModels(this.#modelsOf(thread, read)).catch((error: unknown) => {
-        this.#log(`couldn't switch the model of ${thread.id}: ${String(error)}`);
-      });
+    if (action !== "dismiss") {
+      const settings = this.#settingsOf(thread);
+      const live = this.#live.get(thread.id);
+      if (live && !live.restarting) live.session.reconfigure(settings);
     }
     return {
       item: getItem(this.store, item.id) ?? item,
@@ -733,33 +744,50 @@ export class Engine {
   }
 
   /**
-   * Reads the thread's project config, and puts what is wrong with it on the Pass: an error card
-   * when it is invalid (the thread runs on the defaults meanwhile), unless one says so already;
-   * the card goes once it is fine again. Never throws: a config can't stop a thread.
+   * Reads the thread's project config and keeps the project's one config card in step with it:
+   * a card when it is invalid (its threads run on the defaults meanwhile), unless an open one
+   * says so already or you dismissed this very problem; the card goes once the config is fine.
+   * One card per project, on whichever thread found the problem first. Never throws: a config
+   * can't stop a thread.
    */
   #checkConfig(thread: Thread): ConfigRead {
+    const project = projectOf(this.store, thread);
     let read: ConfigRead;
     try {
-      read = this.#configs.read(projectOf(this.store, thread).path);
+      read = this.#configs.read(project.path);
     } catch (error) {
       read = { config: null, problem: `Couldn't read the project's config: ${String(error)}` };
     }
-    const card = openItems(this.store, thread.id).find(
-      (i) => i.kind === "error" && i.error?.cause === "config",
-    );
-    const problem = read.problem;
-    const changed = problem === null ? card !== undefined : card?.error?.message !== problem.trim();
-    if (changed) {
-      try {
-        this.#append(draft(thread, { type: "config.checked", payload: { problem } }));
-      } catch (error) {
-        this.#log(`couldn't record ${thread.id}'s config check: ${String(error)}`);
+    try {
+      const { open, last } = configCards(this.store, project.id);
+      const problem = read.problem;
+      const record = (owner: ThreadId, problem: string | null) =>
+        this.#append(draft(getThread(this.store, owner), { type: "config.checked", payload: { problem } }));
+      if (problem === null) {
+        for (const card of open) record(card.threadId, null);
+      } else {
+        const message = errorMessage(problem);
+        const shown = open.some((card) => card.error?.message === message);
+        const dismissed =
+          open.length === 0 &&
+          last?.resolution?.kind === "acknowledged" &&
+          last.error?.message === message;
+        if (!shown && !dismissed) record(open[0]?.threadId ?? thread.id, problem);
       }
+    } catch (error) {
+      this.#log(`couldn't record ${project.name}'s config check: ${String(error)}`);
     }
     return read;
   }
 
-  /** What the thread's sessions run with: its own choice, its project's config, the default. */
+  /** What the thread's sessions run with, its project's config read now (`#checkConfig`). */
+  #settingsOf(thread: Thread): SessionSettings {
+    const read = this.#checkConfig(thread);
+    const permissionMode = permissionsOf(read);
+    return { models: this.#modelsOf(thread, read), ...(permissionMode ? { permissionMode } : {}) };
+  }
+
+  /** The models: the thread's own choice, then its project's config, then the default. */
   #modelsOf(thread: Thread, read: ConfigRead) {
     return resolveModels({ thread, config: read.config, defaultModel: this.#defaultModel });
   }
@@ -1027,13 +1055,38 @@ export class Engine {
     const thread = getThread(this.store, threadId);
     if (thread.status !== "active") return;
     let live = this.#live.get(threadId);
-    if (live?.turnId) return;
+    if (live?.turnId || live?.restarting || live?.switching) return;
     const prompt = nextPrompt(this.store, threadId);
     if (!prompt) return;
 
+    // The thread's settings may have changed since its session started (its own model, its
+    // project's config, Build it): the session takes them before the turn goes, or, when it
+    // can't live, ends here at the turn boundary and the next one starts with them (#read pumps
+    // again).
+    if (live) {
+      const change = live.session.reconfigure(this.#settingsOf(thread));
+      if (change === "restart") {
+        live.restarting = true;
+        this.#restarted.add(threadId);
+        void live.session.stop().catch((error: unknown) => {
+          this.#log(`couldn't restart ${threadId}'s session: ${String(error)}`);
+        });
+        return;
+      }
+      if (change !== "unchanged") {
+        const switching = live;
+        switching.switching = true;
+        void change.finally(() => {
+          switching.switching = false;
+          this.#pump(threadId);
+        });
+        return;
+      }
+    }
+
     if (!live) {
       try {
-        live = this.#startSession(thread);
+        live = this.#startSession(thread, this.#restarted.delete(threadId));
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const unsent = queuedPrompts(this.store, threadId);
@@ -1066,18 +1119,18 @@ export class Engine {
     live.standing = prompt.reply ? [prompt.reply] : [];
   }
 
-  #startSession(thread: Thread): Live {
+  #startSession(thread: Thread, restarted = false): Live {
     const agent = thread.agent ?? "claude";
     const adapter = this.#adapters[agent];
     if (!adapter) throw new TenzoError(`No ${agent} adapter.`);
-    // Read as each session starts, so an edit applies without a restart.
-    const config = this.#checkConfig(thread);
-    const permissionMode = permissionsOf(config);
+    // Read as each session starts (and before each turn, #pump), so an edit applies at once.
+    const { models, permissionMode } = this.#settingsOf(thread);
     const session = adapter.start({
       threadId: thread.id,
       cwd: thread.worktreePath,
       ...(thread.sessionId ? { resumeSessionId: thread.sessionId } : {}),
-      models: this.#modelsOf(thread, config),
+      ...(restarted ? { restarted } : {}),
+      models,
       ...(permissionMode ? { permissionMode } : {}),
       ...(() => {
         const runtime = loadFoldState(this.store, thread.id).runtime;
@@ -1107,6 +1160,8 @@ export class Engine {
       standing: [],
       reading: Promise.resolve(),
       landed: false,
+      restarting: false,
+      switching: false,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);

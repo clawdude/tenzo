@@ -155,6 +155,19 @@ describe('error cards', () => {
 		});
 	});
 
+	it("a config card offers Retry and Dismiss only: nothing to tell the agent", () => {
+		const base = failure('c', '.tenzo/config.json: landing: Invalid option');
+		const e = { ...base, error: { cause: 'config' as const, message: base.error!.message, prompts: [] } };
+		const [step] = stepsOf(e);
+		expect(step).toMatchObject({
+			suggested: { label: 'Retry', value: 'retry' },
+			others: [{ label: 'Dismiss', value: 'dismiss' }],
+			placeholder: null
+		});
+		expect(answerOf(e, [{ choice: step!.suggested! }])).toEqual({ kind: 'error', action: 'retry' });
+		expect(answerOf(e, [{ choice: step!.others[0]! }])).toEqual({ kind: 'error', action: 'dismiss' });
+	});
+
 	it('puts finished work behind every card where an agent is stuck, however old it is', () => {
 		const done = finished('f', {});
 		const older = { ...finished('g'), createdAt: '2026-10-01T00:00:00.000Z' };

@@ -95,6 +95,7 @@
 					autocapitalize="off"
 					autocomplete="off"
 					spellcheck="false"
+					maxlength="100"
 					class="min-h-11 w-full rounded-[12px] bg-fill px-3.5 text-[16px] text-ink outline-none placeholder:text-faint"
 					data-testid="model-input"
 				/>

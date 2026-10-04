@@ -27,6 +27,11 @@ export interface ClaudeTranslation {
    * passes it on the first time and whenever the model changed (Build it, `thread.setModel`).
    */
   readonly configured: Configured | null;
+  /**
+   * The adapter switched the model and reported it (`session.configured` with the name it
+   * asked for): the next init's report, with Claude's full id, is taken quietly.
+   */
+  readonly switched: boolean;
   /** The turn in progress, if any. */
   readonly turnId: TurnId | null;
   /** The open turn is one Claude started by itself, not one of our prompts. */
@@ -58,6 +63,7 @@ export function initialTranslation(options: { resumed: boolean }): ClaudeTransla
     resumed: options.resumed,
     sessionStarted: false,
     configured: null,
+    switched: false,
     turnId: null,
     synthetic: false,
     tools: new Map(),
@@ -130,6 +136,7 @@ function onInit(state: ClaudeTranslation, message: SDKSystemMessage): Translated
   }
   let configured = state.configured;
   if (configured === null || configured.model !== message.model) {
+    const reported = configured !== null && state.switched;
     configured = {
       model: message.model,
       cwd: message.cwd,
@@ -141,9 +148,9 @@ function onInit(state: ClaudeTranslation, message: SDKSystemMessage): Translated
       plugins: message.plugins.map((p) => p.name),
       agents: message.agents ?? [],
     };
-    events.push(withTurn(state, { type: "session.configured", payload: configured }));
+    if (!reported) events.push(withTurn(state, { type: "session.configured", payload: configured }));
   }
-  return { state: { ...state, sessionStarted: true, configured }, events };
+  return { state: { ...state, sessionStarted: true, configured, switched: false }, events };
 }
 
 function onAssistant(state: ClaudeTranslation, message: SDKAssistantMessage): Translated {

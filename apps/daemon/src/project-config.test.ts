@@ -1,8 +1,9 @@
-import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import {
   landingOf,
+  MAX_CONFIG_BYTES,
   mergeConfig,
   NO_CONFIG,
   parseProjectConfig,
@@ -11,7 +12,7 @@ import {
   readProjectConfig,
   resolveModels,
 } from "./project-config.ts";
-import { removeTempDirs, tempDir } from "./testing.ts";
+import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 
 afterAll(removeTempDirs);
 
@@ -72,7 +73,9 @@ describe("project config: parsing and merging", () => {
     [{ config: json({ modles: {} }) }, /^\.tenzo\/config\.json: .*modles/],
     [{ config: json({ agent: "codex" }) }, /^\.tenzo\/config\.json: agent: /],
     [{ config: json({ models: { agents: { thinking: "high" } } }) }, /models\.agents: .*thinking/],
-    [{ config: json({ models: { discuss: { model: "" } } }) }, /models\.discuss\.model: must name a model/],
+    [{ config: json({ models: { discuss: { model: "" } } }) }, /models\.discuss\.model: must be a model name/],
+    [{ config: json({ models: { build: { model: "--dangerously-skip-permissions x" } } }) }, /models\.build\.model: must be a model name/],
+    [{ config: json({ models: { agents: { model: "x".repeat(101) } } }) }, /models\.agents\.model: must be a model name/],
     [{ config: json({ permissions: "plan" }) }, /permissions: /],
     [{ config: json({ landing: "squash" }) }, /landing: /],
     [{ config: json([]) }, /^\.tenzo\/config\.json: /],
@@ -83,12 +86,30 @@ describe("project config: parsing and merging", () => {
     expect(read.problem).toMatch(problem);
   });
 
-  it("takes bypassPermissions only from your own local.json, never from the committed config", () => {
-    const committed = parseProjectConfig({ config: json({ permissions: "bypassPermissions" }) });
-    expect(committed.config).toBeNull();
-    expect(committed.problem).toMatch(/only taken from \.tenzo\/local\.json/);
-    const local = parseProjectConfig({ local: json({ permissions: "bypassPermissions" }) });
-    expect(permissionsOf(local)).toBe("bypassPermissions");
+  // Both files live in the repo: neither may grant what Claude Code won't let a repo grant.
+  describe.each(["config", "local"] as const)("permissions from %s.json", (file) => {
+    it.each(["default", "acceptEdits", "dontAsk"] as const)("takes %s", (mode) => {
+      expect(permissionsOf(parseProjectConfig({ [file]: json({ permissions: mode }) }))).toBe(mode);
+    });
+
+    it.each(["auto", "bypassPermissions"])("refuses %s, and says where it belongs", (mode) => {
+      const read = parseProjectConfig({ [file]: json({ permissions: mode }) });
+      expect(read.config).toBeNull();
+      expect(read.problem).toBe(
+        `.tenzo/${file}.json: permissions: "${mode}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json: threads use that already.`,
+      );
+    });
+
+    it.each(["plan", "yolo", 1])("refuses %j", (mode) => {
+      const read = parseProjectConfig({ [file]: json({ permissions: mode }) });
+      expect(read.config).toBeNull();
+      expect(read.problem).toMatch(new RegExp(`^\\.tenzo/${file}\\.json: permissions: `));
+    });
+  });
+
+  it("a local.json can't lift a refused mode over config.json, or the other way", () => {
+    expect(parseProjectConfig({ config: json({ permissions: "auto" }), local: json({ permissions: "default" }) }).config).toBeNull();
+    expect(parseProjectConfig({ config: json({ permissions: "default" }), local: json({ permissions: "auto" }) }).config).toBeNull();
   });
 });
 
@@ -148,10 +169,52 @@ describe("project config: reading the main checkout", () => {
     expect(readProjectConfig(root).config).toEqual({ landing: "merge" });
   });
 
-  it("says when a file can't be read", () => {
+  it("reads only a plain file: not a folder, nor a link anywhere, even one inside the repo", () => {
     const root = repo();
     mkdirSync(join(root, ".tenzo/config.json"));
-    expect(readProjectConfig(root).problem).toMatch(/^Can't read \.tenzo\/config\.json/);
+    expect(readProjectConfig(root).problem).toBe(
+      ".tenzo/config.json must be a plain file in the repo, not a link, folder or device; Tenzo didn't read it.",
+    );
+    rmSync(join(root, ".tenzo/config.json"), { recursive: true });
+    const outside = join(tempDir("outside"), "secret.json");
+    writeFileSync(outside, "root:x:0:0 not json");
+    for (const target of ["/dev/zero", "/dev/urandom", outside, join(root, "README.md")]) {
+      rmSync(join(root, ".tenzo/local.json"), { force: true });
+      symlinkSync(target, join(root, ".tenzo/local.json"));
+      const read = readProjectConfig(root);
+      expect(read.problem).toBe(
+        ".tenzo/local.json must be a plain file in the repo, not a link, folder or device; Tenzo didn't read it.",
+      );
+      expect(read.problem).not.toContain("root:x");
+    }
+  });
+
+  it("doesn't follow a .tenzo folder that is a link", () => {
+    const root = tempDir("repo");
+    const elsewhere = tempDir("elsewhere");
+    writeFileSync(join(elsewhere, "config.json"), json({ landing: "pr" }));
+    symlinkSync(elsewhere, join(root, ".tenzo"));
+    expect(readProjectConfig(root).problem).toBe(".tenzo must be a folder in the repo, not a link or a file; Tenzo didn't read it.");
+  });
+
+  it("refuses a file too large for a config without reading it", () => {
+    const root = repo();
+    writeFileSync(join(root, ".tenzo/config.json"), `{"landing":"pr"}${" ".repeat(MAX_CONFIG_BYTES)}`);
+    expect(readProjectConfig(root).problem).toBe(
+      ".tenzo/config.json is larger than 64 KB, too large for a config; Tenzo didn't read it.",
+    );
+    writeFileSync(join(root, ".tenzo/config.json"), `{"landing":"pr"}${" ".repeat(MAX_CONFIG_BYTES - 16)}`);
+    expect(readProjectConfig(root).config).toEqual({ landing: "pr" });
+  });
+
+  it("treats a committed local.json as the repo's: it can't grant bypass either", () => {
+    const root = initRepo("tracked");
+    mkdirSync(join(root, ".tenzo"));
+    writeFileSync(join(root, ".tenzo/local.json"), json({ permissions: "bypassPermissions" }));
+    sh(root, "add", ".tenzo/local.json");
+    sh(root, "commit", "-q", "-m", "local");
+    expect(sh(root, "ls-files", ".tenzo/local.json")).toBe(".tenzo/local.json");
+    expect(readProjectConfig(root).problem).toMatch(/never taken from a file in the repo/);
   });
 
   it("reads again only when a file changed", () => {

@@ -10,9 +10,14 @@ import type {
   UserInputQuestion,
 } from "@tenzo/contracts";
 import { TenzoError } from "../errors.ts";
-import type { SessionModels } from "../project-config.ts";
 import { randomId } from "../ids.ts";
-import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
+import type {
+  AgentAdapter,
+  AgentSession,
+  EventDraft,
+  SessionSettings,
+  StartSessionInput,
+} from "./agent.ts";
 import { boundedInput, summarizeTool } from "./claude-events.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
@@ -267,11 +272,17 @@ export class FakeSession implements AgentSession {
     });
   }
 
-  /** What `setModels` was told, in order. */
-  readonly modelChanges: SessionModels[] = [];
+  /** What `reconfigure` was told, in order. */
+  readonly reconfigured: SessionSettings[] = [];
+  /**
+   * What `reconfigure` answers: `restart` for a change the agent can't take live, a promise for
+   * a switch under way (the test settles it).
+   */
+  reconfigureResult: "unchanged" | "restart" | Promise<void> = "unchanged";
 
-  async setModels(models: SessionModels): Promise<void> {
-    this.modelChanges.push(models);
+  reconfigure(settings: SessionSettings): "unchanged" | "restart" | Promise<void> {
+    this.reconfigured.push(settings);
+    return this.reconfigureResult;
   }
 
   async interrupt(): Promise<void> {

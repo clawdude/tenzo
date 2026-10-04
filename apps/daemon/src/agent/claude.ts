@@ -4,6 +4,7 @@ import { homedir } from "node:os";
 import { delimiter, join } from "node:path";
 import {
   type CanUseTool,
+  type EffortLevel,
   type Options,
   type PermissionResult,
   query as sdkQuery,
@@ -13,6 +14,7 @@ import type {
   PermissionModeName,
   RequestId,
   RuntimeEvent,
+  ThinkingLevel,
   ThreadPhase,
   TurnId,
   UserInputAnswers,
@@ -86,11 +88,17 @@ import {
  * Models come from the project's config and the thread (project-config.ts), per phase:
  * - the model as `model` (`--model`), thinking `off` as `thinking: disabled`, and `low`,
  *   `medium`, `high` as `effort` (Claude's effort levels, as `/effort` sets them);
- * - Build it switches a running session to the build model in place (`setModel`, and
- *   `applyFlagSettings({effortLevel})` / `setMaxThinkingTokens` for thinking): the build goes on
- *   in the same turn, so it can't wait for a new session. Only to a model or level that is set:
- *   Claude can't be told "your own default" in place (that is Claude Code's built-in one, not
- *   the user's `model` setting), so an unset one applies from the thread's next session;
+ * - Build it switches a running session to the build model in place, since the build goes on
+ *   in the same turn, and so does a change before a turn (`reconfigure`, engine.ts), as far as
+ *   Claude takes it live (`planSwitch`): `setModel` to a named model, or to the user's own
+ *   default (`ownModel`: `ANTHROPIC_MODEL`, else their settings' `model`, which Claude reports
+ *   through its `get_settings` request; `setModel()` alone would be Claude Code's built-in one),
+ *   `applyFlagSettings({effortLevel})` to another effort level or the user's own,
+ *   `setMaxThinkingTokens(0)` to turn thinking off (deprecated, but the only live switch Claude
+ *   honours: a flag-settings `alwaysThinkingEnabled` doesn't reach a running session). What it
+ *   can't take live (thinking back on after off, another permission mode or subagent model) the
+ *   daemon gets by ending the session at the turn boundary and resuming it with the new
+ *   options;
  * - the subagents' model as `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code uses for a subagent
  *   only when neither the subagent's own definition nor the call names a model.
  */
@@ -258,6 +266,8 @@ function startSession(
     // The approval carries the build prompt, and the build model takes over at once: the build
     // goes on in this same turn. The permission mode stays as it was.
     phase = "building";
+    // What can't switch in place now (an unset build model, say) the next turn's
+    // `reconfigure` gets by starting the session again.
     if (models) await switchTo(models.build);
     return { text: proposalReply({ decision }, input.prompts) };
   };
@@ -514,34 +524,48 @@ function startSession(
     }
   })();
 
-  /** The model and thinking the session runs with now; unset: what it started with. */
+  /**
+   * The model and thinking the session runs with now; unset: the user's own default. A session
+   * the daemon started again to change its settings (`input.restarted`) with no model of
+   * Tenzo's may be running the model Claude restored with the conversation instead (it does,
+   * when the user's settings name none): taken as another model, so the first `reconfigure`
+   * switches it to the user's own default.
+   */
   let running: ModelChoice = choiceFor(input.models, input.phase);
+  if (input.restarted && input.resumeSessionId && !running.model) running = { ...running, model: RESTORED };
   let models = input.models;
   /**
-   * Switches the running session to `next`'s model and thinking level, those of them that are
-   * set and differ (see above). A model switch is reported as `session.configured`, since
-   * Claude reports its configuration again only at its next turn.
+   * Switches the running session to `next`'s model and thinking, as far as Claude can take it
+   * live (`planSwitch`); never fails (a refusal is reported as `runtime.error`). A switch to a
+   * named model is reported as `session.configured` at once, since Claude reports its
+   * configuration again only at its next turn (which then says nothing new); a switch to the
+   * user's own default, by that next turn's report.
    */
   const switchTo = async (next: ModelChoice): Promise<void> => {
+    const plan = planSwitch(running, next);
+    // Taken as done as soon as asked, so a second switch meanwhile plans from here.
+    running = {
+      ...(plan.model ? { model: plan.model } : plan.ownModel || !running.model ? {} : { model: running.model }),
+      ...(plan.thinking
+        ? { thinking: plan.thinking }
+        : plan.ownThinking || !running.thinking
+          ? {}
+          : { thinking: running.thinking }),
+    };
     try {
-      if (next.model && next.model !== running.model) {
-        await run.setModel(next.model);
-        running = { ...running, model: next.model };
-        if (state.configured) {
-          const configured: Configured = { ...state.configured, model: next.model };
-          state = { ...state, configured };
+      const model = plan.model ?? (plan.ownModel ? await ownModel() : undefined);
+      if (plan.model || plan.ownModel) {
+        await run.setModel(model);
+        // Claude Code's built-in default has no name here: the next turn's report says it.
+        if (model && state.configured) {
+          const configured: Configured = { ...state.configured, model };
+          state = { ...state, configured, switched: true };
           emit({ type: "session.configured", ...inTurn(), payload: configured });
         }
       }
-      if (next.thinking && next.thinking !== running.thinking) {
-        if (next.thinking === "off") {
-          await run.setMaxThinkingTokens(0);
-        } else {
-          if (running.thinking === "off") await run.setMaxThinkingTokens(null);
-          await run.applyFlagSettings({ effortLevel: next.thinking });
-        }
-        running = { ...running, thinking: next.thinking };
-      }
+      if (plan.thinking === "off") await run.setMaxThinkingTokens(0);
+      else if (plan.thinking) await run.applyFlagSettings({ effortLevel: plan.thinking });
+      else if (plan.ownThinking) await run.applyFlagSettings({ effortLevel: await ownEffort() });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       emit({
@@ -550,6 +574,33 @@ function startSession(
         payload: { message: `Couldn't switch to ${describeChoice(next)}: ${message}` },
       });
     }
+  };
+
+  /**
+   * The user's own default model, as Claude would pick it without `--model`: `ANTHROPIC_MODEL`,
+   * else the `model` of their settings. None: Claude Code's built-in one, which `setModel()`
+   * gives. (Neither `setModel()` alone, which skips both, nor a resumed session without
+   * `--model`, which keeps the conversation's last model when the settings name none, gets it.)
+   */
+  const ownModel = async (): Promise<string | undefined> => {
+    const env = options.env?.ANTHROPIC_MODEL?.trim();
+    if (env) return env;
+    const model = (await effectiveSettings())?.model;
+    return typeof model === "string" && model.trim() !== "" ? model : undefined;
+  };
+  /** The user's own effort level (`effortLevel` in their settings); null: the model's default. */
+  const ownEffort = async (): Promise<EffortLevel | null> => {
+    const level = (await effectiveSettings())?.effortLevel;
+    return typeof level === "string" && ["low", "medium", "high", "xhigh", "max"].includes(level)
+      ? (level as EffortLevel)
+      : null;
+  };
+  /** Claude's merged settings (its `get_settings` control request), if this SDK can ask. */
+  const effectiveSettings = async (): Promise<Record<string, unknown> | undefined> => {
+    const ask = (run as unknown as { getSettings?: () => Promise<{ effective?: Record<string, unknown> }> })
+      .getSettings;
+    if (typeof ask !== "function") return undefined;
+    return (await ask.call(run))?.effective;
   };
 
   const answer = (requestId: RequestId, outcome: Settled): void => {
@@ -596,10 +647,17 @@ function startSession(
     respondToProposal(requestId, decision, note) {
       answer(requestId, { kind: "proposal", decision, ...(note ? { note } : {}) });
     },
-    async setModels(next) {
-      models = next;
-      if (prompts.closed) return; // ended: the next session starts with them
-      await switchTo(choiceFor(next, phaseNow()));
+    reconfigure(settings) {
+      models = settings.models;
+      if (prompts.closed) return "unchanged"; // ended: the next session starts with them
+      // Fixed for the process's life: only a new session takes another.
+      if (settings.permissionMode !== input.permissionMode) return "restart";
+      if (settings.models.agents !== input.models?.agents) return "restart";
+      const next = choiceFor(settings.models, phaseNow());
+      const plan = planSwitch(running, next);
+      if (plan.restart) return "restart";
+      if (!plan.model && !plan.ownModel && !plan.thinking && !plan.ownThinking) return "unchanged";
+      return switchTo(next);
     },
     async interrupt() {
       cancelPending(false);
@@ -629,6 +687,38 @@ export function choiceFor(models: SessionModels | undefined, phase: ThreadPhase)
   return phase === "discussing" ? models.discuss : models.build;
 }
 
+/** A model the session may run that isn't Tenzo's choice: the one a resume restored. */
+const RESTORED = "\u0000restored";
+
+/** What switching a running session from `running` to `next` takes (see the adapter's notes). */
+export interface SwitchPlan {
+  /** `setModel` to this. */
+  model?: string;
+  /** Back to the user's own default model: `setModel` to it (`ownModel`). */
+  ownModel?: true;
+  /** `setMaxThinkingTokens(0)` for off, else `applyFlagSettings({effortLevel})`. */
+  thinking?: ThinkingLevel;
+  /** Back to the user's own thinking: their effort level from their settings. */
+  ownThinking?: true;
+  /** Something only a new session can change: thinking back on after it was off. */
+  restart: boolean;
+}
+
+export function planSwitch(running: ModelChoice, next: ModelChoice): SwitchPlan {
+  const plan: SwitchPlan = { restart: false };
+  if (next.model !== running.model) {
+    if (next.model) plan.model = next.model;
+    else plan.ownModel = true;
+  }
+  if (next.thinking !== running.thinking) {
+    // Thinking that was turned off (`--thinking disabled`) doesn't come back on live.
+    if (running.thinking === "off") plan.restart = true;
+    else if (next.thinking) plan.thinking = next.thinking;
+    else plan.ownThinking = true;
+  }
+  return plan;
+}
+
 /** A model choice as the SDK's options: `model`, and thinking as `thinking` or `effort`. */
 export function modelOptions(choice: ModelChoice): Pick<Options, "model" | "thinking" | "effort"> {
   return {
@@ -642,17 +732,11 @@ export function modelOptions(choice: ModelChoice): Pick<Options, "model" | "thin
 }
 
 /**
- * The project's permission mode as the SDK's options, or nothing. `bypassPermissions` needs the
- * SDK's explicit opt-in; the config takes it only from the user's own local.json.
+ * The project's permission mode as the SDK's option, or nothing. Only modes a repo may set
+ * (`PermissionModeName`): never one that needs the SDK's dangerous opt-in.
  */
-export function permissionOptions(
-  mode: PermissionModeName | undefined,
-): Pick<Options, "permissionMode" | "allowDangerouslySkipPermissions"> {
-  if (!mode) return {};
-  return {
-    permissionMode: mode,
-    ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
-  };
+export function permissionOptions(mode: PermissionModeName | undefined): Pick<Options, "permissionMode"> {
+  return mode ? { permissionMode: mode } : {};
 }
 
 function describeChoice(choice: ModelChoice): string {

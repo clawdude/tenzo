@@ -124,7 +124,7 @@ pnpm tenzo thread log <thread-id> [--follow]                 # the thread's even
 
 ### Project config: `.tenzo/config.json`
 
-A project can say how its threads run in `.tenzo/config.json` (commit it) and `.tenzo/local.json` (yours, gitignore it), both optional, in the repo's main checkout. Tenzo only reads them, as each thread's session starts, so an edit applies to the next session without a restart; `local.json` overrides `config.json` key by key. Anything missing is Claude's own default, from your Claude settings.
+A project can say how its threads run in `.tenzo/config.json` (commit it) and `.tenzo/local.json` (yours, gitignore it), both optional, in the repo's main checkout. Tenzo only reads them, before each turn of each thread, so an edit applies from the next turn without a restart; `local.json` overrides `config.json` key by key. Anything missing is Claude's own default, from your Claude settings. Both files live in the repo, so Tenzo treats both as the repo's, never as yours: each must be a plain file inside the repo (not a link) of at most 64 KB, and neither may grant what Claude Code wouldn't let the repo's own settings grant.
 
 ```json
 {
@@ -142,12 +142,16 @@ A project can say how its threads run in `.tenzo/config.json` (commit it) and `.
 | Key | | How Claude gets it |
 |---|---|---|
 | `models.discuss` | while the thread discusses, until *Build it* | `model` (`--model`); `thinking` `off` as thinking disabled, `low`/`medium`/`high` as Claude's effort level (`--effort`, what `/effort` sets) |
-| `models.build` | from *Build it* on: building, review, landing | the same; *Build it* switches the running session in place (`setModel`, effort and thinking set live), since the build goes on in that same turn. Only to what is set: Claude can't be told "your own default" mid-session, so an unset build model or level applies from the thread's next session |
+| `models.build` | from *Build it* on: building, review, landing | the same; *Build it* switches the running session in place (`setModel`, `applyFlagSettings({effortLevel})`, `setMaxThinkingTokens(0)` for off), since the build goes on in that same turn. What Claude can't take live (back to your own default model or thinking, thinking back on) applies from the next turn |
 | `models.agents` | subagents (`model` only) | `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code uses only for a subagent whose own definition (frontmatter `model`) and call name no model: your subagents' own choices win |
-| `permissions` | the permission mode in every phase: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions` | `permissionMode`. Absent (the usual), Tenzo sets none and your `defaultMode` applies. `bypassPermissions` only from `local.json`, never from a committed file; `plan` isn't offered (nothing could be built) |
+| `permissions` | the permission mode in every phase: `default`, `acceptEdits` or `dontAsk` | `permissionMode`. Absent (the usual), Tenzo sets none and your `defaultMode` applies. `auto` and `bypassPermissions` are refused from both files (Claude Code refuses them from a repo's own settings too, and Tenzo hands the mode over as a trusted flag): set them as `defaultMode` in your own `~/.claude/settings.json`, which threads use already. `plan` isn't offered (nothing could be built) |
 | `landing` | the finished card's filled button: `merge` (default) or `pr` | the other one and *Done* stay in the row under it |
 
-Which model wins, field by field: the thread's own (its "⋯" on the phone, `thread.setModel`, or `thread start --model`), then the project's config, then `TENZO_DEFAULT_MODEL`, then Claude's own. A thread's own model applies in every phase and reaches a running session at once. With no config at all, threads run exactly as before: no model, thinking, effort, permission mode or subagent model is passed. An invalid file never stops a thread: it runs on the defaults, and an error card says which file and key is wrong (Retry reads it again; the card also goes by itself once a session starts with the file fixed). Each model change shows in the thread's events as `session.configured` (`pnpm tenzo thread log <id>`).
+Which model wins, field by field: the thread's own (its "⋯" on the phone, `thread.setModel`, or `thread start --model`), then the project's config, then `TENZO_DEFAULT_MODEL`, then Claude's own. A thread's own model applies in every phase. Model names are letters, digits and `. _ : @ / [ ] -`, at most 100. With no config at all, threads run exactly as before: no model, thinking, effort, permission mode or subagent model is passed.
+
+Before each turn the daemon works out what the thread should run with now (its own choice, its project's config, its phase). A running session takes what it can live: another named model, another effort level, thinking off. Anything else ends the session at that turn boundary, and the next one resumes Claude's conversation with the new options: back to your own default model or thinking, thinking back on, another permission mode or subagent model. Each switch shows once in the thread's events as `session.configured` (`pnpm tenzo thread log <id>`).
+
+An invalid file never stops a thread: its threads run on the defaults, and one error card per project says which file and key is wrong. *Retry* reads the file again, *Dismiss* puts the card away until something else is wrong, and the card goes by itself once a turn starts with the file fixed.
 
 ### Events and items
 

@@ -164,7 +164,10 @@ export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMes
  * prompt stream ends, like Claude does when its stdin closes; with `exitError`, it then fails the
  * way the SDK does when Claude exits with a non-zero code.
  */
-export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
+export function fakeQuery(
+  script: Script,
+  fake: { exitError?: Error; controlError?: Error; settings?: Record<string, unknown> } = {},
+) {
   const calls: Options[] = [];
   const permissionModes: string[] = [];
   const controls: Record<string, unknown>[] = [];
@@ -223,11 +226,13 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
         permissionModes.push(mode);
       },
       setModel: async (model?: string) => {
+        if (fake.controlError) throw fake.controlError;
         controls.push({ setModel: model });
       },
       setMaxThinkingTokens: async (tokens: number | null) => {
         controls.push({ setMaxThinkingTokens: tokens });
       },
+      getSettings: async () => ({ effective: fake.settings ?? {}, sources: [], applied: {} }),
       applyFlagSettings: async (settings: Record<string, unknown>) => {
         controls.push({ applyFlagSettings: settings });
       },

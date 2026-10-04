@@ -19,20 +19,31 @@ export const LandingRule = z.enum(["merge", "pr"]);
 export type LandingRule = z.infer<typeof LandingRule>;
 
 /**
- * Claude Code's permission modes a project may set for its threads. Not `plan`: it stops every
- * tool from running, so nothing could ever be built (discussing is held by Tenzo's discuss
- * prompt and `propose`, not by a mode).
+ * The permission modes a project's `.tenzo/` files may set for its threads: only what a file in
+ * the repo could already get through Claude Code's own project settings (`acceptEdits`), or
+ * less (`default`, `dontAsk`). Never `auto` or `bypassPermissions`: Claude Code itself refuses
+ * those from repo-controllable settings, and Tenzo hands the mode to Claude as a trusted flag, so
+ * taking them from the repo would get past that guard. They belong in your own
+ * `~/.claude/settings.json` (`defaultMode`), which threads honour already. Not `plan` either: it
+ * stops every tool, so nothing could be built.
  */
-export const PermissionModeName = z.enum([
-  "default",
-  "acceptEdits",
-  "auto",
-  "dontAsk",
-  "bypassPermissions",
-]);
+export const PermissionModeName = z.enum(["default", "acceptEdits", "dontAsk"]);
 export type PermissionModeName = z.infer<typeof PermissionModeName>;
 
-const ModelName = z.string().trim().min(1, "must name a model, e.g. \"sonnet\"");
+/** Modes a `.tenzo/` file may never set, and where they belong instead. */
+export const USER_ONLY_MODES = ["auto", "bypassPermissions"] as const;
+
+/**
+ * A model name as Claude takes it: an alias (`sonnet`), an id (`claude-sonnet-5-5`), with a
+ * context suffix (`opus[1m]`) or a provider's spelling (`us.anthropic.…:0`, `…@2025…`).
+ */
+export const ModelName = z
+  .string()
+  .trim()
+  .regex(
+    /^[A-Za-z0-9._:@/[\]-]{1,100}$/,
+    'must be a model name such as "sonnet" (letters, digits and . _ : @ / [ ] -, at most 100)',
+  );
 
 /** The model and thinking of one phase. */
 export const PhaseModel = z.strictObject({
