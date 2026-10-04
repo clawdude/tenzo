@@ -106,3 +106,39 @@ export function proposal(tag: string, summary = 'Add CONTRIBUTING.md with three 
 		proposal: { headline: 'Add CONTRIBUTING.md', summary }
 	});
 }
+
+export function finished(
+	tag: string,
+	overrides: Partial<NonNullable<QueueItem['finished']>> = {}
+): QueueItem {
+	return item(tag, {
+		kind: 'finished',
+		lane: 'review',
+		ask: 'Counter works',
+		options: [{ label: 'Done', value: 'done', description: '', recommended: true }],
+		suggested: 'done',
+		questions: [],
+		finished: {
+			headline: 'Counter works',
+			summary: 'Added a **counter** page.',
+			howToTest: 'Open it and tap `+`.',
+			checks: [
+				{ name: 'Tests', status: 'pass', detail: '3 passed' },
+				{ name: 'Lint', status: 'fail', detail: 'unused import' },
+				{ name: 'E2E', status: 'skipped' }
+			],
+			attachments: [
+				{
+					id: 'att_aaaaaaaaaaaaaaaaaaaa',
+					file: 'att_aaaaaaaaaaaaaaaaaaaa.png',
+					name: 'counter.png',
+					caption: 'The counter',
+					mediaType: 'image/png',
+					bytes: 100
+				}
+			],
+			live: { port: 5173, path: 'counter' },
+			...overrides
+		}
+	});
+}

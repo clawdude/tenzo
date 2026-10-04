@@ -1,4 +1,4 @@
-import { writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { QueueItem, StoredEvent, ThreadView, type UserInputQuestion } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -811,5 +811,106 @@ describe("Engine: archive", () => {
     expect(d.adapter.last.stopped).toBe(false);
     expect(d.engine.snapshot().items).toMatchObject([{ detached: false }]);
     expect(d.engine.view(thread.id).status).toBe("active");
+  });
+});
+
+describe("Engine: finished work", () => {
+  const shot = {
+    id: "att_aaaaaaaaaaaaaaaaaaaa",
+    file: "att_aaaaaaaaaaaaaaaaaaaa.png",
+    name: "counter.png",
+    mediaType: "image/png",
+    bytes: 12,
+  } as const;
+
+  /** A thread whose agent, on the prompt, attaches, exposes and reports, then ends its turn. */
+  async function threadReporting(d: ReturnType<typeof daemon>) {
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        session.attach(shot);
+        session.expose(5173, "counter");
+        session.say("Built the counter.");
+        session.report("Added a counter page.", {
+          headline: "Counter works",
+          howToTest: "Open it and tap.",
+          checks: [{ name: "Tests", status: "pass", detail: "3 passed" }],
+        });
+        session.complete();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Add a counter" });
+    await settle();
+    return thread;
+  }
+
+  it("a report becomes a review-lane card, and the thread is in review", async () => {
+    const d = daemon();
+    const thread = await threadReporting(d);
+    expect(d.adapter.last.input.attachmentsDir).toBe(join(home, "attachments", thread.id));
+    const [item] = d.engine.snapshot().items;
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      lane: "review",
+      kind: "finished",
+      ask: "Counter works",
+      finished: {
+        summary: "Added a counter page.",
+        checks: [{ name: "Tests", status: "pass", detail: "3 passed" }],
+        attachments: [shot],
+        live: { port: 5173, path: "counter" },
+      },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({
+      phase: "review",
+      activity: "needs-you",
+      working: false,
+    });
+    expect(d.engine.livePort(thread.id)).toBe(5173);
+  });
+
+  it("Done resolves it without bothering the agent, even after the agent has stopped", async () => {
+    const d = daemon();
+    const thread = await threadReporting(d);
+    await d.adapter.last.stop();
+    await settle();
+    const [item] = d.engine.snapshot().items;
+    expect(item).toMatchObject({ kind: "finished", detached: false });
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "permission", decision: "allow" }),
+    ).rejects.toThrow(/is finished work; answer it with done/);
+    const sessions = d.adapter.sessions.length;
+    const result = await d.engine.answer(item?.id ?? "", { kind: "finished", decision: "done" });
+    expect(result).toMatchObject({
+      delivery: "none",
+      item: { status: "resolved", resolution: { kind: "done" } },
+      thread: { phase: "review", activity: "idle" },
+    });
+    expect(d.adapter.sessions.length).toBe(sessions); // nothing resumed, nothing sent
+    expect(d.engine.snapshot().items).toEqual([]);
+    expect(d.engine.events(thread.id).events.at(-1)?.event.type).toBe("report.resolved");
+  });
+
+  it("the card and the live port survive a restart", async () => {
+    const first = daemon();
+    const thread = await threadReporting(first);
+    kill(first);
+    const second = daemon();
+    expect(second.engine.snapshot().items).toMatchObject([
+      { kind: "finished", status: "open", detached: false, finished: { attachments: [shot] } },
+    ]);
+    expect(second.engine.livePort(thread.id)).toBe(5173);
+  });
+
+  it("only an active thread's exposed port is live; archiving removes its attachments", async () => {
+    const d = daemon();
+    const thread = await threadReporting(d);
+    const dir = join(home, "attachments", thread.id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, shot.file), "png");
+    expect(d.engine.livePort("thr_nope")).toBeNull();
+    expect(d.engine.livePort("../../etc")).toBeNull();
+    await d.engine.archive(thread.id);
+    expect(d.engine.livePort(thread.id)).toBeNull();
+    expect(existsSync(dir)).toBe(false);
   });
 });

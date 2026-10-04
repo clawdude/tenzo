@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
+  Attachment,
+  Check,
   RequestId,
   RuntimeEvent,
   ThreadId,
@@ -17,7 +19,8 @@ import { PROPOSE, tenzoToolName } from "./tenzo-mcp.ts";
 
 /**
  * Test-only: an agent adapter a test drives by hand. Each session reports what the test tells it
- * to (`say`, `ask`, `askPermission`, `propose`, `complete`, `crash`) and records the prompts and answers it
+ * to (`say`, `ask`, `askPermission`, `propose`, `report`, `attach`, `expose`, `complete`,
+ * `crash`) and records the prompts and answers it
  * gets, keeping the adapter contract: one turn at a time, answers only to open requests, no
  * `*.resolved` after the session ends.
  */
@@ -160,6 +163,36 @@ export class FakeSession implements AgentSession {
       },
     });
     return requestId;
+  }
+
+  /** Like Claude calling Tenzo's `report`: finished work, nothing waits on it. */
+  report(
+    summary: string,
+    extra: { headline?: string; howToTest?: string; checks?: Check[] } = {},
+  ): RequestId {
+    const requestId = randomId("req");
+    this.emit({
+      type: "report.submitted",
+      ...this.#inTurn(),
+      requestId,
+      payload: {
+        ...(extra.headline ? { headline: extra.headline } : {}),
+        summary,
+        howToTest: extra.howToTest ?? "",
+        checks: extra.checks ?? [],
+      },
+    });
+    return requestId;
+  }
+
+  /** Like Claude calling Tenzo's `attach`, once the copy is made. */
+  attach(attachment: Attachment): void {
+    this.emit({ type: "attachment.added", ...this.#inTurn(), payload: { attachment } });
+  }
+
+  /** Like Claude calling Tenzo's `expose`, once the port answered. */
+  expose(port: number, path = ""): void {
+    this.emit({ type: "preview.exposed", ...this.#inTurn(), payload: { port, path } });
   }
 
   complete(state: "completed" | "failed" | "interrupted" = "completed"): void {

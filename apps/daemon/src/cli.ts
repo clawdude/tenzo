@@ -303,7 +303,7 @@ async function follow(
     for (const { seq: s, event, environmentId } of events) {
       console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
       seq = s;
-      if (isAsk(event)) asked = true;
+      if (isAsk(event) || event.type === "report.submitted") asked = true;
       if (event.type === "turn.completed" && event.payload.state === "failed") process.exitCode = 1;
     }
     if (!forever) {

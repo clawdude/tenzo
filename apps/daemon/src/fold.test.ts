@@ -454,3 +454,124 @@ describe("trimContext", () => {
     expect(trimmed.endsWith("w99")).toBe(true);
   });
 });
+
+describe("foldEvent: finished work", () => {
+  const shot = (n: number) => ({
+    id: `att_${String(n).repeat(20)}`,
+    file: `att_${String(n).repeat(20)}.png`,
+    name: `shot${n}.png`,
+    mediaType: "image/png",
+    bytes: 100,
+  });
+  const attached = (n: number) =>
+    ev({ type: "attachment.added", turnId: TURN, payload: { attachment: shot(n) } });
+  const exposed = (port = 5173, path = "") =>
+    ev({ type: "preview.exposed", turnId: TURN, payload: { port, path } });
+  const reported = (requestId = REQ1, extra: Record<string, unknown> = {}) =>
+    ev({
+      type: "report.submitted",
+      turnId: TURN,
+      requestId,
+      payload: {
+        summary: "Added the counter.",
+        howToTest: "Tap it.",
+        checks: [{ name: "Tests", status: "pass" }],
+        ...extra,
+      },
+    });
+  const done = (requestId = REQ1) =>
+    ev({ type: "report.resolved", requestId, payload: { decision: "done" } });
+
+  it("report opens a review-lane item with what was attached and exposed; the thread is in review", () => {
+    const { items, state } = fold(
+      started(),
+      turnStarted(),
+      proposed(REQ3),
+      proposalAnswered("build", undefined, REQ3),
+      attached(1),
+      exposed(5173, "counter"),
+      attached(2),
+      said("All done."),
+      reported(REQ1, { headline: "Counter works" }),
+    );
+    const item = items.find((i) => i.kind === "finished");
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      lane: "review",
+      ask: "Counter works",
+      context: "All done.",
+      options: [{ label: "Done", value: "done", recommended: true }],
+      suggested: "done",
+      finished: {
+        headline: "Counter works",
+        summary: "Added the counter.",
+        howToTest: "Tap it.",
+        checks: [{ name: "Tests", status: "pass" }],
+        attachments: [shot(1), shot(2)],
+        live: { port: 5173, path: "counter" },
+      },
+    });
+    expect(state.runtime).toMatchObject({
+      phase: "review",
+      attachments: [],
+      preview: { port: 5173, path: "counter" },
+    });
+  });
+
+  it("without a headline, the ask says it's ready for review (the card shows the thread's title)", () => {
+    const { items } = fold(started(), turnStarted(), reported());
+    expect(items[0]?.ask).toBe("Ready for review");
+    expect(items[0]?.finished?.headline).toBeUndefined();
+    expect(items[0]?.finished?.live).toBeNull();
+  });
+
+  it("Done resolves it; a session exit never detaches it: nothing waits on a report", () => {
+    const exitedAfter = fold(started(), turnStarted(), reported(), completed(), exited("graceful"));
+    expect(exitedAfter.state.open).toMatchObject([{ kind: "finished", detached: false }]);
+    expect(exitedAfter.items).toHaveLength(1);
+    const { items, state } = fold(started(), turnStarted(), reported(), exited(), done());
+    expect(state.open).toEqual([]);
+    expect(items[0]?.resolution).toEqual({ kind: "done" });
+  });
+
+  it("a newer report replaces the one waiting: one finished card per thread", () => {
+    const { items, state } = fold(
+      started(),
+      turnStarted(),
+      attached(1),
+      reported(REQ1),
+      attached(2),
+      reported(REQ2),
+    );
+    expect(items.map((i) => [i.requestId, i.status, i.resolution?.kind ?? null])).toEqual([
+      [REQ1, "resolved", "superseded"],
+      [REQ2, "open", null],
+    ]);
+    expect(state.open.map((i) => i.requestId)).toEqual([REQ2]);
+    // Each report carries what was attached since the one before.
+    expect(items.map((i) => i.finished?.attachments.map((a) => a.name))).toEqual([
+      ["shot1.png"],
+      ["shot2.png"],
+    ]);
+  });
+
+  it("archiving dismisses it and forgets the live app", () => {
+    const { items, state } = fold(
+      started(),
+      exposed(),
+      reported(),
+      ev({ type: "thread.archived", payload: {} }),
+    );
+    expect(items[0]?.resolution).toEqual({ kind: "dismissed" });
+    expect(state.runtime.preview).toBeNull();
+  });
+
+  it("replays to the same state", () => {
+    const log = [started(), turnStarted(), attached(1), exposed(), reported(), done(), attached(2)];
+    const whole = fold(...log);
+    let state: FoldState = INITIAL_STATE;
+    for (const event of log) state = foldEvent(state, event, ENV).state;
+    expect(state).toEqual(whole.state);
+    expect(state.runtime.attachments.map((a) => a.name)).toEqual(["shot2.png"]);
+  });
+});

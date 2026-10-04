@@ -46,7 +46,7 @@ you type what you want
    → agent reads the repo
    → asks only if needed (one question at a time; options as buttons, one suggested)
    → "I'm going to do X" (proposal item; Build it / Change something)
-   → builds under Accept-edits permissions
+   → builds
    → review item: handoff note, screenshots, live URL, check badges
        Merge         → agent pushes, opens PR, waits for CI + required approvals + bot reviews,
                        fixes comments itself, merges when mergeable, archives thread
@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. A system prompt is fixed for a session's life, so *Build it* reaches a running session as `propose`'s result (the approval plus the build prompt) and lifts it to accept edits in place; every later session of the thread starts with the build prompt.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo never sets the permission mode, in any phase: your own `defaultMode` (user, project or local settings) applies, as in your terminal; discussing is held by the prompt and `propose`, not by a mode. A system prompt is fixed for a session's life, so *Build it* reaches a running session as `propose`'s result (the approval plus the build prompt); every later session of the thread starts with the build prompt.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
@@ -84,6 +84,8 @@ Every finished item carries, via Tenzo's injected MCP server:
 - `report(summary, how_to_test, checks)`: the handoff note and agent-reported check results (tests, typecheck, lint) shown as badges.
 - `attach(file)`: screenshots the agent took (Playwright/Chromium are on the machine).
 - `expose(port)`: a live URL to the dev server in that thread's worktree, reachable from your phone over the tailnet.
+
+`report` doesn't wait for you: it puts the card on the Pass, the thread enters review, and the agent ends its turn; your answer reaches it as a message. `attach` takes images from the thread's worktree only. `expose` makes the dev server reachable at `/live/<thread>/` on the daemon's own address (so one Tailscale Serve route covers it), and only that thread's port; the server must serve under that base.
 
 Later: video, and daemon-verified checks (the daemon runs the project's check commands itself).
 
@@ -120,12 +122,11 @@ MVP triggers: schedule and "run now." Event triggers (webhooks) later; they need
     "build":   { "model": "sonnet", "thinking": "medium" },
     "agents":  { "model": "haiku" }
   },
-  "permissions": "accept-edits",
   "landing": "pr"
 }
 ```
 
-Anything missing falls back to the agent's own defaults. Discuss model runs until *Build it*; build model after; agents model is passed to subagents. A thread can override model from its "⋯".
+Anything missing falls back to the agent's own defaults. A `permissions` key (M3) is an optional override of the permission mode; absent, your own `defaultMode` applies in every phase. Discuss model runs until *Build it*; build model after; agents model is passed to subagents. A thread can override model from its "⋯".
 
 ## 9. Remote access and auth
 
@@ -158,7 +159,7 @@ Out (for now): Automations screen, video capture, daemon-verified checks, multi-
 
 ## 12. Open
 
-- Tuning the thread prompts (`apps/daemon/prompts/`: discuss and build exist; landing comes with #21) and how "ask only if needed" is tuned.
+- Tuning the thread prompts (`apps/daemon/prompts/`: discuss and build exist; landing comes with #21), including how sparingly the agent asks.
 - Threads list, New thread, and PC layout in the pile language.
 - Automations screen (post-MVP).
 - License (MIT suggested).

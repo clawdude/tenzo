@@ -32,6 +32,7 @@ const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
   question: { name: "a question", answer: "an answer to each question" },
   permission: { name: "a permission request", answer: "allow or deny" },
   proposal: { name: "a proposal", answer: "build, or what to change" },
+  finished: { name: "finished work", answer: "done" },
 };
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
@@ -40,6 +41,7 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     const { name, answer: how } = KINDS[item.kind];
     throw new TenzoError(`${item.id} is ${name}; answer it with ${how}.`);
   }
+  if (answer.kind === "finished") return { kind: "finished", decision: answer.decision };
   if (answer.kind === "proposal") {
     if (answer.decision === "build") return { kind: "proposal", decision: "build" };
     const note = answer.note?.trim();
@@ -85,6 +87,8 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
         decision: answer.decision,
         ...(answer.note ? { note: answer.note } : {}),
       };
+    case "finished":
+      return null; // nothing waits on a report, so nothing is asked again
   }
 }
 
@@ -115,8 +119,11 @@ export function matchReply(replies: readonly StandingReply[], event: AskEvent): 
   return replies.findIndex((r) => r.kind === kind && r.fingerprint === fingerprint);
 }
 
-/** The message that tells a resumed agent what it asked before it stopped, and the answer. */
-export function deliveryPrompt(item: QueueItem, answer: ItemAnswer): string {
+/**
+ * The message that tells a resumed agent what it asked before it stopped, and the answer.
+ * Finished work is never delivered this way: the engine answers it itself.
+ */
+export function deliveryPrompt(item: QueueItem, answer: Exclude<ItemAnswer, { kind: "finished" }>): string {
   if (answer.kind === "proposal") {
     const head = `Your session ended while you were waiting for my answer to your proposal: ${item.proposal?.headline ?? item.ask}`;
     return answer.decision === "build"
@@ -156,6 +163,11 @@ function labelOf(q: UserInputQuestion, value: string): string {
  * the reason.
  */
 export function answerFromWords(item: QueueItem, words: readonly string[]): ItemAnswer {
+  if (item.kind === "finished") {
+    const text = words.join(" ").trim();
+    if (/^(1|y|yes|done|ok)$/i.test(text)) return { kind: "finished", decision: "done" };
+    throw new TenzoError("Answer finished work with done.");
+  }
   if (item.kind === "proposal") {
     const text = words.join(" ").trim();
     if (/^(1|y|yes|build|build it)$/i.test(text)) return { kind: "proposal", decision: "build" };

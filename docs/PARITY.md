@@ -28,7 +28,7 @@ Subagent        PASS    Agent → parity-agent (background) said lantern-42 in t
 Skill           PASS    listed, invoked by name, reply has compass-17
 Hook            PASS    PostToolUse ran 4× (Skill, Agent, ToolSearch, mcp__parity__ping), wrote .parity/hooks.jsonl
 MCP server      PASS    parity connected, mcp__parity__ping returned pong:b80fee2b:tenzo-parity-mcp
-Tenzo's server  PASS    tenzo connected beside parity, mcp__tenzo__propose listed
+Tenzo's server  PASS    tenzo connected beside parity, 4 tools listed
 Turn            PASS    completed on claude-haiku-4-5-20251001, allowed mcp__parity__ping when asked (1×), $0.0715, 12.8s
 
 PASS: the thread had everything the terminal has.
@@ -57,7 +57,7 @@ The prompt (`parityPrompt` in `tools/parity/src/checks.ts`) asks for the four st
 | Skill | `session.configured` lists `parity-skill`; a `Skill` tool item invoked it by name and completed; `compass-17` appears in Claude's reply; the main thread didn't peek | project skills are listed and invokable by name, and their content reaches the model |
 | Hook | `.parity/hooks.jsonl` exists in the thread's worktree with a `PostToolUse` entry for `mcp__parity__ping` | project hooks run, in the worktree, with the hook input on stdin, for MCP tools too |
 | MCP server | `session.configured` shows `parity` as `connected`; the `mcp__parity__ping` tool item completed with this run's pong | project MCP servers start and their tools work, through Tenzo's permission prompt |
-| Tenzo's server | `session.configured` shows both `tenzo` and `parity` as `connected` in the same session, and lists `mcp__tenzo__propose` | Tenzo's injected server is added to the user's MCP servers, never in place of them |
+| Tenzo's server | `session.configured` shows both `tenzo` and `parity` as `connected` in the same session, and lists its tools (`mcp__tenzo__propose`, `report`, `attach`, `expose`) | Tenzo's injected server is added to the user's MCP servers, never in place of them |
 | Turn | the turn completed, with no runtime error, no prompt or proposal other than the MCP tool's permission prompt, and no main-thread tool outside the four steps | the run is clean: nothing failed around the four |
 
 The checks are pure functions over the events (`tools/parity/src/checks.ts`), unit-tested in `checks.test.ts`. `fixture.test.ts` copies the fixture the way the run does, then runs its MCP server and hook directly to keep them honest without Claude.
@@ -68,5 +68,5 @@ The checks are pure functions over the events (`tools/parity/src/checks.ts`), un
 - **MCP approval.** Without a person to ask, Claude Code (the SDK, `claude -p`) starts `.mcp.json` servers without approval. `enabledMcpjsonServers` is in the fixture so an interactive `claude` in the copy behaves the same, for comparison.
 - **Background subagents.** Claude Code 2.1 runs `Agent` calls in the background by default: the tool result is "Async agent launched", and the subagent's answer arrives as its own messages. The check accepts that as well as a foreground result. The daemon keeps a thread's session up after its turn ends, so background work keeps reporting; the check itself reads only up to the end of the first turn and then stops its scratch daemon. Here the subagent finishes first.
 - **Your config loads too.** The thread gets your user settings, plugins, skills and MCP connectors, as a real thread does. A user-level hook or permission rule can change the outcome; the table says which check it broke. Claude keeps its transcript of the run under `~/.claude/projects/`, as for any session.
-- **Discussing.** A new thread starts in discuss (PRODUCT.md §4): Tenzo's discuss prompt is appended to Claude Code's and the session runs in Claude Code's default permission mode. The parity prompt changes nothing, so the discuss prompt's "just do it, no proposal" applies; a `propose` call would fail the Turn check.
+- **Discussing.** A new thread starts in discuss (PRODUCT.md §4): Tenzo's discuss prompt is appended to Claude Code's; the permission mode is your own `defaultMode` (Tenzo never sets one). The parity prompt changes nothing, so the discuss prompt's "just do it, no proposal" applies; a `propose` or `report` call would fail the Turn check.
 - **The model can wander.** The prompt is explicit, but a small model can still skip a step or drop a codeword. A single failure where Claude didn't do what it was asked is the model, not Tenzo: re-run, or try `--model sonnet`. The same failure twice is a finding.

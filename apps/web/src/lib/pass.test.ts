@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { type QueueItem, suggestedAnswer } from '@tenzo/client-runtime';
-import { at, item, permission, proposal, question } from './fixtures.ts';
+import { at, finished, item, permission, proposal, question } from './fixtures.ts';
 import { ageLabel, answerOf, othersLabel, pileEdges, pileOf, stepsOf } from './pass.ts';
 
 describe('pileEdges', () => {
@@ -17,6 +17,20 @@ describe('pileOf', () => {
 		const d = item('d');
 		expect(pileOf([a, b, c, d], new Set()).map((i) => i.id)).toEqual([a.id, c.id, d.id, b.id]);
 		expect(pileOf([a, b, c, d], new Set([a.id])).map((i) => i.id)).toEqual([c.id, d.id, b.id]);
+	});
+
+	it('puts finished work behind every card where an agent is stuck, however old it is', () => {
+		const done = finished('f', {});
+		const older = { ...finished('g'), createdAt: '2026-10-01T00:00:00.000Z' };
+		const ask = item('q', { createdAt: '2026-10-05T00:00:00.000Z' });
+		const build = proposal('p');
+		expect(pileOf([older, done, ask, build], new Set()).map((i) => i.kind)).toEqual([
+			'question',
+			'proposal',
+			'finished',
+			'finished'
+		]);
+		expect(pileOf([older, done, ask], new Set()).at(-1)?.id).toBe(done.id);
 	});
 });
 
@@ -65,6 +79,7 @@ describe('stepsOf', () => {
 				suggested: { label: 'Build it', value: 'build', description: '' },
 				recommended: false,
 				others: [],
+				row: [],
 				placeholder: 'Change something'
 			}
 		]);
@@ -74,6 +89,31 @@ describe('stepsOf', () => {
 		const [step] = stepsOf(item('a', { questions: [question('Anything else?', [])] }));
 		expect(step?.suggested).toBeNull();
 		expect(step?.others).toEqual([]);
+	});
+});
+
+describe('stepsOf: finished work', () => {
+	it('offers Done, no field, the headline as the ask; the row waits for #21', () => {
+		const [step, ...rest] = stepsOf(finished('f'));
+		expect(rest).toEqual([]);
+		expect(step).toEqual({
+			key: 'finished',
+			ask: 'Counter works',
+			suggested: { label: 'Done', value: 'done', description: '' },
+			recommended: false,
+			others: [],
+			row: [],
+			placeholder: null
+		});
+	});
+
+	it('sends done, which is what taking the suggestion sends', () => {
+		const card = finished('f');
+		const step = stepsOf(card)[0];
+		if (!step?.suggested) throw new Error('no button');
+		const answer = answerOf(card, [{ choice: step.suggested }]);
+		expect(answer).toEqual({ kind: 'finished', decision: 'done' });
+		expect(answer).toEqual(suggestedAnswer(card));
 	});
 });
 

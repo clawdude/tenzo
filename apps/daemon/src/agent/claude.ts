@@ -5,7 +5,6 @@ import { delimiter, join } from "node:path";
 import {
   type CanUseTool,
   type Options,
-  type PermissionMode,
   type PermissionResult,
   query as sdkQuery,
   type SDKUserMessage,
@@ -17,8 +16,11 @@ import type {
   UserInputAnswers,
   UserInputQuestion,
 } from "@tenzo/contracts";
+import { liveBase } from "@tenzo/contracts";
+import { MAX_ATTACHMENTS, takeAttachment } from "../attachments.ts";
 import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
+import { checkPort, livePath, probeLive } from "../live.ts";
 import { promptFor, proposalReply } from "../prompts.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
@@ -34,10 +36,14 @@ import {
 import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
 import {
+  type AttachInput,
+  type ExposeInput,
   isTenzoTool,
   PROPOSE,
   type ProposeInput,
   proposalOf,
+  type ReportInput,
+  reportOf,
   TENZO_MCP_SERVER,
   type TenzoToolHost,
   type ToolReply,
@@ -54,9 +60,12 @@ import {
  * - its thread prompt for the phase, appended to Claude Code's (prompts.ts);
  * - its own MCP server, `tenzo`, next to the user's (tenzo-mcp.ts), whose `propose` waits for
  *   your decision the way a permission prompt does;
- * - the permission mode: the terminal's default while discussing, accept edits once building;
  * - a `canUseTool` hook, which is how questions (`AskUserQuestion`) and permission prompts reach
  *   the Pass instead of a terminal.
+ *
+ * It never sets the permission mode, in any phase: the user's own `defaultMode` (from their user,
+ * project or local settings) applies, as in their terminal. Discussing is held by the discuss
+ * prompt and `propose`, not by a mode.
  */
 export interface ClaudeAdapterOptions {
   /** The SDK's `query`. Tests pass a fake, so they never spawn Claude. */
@@ -181,9 +190,16 @@ function startSession(
 
   /**
    * `propose`: the proposal becomes an item, and the tool call returns only once you've decided,
-   * like a permission prompt. Build it also lifts the session to accept edits, in place.
+   * like a permission prompt. One at a time: a second while one waits (parallel calls, a
+   * subagent) is turned away, so there is never more than one proposal card per thread.
    */
   const propose = async (raw: ProposeInput, signal: AbortSignal | undefined): Promise<ToolReply> => {
+    if ([...pending.values()].some((p) => p.kind === "proposal")) {
+      return {
+        text: "A proposal is already waiting for the person's answer. Wait for that one instead of proposing again.",
+        isError: true,
+      };
+    }
     const requestId = randomId("req");
     emit({
       type: "proposal.requested",
@@ -205,14 +221,54 @@ function startSession(
     if (decision === "change") {
       return { text: proposalReply({ decision, note: note ?? "" }, input.prompts) };
     }
-    try {
-      await run.setPermissionMode(permissionModeFor("building"));
-    } catch {
-      // The session is ending; the next one starts building, with accept edits.
-    }
+    // The approval carries the build prompt; the permission mode stays the user's own.
     return { text: proposalReply({ decision }, input.prompts) };
   };
-  const host: TenzoToolHost = { propose };
+
+  /**
+   * `report`: finished work becomes a review item at once, with what was attached and exposed
+   * before it. Nothing waits for you: a review can take hours, and your answer comes back to the
+   * thread as a message (#21), as any follow-up does.
+   */
+  let attached = 0;
+  const report = async (raw: ReportInput): Promise<ToolReply> => {
+    emit({ type: "report.submitted", requestId: randomId("req"), ...inTurn(), payload: reportOf(raw) });
+    attached = 0;
+    return {
+      text: "Reported: the person has your card. End your turn now with one short line; their answer comes back to you as a message.",
+    };
+  };
+
+  /** `attach`: a copy of a screenshot from the worktree, for the next report (attachments.ts). */
+  const attach = async (raw: AttachInput): Promise<ToolReply> => {
+    if (!input.attachmentsDir) return { text: "This thread takes no attachments.", isError: true };
+    if (attached >= MAX_ATTACHMENTS) {
+      return { text: `A report carries at most ${MAX_ATTACHMENTS} screenshots.`, isError: true };
+    }
+    return toolCall(async () => {
+      const attachment = await takeAttachment({
+        worktree: input.cwd,
+        path: raw.path,
+        caption: raw.caption,
+        dir: input.attachmentsDir ?? "",
+      });
+      attached++;
+      emit({ type: "attachment.added", ...inTurn(), payload: { attachment } });
+      return `Attached ${attachment.name}. It goes on your report.`;
+    });
+  };
+
+  /** `expose`: the thread's live base now goes to this port, once something answers there (live.ts). */
+  const expose = (raw: ExposeInput): Promise<ToolReply> =>
+    toolCall(async () => {
+      const preview = { port: checkPort(raw.port), path: livePath(raw.path) };
+      const warning = await probeLive(input.threadId, preview);
+      emit({ type: "preview.exposed", ...inTurn(), payload: preview });
+      const url = `${liveBase(input.threadId)}${preview.path}`;
+      return `Exposed: the card's "Open live" opens ${url} on Tenzo's address, forwarded to localhost:${preview.port}. Keep the server running.${warning ? `\nWarning: ${warning}` : ""}`;
+    });
+
+  const host: TenzoToolHost = { propose, report, attach, expose };
 
   const canUseTool: CanUseTool = async (toolName, toolInput, context) => {
     // Tenzo's own tools are how the agent talks to Tenzo: nothing to ask the user about.
@@ -264,10 +320,12 @@ function startSession(
     // Tenzo's thread prompt after it.
     systemPrompt: { type: "preset", preset: "claude_code", ...(append ? { append } : {}) },
     // Added to the servers of the user's own config, which load as in a terminal.
-    mcpServers: { [TENZO_MCP_SERVER]: tenzoMcpServer(host) },
-    permissionMode: permissionModeFor(input.phase),
+    mcpServers: {
+      [TENZO_MCP_SERVER]: tenzoMcpServer(host, { liveBase: liveBase(input.threadId) }),
+    },
+    // No permissionMode: the user's own defaultMode applies, in every phase.
     canUseTool,
-    env: claudeEnv(process.env),
+    env: { ...claudeEnv(process.env), TENZO_LIVE_BASE: liveBase(input.threadId) },
     ...(resumed ? { resume: sessionId } : { sessionId }),
     ...(input.model ? { model: input.model } : {}),
   };
@@ -372,12 +430,14 @@ function startSession(
   };
 }
 
-/**
- * Discussing, Claude asks before it edits, as a terminal does by default: the discuss prompt
- * says not to, and if it tries anyway you see it on the Pass. Building, it edits freely.
- */
-export function permissionModeFor(phase: StartSessionInput["phase"]): PermissionMode {
-  return phase === "discussing" ? "default" : "acceptEdits";
+/** Runs a tool's work: a TenzoError is the agent's to read and fix, anything else is ours. */
+async function toolCall(work: () => Promise<string>): Promise<ToolReply> {
+  try {
+    return { text: await work() };
+  } catch (error) {
+    if (error instanceof TenzoError) return { text: error.message, isError: true };
+    return { text: `Tenzo couldn't do that: ${String(error)}`, isError: true };
+  }
 }
 
 /**

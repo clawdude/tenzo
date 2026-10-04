@@ -39,7 +39,7 @@ function configured(overrides: Record<string, unknown> = {}): RuntimeEvent {
       cwd: "/tmp/worktree",
       permissionMode: "acceptEdits",
       agentVersion: "2.1.287",
-      tools: ["Agent", "Skill", FIXTURE.mcpTool, TENZO_SERVER.tool],
+      tools: ["Agent", "Skill", FIXTURE.mcpTool, ...TENZO_SERVER.tools],
       mcpServers: [
         { name: "parity", status: "connected" },
         { name: "tenzo", status: "connected" },
@@ -370,7 +370,7 @@ describe("codewords taken from the fixture's files", () => {
     const tenzo = (overrides: Record<string, unknown>) =>
       byName(checkParity([configured(overrides)], HOOKS, WORD))["Tenzo's server"];
     expect(byName(checkParity(passingRun(), HOOKS, WORD))["Tenzo's server"]?.detail).toBe(
-      "tenzo connected beside parity, mcp__tenzo__propose listed",
+      "tenzo connected beside parity, 4 tools listed",
     );
     // Tenzo's server in place of the user's: the injection replaced their config.
     expect(tenzo({ mcpServers: [{ name: "tenzo", status: "connected" }] })?.detail).toBe(
@@ -388,7 +388,12 @@ describe("codewords taken from the fixture's files", () => {
       })?.detail,
     ).toBe("tenzo is failed");
     expect(tenzo({ tools: ["Agent", "Skill", FIXTURE.mcpTool] })?.detail).toBe(
-      "tenzo connected, but mcp__tenzo__propose isn't listed",
+      "tenzo connected, but mcp__tenzo__propose, mcp__tenzo__report, mcp__tenzo__attach, mcp__tenzo__expose aren't listed",
+    );
+    expect(
+      tenzo({ tools: ["Agent", "Skill", FIXTURE.mcpTool, "mcp__tenzo__propose"] })?.detail,
+    ).toBe(
+      "tenzo connected, but mcp__tenzo__report, mcp__tenzo__attach, mcp__tenzo__expose aren't listed",
     );
   });
 
@@ -401,6 +406,17 @@ describe("codewords taken from the fixture's files", () => {
     expect(answerFor(proposal)).toBeNull();
     expect(byName(checkParity([...passingRun(), proposal], HOOKS, WORD)).Turn?.detail).toBe(
       "asked for a go-ahead for: Tidy the fixture: not part of the check",
+    );
+  });
+
+  it("fails the turn on a report: the check builds nothing, so there is nothing to review", () => {
+    const report = event({
+      type: "report.submitted",
+      requestId: "req_00000000000000000097",
+      payload: { summary: "Did the steps.", howToTest: "", checks: [] },
+    });
+    expect(byName(checkParity([...passingRun(), report], HOOKS, WORD)).Turn?.detail).toBe(
+      "asked for a review of: Did the steps.: not part of the check",
     );
   });
 

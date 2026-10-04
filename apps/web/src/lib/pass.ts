@@ -19,8 +19,9 @@ export function pileEdges(waiting: number): number {
 }
 
 /**
- * The pile, top card first: the quick lane before the review lane, oldest first within each, so
- * the card in front stays put while new ones arrive behind it. Items being answered here
+ * The pile, top card first: the quick lane (the agent is stuck waiting) before the review lane
+ * (finished work), oldest first within each, so the card in front stays put while new ones
+ * arrive behind it. The one place lane order is decided. Items being answered here
  * (`leaving`) are already off the pile: their card is lifting away.
  */
 export function pileOf(items: readonly QueueItem[], leaving: ReadonlySet<string>): QueueItem[] {
@@ -41,7 +42,8 @@ export interface Choice {
 /**
  * One question on a card. A question item asks one or more (Claude's AskUserQuestion takes up to
  * four); the card asks them one after another and sends the answers together. A permission
- * request is one step: Allow or Deny. So is a proposal: Build it, or say what to change.
+ * request is one step: Allow or Deny. So is a proposal: Build it, or say what to change. And
+ * finished work: Done (Merge, Open PR and Needs changes join it in #21).
  */
 export interface Step {
 	key: string;
@@ -52,14 +54,30 @@ export interface Step {
 	recommended: boolean;
 	/** The rest, folded behind "N other options". */
 	others: Choice[];
-	/** The free-text field's hint. */
-	placeholder: string;
+	/** Quieter actions in a row under the field, always shown (finished work's, from #21). */
+	row: Choice[];
+	/** The free-text field's hint; null: the card has no field. */
+	placeholder: string | null;
 }
 
 /** What was picked on a step: a button, or words typed or dictated into the field. */
 export type Pick = { choice: Choice } | { text: string };
 
 export function stepsOf(item: QueueItem): Step[] {
+	if (item.kind === 'finished') {
+		return [
+			{
+				key: 'finished',
+				ask: item.finished?.headline || item.ask,
+				suggested: { label: 'Done', value: 'done', description: '' },
+				recommended: false,
+				others: [],
+				row: [],
+				// Words for finished work are Needs changes, which comes with #21.
+				placeholder: null
+			}
+		];
+	}
 	if (item.kind === 'proposal') {
 		return [
 			{
@@ -69,6 +87,7 @@ export function stepsOf(item: QueueItem): Step[] {
 				suggested: { label: 'Build it', value: 'build', description: '' },
 				recommended: false,
 				others: [],
+				row: [],
 				placeholder: 'Change something'
 			}
 		];
@@ -86,6 +105,7 @@ export function stepsOf(item: QueueItem): Step[] {
 				suggested,
 				recommended: item.suggested === decision,
 				others: choices.filter((c) => c.value !== suggested.value),
+				row: [],
 				placeholder: 'Or say why not'
 			}
 		];
@@ -98,6 +118,7 @@ export function stepsOf(item: QueueItem): Step[] {
 			suggested: option ? choiceOf(option) : null,
 			recommended: option?.recommended ?? false,
 			others: question.options.filter((o) => o !== option).map(choiceOf),
+			row: [],
 			placeholder: "Or say what you'd prefer"
 		};
 	});
@@ -109,6 +130,10 @@ export function stepsOf(item: QueueItem): Step[] {
  * words are a Deny with the reason; on a proposal, what to change.
  */
 export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
+	if (item.kind === 'finished') {
+		if (!picks[0]) throw new Error('Finished work needs a decision.');
+		return { kind: 'finished', decision: 'done' };
+	}
 	if (item.kind === 'proposal') {
 		const pick = picks[0];
 		if (!pick) throw new Error('A proposal needs a decision.');

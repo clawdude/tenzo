@@ -29,10 +29,13 @@ export interface StartSessionInput {
   /** A model name the agent understands, e.g. "haiku". Default: the agent's own default. */
   model?: string;
   /**
-   * Where the thread is. Discussing: the agent may not edit unasked (it asks permission, as in a
-   * terminal's default mode). Building: it edits freely (accept edits).
+   * Where the thread is: which of Tenzo's thread prompts the session gets. Discussing: talk, don't
+   * change anything yet. Building or review: build. The permission mode is never Tenzo's: the
+   * user's own settings decide it, in every phase.
    */
   phase: ThreadPhase;
+  /** Where `attach` keeps its copies (`<home>/attachments/<thread>`). None: attach refuses. */
+  attachmentsDir?: string;
   /**
    * Tenzo's thread prompts: the one for `phase` is appended to the agent's own system prompt,
    * and an approved proposal carries the build prompt (prompts.ts). None: nothing is appended.
@@ -54,7 +57,7 @@ export interface AgentSession {
   /** Answers a `user-input.requested`, one answer per question id. */
   respondToUserInput(requestId: RequestId, answers: UserInputAnswers): void;
   /**
-   * Answers a `proposal.requested`: build it (the agent goes ahead, and may now edit freely), or
+   * Answers a `proposal.requested`: build it (the agent goes ahead, with the build prompt), or
    * change something, with a note saying what. The agent's `propose` call returns with it.
    */
   respondToProposal(requestId: RequestId, decision: "build" | "change", note?: string): void;
