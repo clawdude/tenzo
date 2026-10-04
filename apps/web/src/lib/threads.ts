@@ -7,14 +7,29 @@ import { isSnoozed, type QueueItem, type ThreadView } from '@tenzo/client-runtim
 
 export type GroupKey = 'needs-you' | 'working' | 'landing' | 'today' | 'earlier';
 
-/** The dot's colour: clay needs you, blue works, green is done, grey is quiet. */
-export type Tone = 'clay' | 'working' | 'done' | 'quiet';
+/**
+ * The dot's colour: clay needs you, blue works, green is done; grey waits (landing, snoozed),
+ * darker grey is quiet (never started).
+ */
+export type Tone = 'clay' | 'working' | 'done' | 'waiting' | 'quiet';
+
+/**
+ * Who started a thread you didn't type: another thread's agent (`start_thread`) for now;
+ * automations will be the next kind.
+ */
+export interface Origin {
+	kind: 'agent';
+	/** "from Refresh tokens". */
+	label: string;
+}
 
 export interface Row {
 	thread: ThreadView;
 	tone: Tone;
 	/** One word of status. */
 	word: string;
+	/** Who started it, when it wasn't you. */
+	origin: Origin | null;
 }
 
 export interface Group {
@@ -51,7 +66,7 @@ export function groupThreads(
 		earlier: []
 	};
 	for (const thread of threads) {
-		const row = rowOf(thread, items, now);
+		const row = rowOf(thread, items, now, threads);
 		rows[groupOf(thread, now, items)].push(row);
 	}
 	for (const key of ['today', 'earlier'] as const) {
@@ -104,21 +119,77 @@ const ASKS: Record<QueueItem['kind'], string> = {
  * looks again (in 12m), done, or new (never started). A failed turn is an error item, so a
  * thread whose last turn failed never reads "done".
  */
-export function rowOf(thread: ThreadView, items: readonly QueueItem[], now = Date.now()): Row {
+export function rowOf(
+	thread: ThreadView,
+	items: readonly QueueItem[],
+	now = Date.now(),
+	threads: readonly ThreadView[] = []
+): Row {
+	const { tone, word } = statusOf(thread, items, now);
+	return { thread, tone, word, origin: originOf(thread, threads) };
+}
+
+function statusOf(
+	thread: ThreadView,
+	items: readonly QueueItem[],
+	now: number
+): { tone: Tone; word: string } {
 	const waits = waitsOn(thread, items);
 	if (waits === 'now') {
 		const first = items.find((i) => i.threadId === thread.id && !isSnoozed(i));
-		return { thread, tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
+		return { tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
 	}
-	if (waits === 'later') return { thread, tone: 'quiet', word: 'snoozed' };
-	if (thread.activity === 'working') return { thread, tone: 'working', word: thread.phase };
+	if (waits === 'later') return { tone: 'waiting', word: 'snoozed' };
+	if (thread.activity === 'working') return { tone: 'working', word: thread.phase };
 	if (thread.phase === 'landing') {
 		// Waiting on CI and reviewers: grey, with when it looks again if it said.
 		const word = thread.wakeAt ? `in ${untilLabel(thread.wakeAt, now)}` : 'landing';
-		return { thread, tone: 'quiet', word };
+		return { tone: 'waiting', word };
 	}
-	if (thread.lastSeq === 0) return { thread, tone: 'quiet', word: 'new' };
-	return { thread, tone: 'done', word: 'done' };
+	if (thread.lastSeq === 0) return { tone: 'quiet', word: 'new' };
+	return { tone: 'done', word: 'done' };
+}
+
+/**
+ * Who started the thread, when it wasn't you: the thread whose agent started it, by its title
+ * while it is still in the list.
+ */
+export function originOf(thread: ThreadView, threads: readonly ThreadView[]): Origin | null {
+	switch (thread.origin) {
+		case 'user':
+			return null;
+		case 'agent': {
+			const parent = threads.find((t) => t.id === thread.parentId);
+			return { kind: 'agent', label: parent ? `from ${parent.title}` : 'from another thread' };
+		}
+	}
+}
+
+/**
+ * The list as one run of headings and rows, so a row changing group is the same element
+ * moving: it slides from where it was to where it is now. `top` and `bottom` say whether a row
+ * opens or closes its group (its rounded corners); `back` groups (Today, Earlier) sit a layer
+ * further back.
+ */
+export type Entry =
+	| { kind: 'head'; key: string; group: GroupKey; label: string; first: boolean }
+	| { kind: 'row'; key: string; group: GroupKey; row: Row; top: boolean; bottom: boolean; back: boolean };
+
+export function entriesOf(groups: readonly Group[]): Entry[] {
+	return groups.flatMap((group, g): Entry[] => [
+		{ kind: 'head', key: `group:${group.key}`, group: group.key, label: group.label, first: g === 0 },
+		...group.rows.map(
+			(row, i): Entry => ({
+				kind: 'row',
+				key: row.thread.id,
+				group: group.key,
+				row,
+				top: i === 0,
+				bottom: i === group.rows.length - 1,
+				back: group.key === 'today' || group.key === 'earlier'
+			})
+		)
+	]);
 }
 
 /** How long until `iso`, in a word: "1m" at least, then "12m", "3h", "2d". */

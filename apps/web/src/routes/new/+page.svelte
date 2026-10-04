@@ -105,7 +105,8 @@
 			'mx-auto flex h-full max-h-[920px] w-full max-w-[440px] flex-col px-6 sm:my-auto',
 			fit
 				? 'pt-3 pb-3'
-				: 'pt-[calc(env(safe-area-inset-top)+14px)] pb-[calc(env(safe-area-inset-bottom)+20px)] sm:pt-6 sm:pb-6'
+				: // Mic and Start sit just above the home indicator, under your thumb.
+					'pt-[calc(env(safe-area-inset-top)+14px)] pb-[max(env(safe-area-inset-bottom),24px)] sm:pt-6 sm:pb-6'
 		]}
 	>
 		<header class={['flex shrink-0 items-center justify-between gap-3', fit ? 'mb-3' : 'mb-7']}>

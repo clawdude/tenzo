@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
+import type { ThreadView } from '@tenzo/client-runtime';
 import { failure, finished, item, permission, proposal, thread } from './fixtures.ts';
-import { groupThreads, rowOf, untilLabel } from './threads.ts';
+import { entriesOf, groupThreads, originOf, rowOf, untilLabel } from './threads.ts';
 
 /** A ready PR card of a given thread. */
 const ready = (tag: string, overrides: Parameters<typeof item>[1] = {}) =>
@@ -104,9 +105,9 @@ describe('rowOf', () => {
 		).toMatchObject({ tone: 'working', word: 'building' });
 		expect(rowOf(thread('c'), [])).toMatchObject({ tone: 'done', word: 'done' });
 		const landing = thread('e', { phase: 'landing' });
-		expect(rowOf(landing, [], now)).toMatchObject({ tone: 'quiet', word: 'landing' });
+		expect(rowOf(landing, [], now)).toMatchObject({ tone: 'waiting', word: 'landing' });
 		const wakes = { ...landing, wakeAt: new Date(now + 12 * 60_000).toISOString() };
-		expect(rowOf(wakes, [], now)).toMatchObject({ tone: 'quiet', word: 'in 12m' });
+		expect(rowOf(wakes, [], now)).toMatchObject({ tone: 'waiting', word: 'in 12m' });
 		expect(rowOf({ ...landing, activity: 'working' }, [], now)).toMatchObject({
 			tone: 'working',
 			word: 'landing'
@@ -128,7 +129,7 @@ describe('rowOf', () => {
 		const t = thread('a', { activity: 'snoozed', activeAt: noon });
 		const until = new Date(now + 10 * 60_000).toISOString();
 		const snoozed = item('x', { threadId: t.id, snoozedUntil: until });
-		expect(rowOf(t, [snoozed])).toMatchObject({ tone: 'quiet', word: 'snoozed' });
+		expect(rowOf(t, [snoozed])).toMatchObject({ tone: 'waiting', word: 'snoozed' });
 		expect(groupThreads([t], [snoozed], now)[0]?.key).toBe('today');
 		// Still snoozed long after its time by this device's clock: the daemon hasn't woken it.
 		const late = now + 60 * 60_000;
@@ -140,5 +141,82 @@ describe('rowOf', () => {
 		// One awake beside a snoozed one: it needs you, and says for what.
 		const awake = { ...failure('e'), threadId: t.id };
 		expect(rowOf(t, [snoozed, awake])).toMatchObject({ tone: 'clay', word: 'failed' });
+	});
+});
+
+describe('every state has its word', () => {
+	const phases: ThreadView['phase'][] = ['discussing', 'building', 'review', 'landing'];
+	const activities: ThreadView['activity'][] = ['idle', 'working', 'needs-you', 'snoozed'];
+
+	it('gives each phase and activity one short word and a dot', () => {
+		for (const phase of phases) {
+			for (const activity of activities) {
+				const t = thread('a', { phase, activity, working: activity === 'working' });
+				const row = rowOf(t, [], now);
+				expect(row.word, `${phase}/${activity}`).toMatch(/^(in \d+[mhd]|[a-z]+\??)$/);
+				expect(row.tone).toBeTruthy();
+			}
+		}
+	});
+
+	it('says what each kind of item waits for', () => {
+		const t = thread('a', { activity: 'needs-you' });
+		const words = [
+			item('q'),
+			permission('p'),
+			proposal('b'),
+			finished('f'),
+			failure('e'),
+			ready('r')
+		].map((i) => rowOf(t, [{ ...i, threadId: t.id }]).word);
+		expect(words).toEqual(['asking', 'allow?', 'build?', 'review', 'failed', 'merge?']);
+	});
+});
+
+describe('originOf', () => {
+	it('says nothing for a thread you started', () => {
+		expect(originOf(thread('a'), [])).toBeNull();
+		expect(rowOf(thread('a'), []).origin).toBeNull();
+	});
+
+	it('names the thread whose agent started it, while that one is in the list', () => {
+		const parent = thread('p', { title: 'Refresh tokens' });
+		const child = thread('c', { origin: 'agent', parentId: parent.id });
+		expect(originOf(child, [parent, child])).toEqual({ kind: 'agent', label: 'from Refresh tokens' });
+		expect(originOf(child, [child])).toEqual({ kind: 'agent', label: 'from another thread' });
+		const [group] = groupThreads([parent, child], [], now);
+		expect(group?.rows.map((r) => r.origin?.label ?? null)).toEqual([null, 'from Refresh tokens']);
+	});
+});
+
+describe('entriesOf', () => {
+	it('runs headings and rows together, each row knowing its place in its group', () => {
+		const asking = thread('a', { activity: 'needs-you' });
+		const one = thread('b', { activeAt: noon });
+		const two = thread('c', { activeAt: morning });
+		const groups = groupThreads([asking, one, two], [item('x', { threadId: asking.id })], now);
+		expect(
+			entriesOf(groups).map((e) =>
+				e.kind === 'head'
+					? ['head', e.label, e.first]
+					: ['row', e.row.thread.id, e.top, e.bottom, e.back]
+			)
+		).toEqual([
+			['head', 'Needs you', true],
+			['row', asking.id, true, true, false],
+			['head', 'Today', false],
+			['row', one.id, true, false, true],
+			['row', two.id, false, true, true]
+		]);
+	});
+
+	it('keys a row by its thread, so it is the same row in whichever group it is', () => {
+		const t = thread('a', { activity: 'working', working: true });
+		const before = entriesOf(groupThreads([t], [], now));
+		const asking = { ...t, activity: 'needs-you' as const, working: false };
+		const after = entriesOf(groupThreads([asking], [item('x', { threadId: t.id })], now));
+		const key = (entries: typeof before) => entries.find((e) => e.kind === 'row')?.key;
+		expect(key(after)).toBe(key(before));
+		expect(after.map((e) => e.group)).toEqual(['needs-you', 'needs-you']);
 	});
 });

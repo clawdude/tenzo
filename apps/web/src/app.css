@@ -6,12 +6,15 @@
 	--color-clay: #d97757;
 	--color-on-clay: #1a0f0a;
 	--color-card: #1c1c1e;
+	/* A layer further back: what is finished sits behind what is going on. */
+	--color-card-back: #0e0e10;
 	--color-fill: #2c2c2e;
 	--color-fill-strong: #3a3a3c;
 	--color-ink: #f5f5f7;
 	--color-ink-soft: #c7c7cc;
 	--color-mute: #8e8e93;
 	--color-faint: #6e6e73;
+	--color-dim: #48484a;
 	--color-working: #0a84ff;
 	--color-done: #6ccb8c;
 	/* Check badges on finished work: green passed, red failed, grey skipped. */
