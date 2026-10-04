@@ -155,6 +155,19 @@ describe('error cards', () => {
 		});
 	});
 
+	it("a config card offers Retry and Dismiss only: nothing to tell the agent", () => {
+		const base = failure('c', '.tenzo/config.json: landing: Invalid option');
+		const e = { ...base, error: { cause: 'config' as const, message: base.error!.message, prompts: [] } };
+		const [step] = stepsOf(e);
+		expect(step).toMatchObject({
+			suggested: { label: 'Retry', value: 'retry' },
+			others: [{ label: 'Dismiss', value: 'dismiss' }],
+			placeholder: null
+		});
+		expect(answerOf(e, [{ choice: step!.suggested! }])).toEqual({ kind: 'error', action: 'retry' });
+		expect(answerOf(e, [{ choice: step!.others[0]! }])).toEqual({ kind: 'error', action: 'dismiss' });
+	});
+
 	it('puts finished work behind every card where an agent is stuck, however old it is', () => {
 		const done = finished('f', {});
 		const older = { ...finished('g'), createdAt: '2026-10-01T00:00:00.000Z' };
@@ -253,6 +266,20 @@ describe('stepsOf: finished work', () => {
 		const answer = answerOf(card, [{ choice: step.suggested }]);
 		expect(answer).toEqual({ kind: 'finished', decision: 'merge' });
 		expect(suggestedAnswer(card)).toEqual({ kind: 'finished', decision: 'done' });
+	});
+
+	it("fills Open PR instead when the project's landing rule is pr, Merge moving to the row", () => {
+		const card = finished('f');
+		const [step] = stepsOf(card, 'pr');
+		expect(step?.suggested).toEqual({ label: 'Open PR', value: 'pr', description: '' });
+		expect(step?.row).toEqual([
+			{ label: 'Merge', value: 'merge', description: '' },
+			{ label: 'Done', value: 'done', description: '' }
+		]);
+		expect(answerOf(card, [{ choice: step!.suggested! }])).toEqual({ kind: 'finished', decision: 'pr' });
+		expect(answerOf(card, [{ choice: step!.row[0]! }])).toEqual({ kind: 'finished', decision: 'merge' });
+		// Only finished work: a ready PR's button is Merge whatever the rule.
+		expect(stepsOf(ready('r'), 'pr')[0]?.suggested?.value).toBe('merge');
 	});
 
 	it('sends each row button by its value, and words as what needs changing', () => {

@@ -164,9 +164,19 @@ export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMes
  * prompt stream ends, like Claude does when its stdin closes; with `exitError`, it then fails the
  * way the SDK does when Claude exits with a non-zero code.
  */
-export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
+export function fakeQuery(
+  script: Script,
+  fake: {
+    exitError?: Error;
+    controlError?: Error;
+    /** What `getSettings` reports as merged; `sources` as each source's (default: all the user's). */
+    settings?: Record<string, unknown>;
+    sources?: { source: string; settings: Record<string, unknown> }[];
+  } = {},
+) {
   const calls: Options[] = [];
   const permissionModes: string[] = [];
+  const controls: Record<string, unknown>[] = [];
   let interrupts = 0;
   let closed = false;
   const query = ((params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
@@ -221,6 +231,21 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
       setPermissionMode: async (mode: string) => {
         permissionModes.push(mode);
       },
+      setModel: async (model?: string) => {
+        if (fake.controlError) throw fake.controlError;
+        controls.push({ setModel: model });
+      },
+      setMaxThinkingTokens: async (tokens: number | null) => {
+        controls.push({ setMaxThinkingTokens: tokens });
+      },
+      getSettings: async () => ({
+        effective: fake.settings ?? {},
+        sources: fake.sources ?? [{ source: "userSettings", settings: fake.settings ?? {} }],
+        applied: {},
+      }),
+      applyFlagSettings: async (settings: Record<string, unknown>) => {
+        controls.push({ applyFlagSettings: settings });
+      },
     }) as unknown as Query;
   }) as unknown as typeof sdkQuery;
   return {
@@ -228,6 +253,8 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
     calls,
     /** Modes set with `setPermissionMode` while running, in order: Tenzo sets none. */
     permissionModes,
+    /** Model and thinking switches made while running (`setModel`, …), in order. */
+    controls,
     get interrupts() {
       return interrupts;
     },

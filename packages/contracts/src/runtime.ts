@@ -406,6 +406,16 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     payload: z.object({ reason: z.enum(["returned", "undo"]) }),
   }),
   /**
+   * Recorded by the daemon as a session starts, when what it finds in the project's `.tenzo/`
+   * config changed: `problem` says what is wrong with it (an error card; the thread runs on the
+   * defaults meanwhile), or null once it is fine again (the card goes).
+   */
+  z.object({
+    ...base,
+    type: z.literal("config.checked"),
+    payload: z.object({ problem: z.string().nullable() }),
+  }),
+  /**
    * Recorded by the daemon: you answered an error item. `retry` sends what failed again, `tell`
    * sends `text`; either is queued as the thread's next prompt.
    */
@@ -414,7 +424,7 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     requestId: RequestId,
     type: z.literal("error.resolved"),
     payload: z.object({
-      action: z.enum(["retry", "tell"]),
+      action: z.enum(["retry", "tell", "dismiss"]),
       text: z.string().optional(),
     }),
   }),

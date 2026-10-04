@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LandingRule, ThinkingLevel } from "./config.ts";
 import { Finished } from "./finished.ts";
 import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
@@ -77,6 +78,8 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("told"), text: z.string() }),
   /** An error that cleared by itself: the thread's next turn started. */
   z.object({ kind: z.literal("recovered") }),
+  /** A config card you dismissed: it stays away until what is wrong changes. */
+  z.object({ kind: z.literal("acknowledged") }),
 ]);
 export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
 
@@ -85,9 +88,11 @@ export const ItemError = z.object({
   /**
    * `turn`: the turn ended failed. `crash`: the agent stopped mid-turn. `start`: it never started.
    * `stalled`: a landing turn ended with nothing on the Pass and no wake. `unarchived`: the agent
-   * said it landed, but the thread couldn't be archived (`landing.stuck`, engine.ts).
+   * said it landed, but the thread couldn't be archived (`landing.stuck`, engine.ts). `config`:
+   * the project's `.tenzo/` config is invalid, so the thread runs on the defaults
+   * (`config.checked`); Retry reads it again.
    */
-  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived"]),
+  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived", "config"]),
   /** The agent's or the daemon's own words for it, cut to size. */
   message: z.string(),
   /**
@@ -199,8 +204,12 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
   }),
   z.object({
     kind: z.literal("error"),
-    /** Send what failed again; send `text` instead (tell it something); archive the thread. */
-    action: z.enum(["retry", "tell", "archive"]),
+    /**
+     * Send what failed again; send `text` instead (tell it something); archive the thread. A
+     * config card takes only retry (read the config again) and dismiss (it stays away until the
+     * problem changes).
+     */
+    action: z.enum(["retry", "tell", "archive", "dismiss"]),
     text: z.string().optional(),
   }),
 ]);
@@ -234,7 +243,15 @@ export const ThreadView = z.object({
   worktreePath: z.string(),
   status: z.enum(["active", "archived"]),
   agent: AgentKind.nullable(),
+  /**
+   * The thread's own model, over its project's config (`thread.setModel`, or `--model` when it
+   * was started); null: the project's config decides, else `TENZO_DEFAULT_MODEL`, else the agent.
+   */
   model: z.string().nullable(),
+  /** The thread's own thinking level, over its project's config; null: the config decides. */
+  thinking: ThinkingLevel.nullable().default(null),
+  /** The project's landing rule (`.tenzo/config.json`): the finished card's filled button. */
+  landing: LandingRule.default("merge"),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
   archivedAt: z.iso.datetime().nullable(),

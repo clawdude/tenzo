@@ -10,7 +10,8 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { resolveModels } from "../project-config.ts";
 import {
   RuntimeEvent,
   type RuntimeEventOf,
@@ -29,6 +30,7 @@ import {
   createClaudeAdapter,
   findClaude,
   parseQuestions,
+  planSwitch,
 } from "./claude.ts";
 import { parseWait } from "./tenzo-mcp.ts";
 import { fingerprintOf } from "./fingerprint.ts";
@@ -208,7 +210,7 @@ describe("Claude adapter: starting", () => {
   it("resumes a stored session instead of starting a new one", async () => {
     const { fake, session, events } = start(simpleTurn, {
       resumeSessionId: SESSION,
-      model: "haiku",
+      models: { discuss: { model: "haiku" }, build: { model: "haiku" } },
     });
     expect(session.sessionId).toBe(SESSION);
     expect(fake.calls[0]).toMatchObject({ resume: SESSION, model: "haiku" });
@@ -642,8 +644,10 @@ describe("Claude adapter: Tenzo's propose tool", () => {
       text: `Approved, build it.\n\n${PROMPTS.build}`,
       isError: false,
     });
-    // The approval carries the build prompt; the permission mode stays the user's own.
+    // The approval carries the build prompt; the permission mode stays the user's own, and with
+    // no models configured nothing about the model changes either.
     expect(fake.permissionModes).toEqual([]);
+    expect(fake.controls).toEqual([]);
     expect(() => session.respondToProposal(requested.requestId, "build")).toThrow(/No open proposal/);
     await session.stop();
   });
@@ -727,6 +731,282 @@ describe("Claude adapter: Tenzo's propose tool", () => {
     expect(replies[1]?.isError).toBe(false);
     expect(events.seen.filter((e) => e.type === "proposal.requested")).toHaveLength(1);
     await session.stop();
+  });
+});
+
+describe("Claude adapter: models, thinking, subagents, permissions", () => {
+  /** The options a session gets, with what differs between any two runs (ids, handlers) left out. */
+  function comparable(options: Options | undefined) {
+    const { canUseTool, mcpServers, sessionId, ...rest } = options ?? {};
+    return { ...rest, canUseTool: typeof canUseTool, mcpServers: Object.keys(mcpServers ?? {}), sessionId: typeof sessionId };
+  }
+
+  it("with no config, the options are today's exactly: no model, thinking, effort, mode or subagent model", () => {
+    const none = resolveModels({ thread: { model: null, thinking: null }, config: {} });
+    for (const phase of ["discussing", "building", "review", "landing"] as const) {
+      const before = start(simpleTurn, { phase }).fake.calls[0];
+      const now = start(simpleTurn, { phase, models: none }).fake.calls[0];
+      expect(comparable(now)).toEqual(comparable(before));
+      expect(Object.keys(now ?? {}).sort()).toEqual(
+        ["canUseTool", "cwd", "env", "mcpServers", "pathToClaudeCodeExecutable", "sessionId", "settingSources", "systemPrompt"],
+      );
+      expect(now?.env).toEqual({ ...claudeEnv(process.env), TENZO_LIVE_BASE: `/live/${THREAD}/` });
+    }
+  });
+
+  const models = {
+    discuss: { model: "opus", thinking: "high" as const },
+    build: { model: "sonnet", thinking: "off" as const },
+    agents: "haiku",
+  };
+
+  it("discusses on the discuss model and builds on the build model, thinking as effort or disabled", () => {
+    expect(start(simpleTurn, { phase: "discussing", models }).fake.calls[0]).toMatchObject({
+      model: "opus",
+      effort: "high",
+    });
+    for (const phase of ["building", "review", "landing"] as const) {
+      const options = start(simpleTurn, { phase, models }).fake.calls[0];
+      expect(options).toMatchObject({ model: "sonnet", thinking: { type: "disabled" } });
+      expect(options).not.toHaveProperty("effort");
+    }
+    // Only what is set: a thinking level alone leaves the model the user's own.
+    const options = start(simpleTurn, {
+      phase: "discussing",
+      models: { discuss: { thinking: "low" }, build: {} },
+    }).fake.calls[0];
+    expect(options).toMatchObject({ effort: "low" });
+    expect(options).not.toHaveProperty("model");
+    expect(options).not.toHaveProperty("thinking");
+  });
+
+  it("gives subagents the agents model through CLAUDE_CODE_SUBAGENT_MODEL", () => {
+    const options = start(simpleTurn, { phase: "discussing", models }).fake.calls[0];
+    expect(options?.env).toEqual({
+      ...claudeEnv(process.env),
+      TENZO_LIVE_BASE: `/live/${THREAD}/`,
+      CLAUDE_CODE_SUBAGENT_MODEL: "haiku",
+    });
+  });
+
+  it("sets the permission mode only when the project's config does, never with the dangerous opt-in", () => {
+    for (const mode of ["default", "acceptEdits", "dontAsk"] as const) {
+      const options = start(simpleTurn, { permissionMode: mode }).fake.calls[0];
+      expect(options).toMatchObject({ permissionMode: mode });
+      expect(options).not.toHaveProperty("allowDangerouslySkipPermissions");
+    }
+  });
+
+  function approving(): Script {
+    const plan = { headline: "Add it", summary: "Add it." };
+    let turns = 0;
+    return async function* (turn) {
+      turns++;
+      if (turns > 1) {
+        // Claude reports its configuration again as each turn starts, with the model's full id.
+        yield init({ model: "claude-sonnet-5-5" });
+        yield result();
+        return;
+      }
+      yield init({ model: "claude-opus-5-5" });
+      yield assistant([toolUse("toolu_p", "mcp__tenzo__propose", plan)]);
+      const reply = await turn.callTool("tenzo", "propose", plan);
+      yield toolResult("toolu_p", reply.text, reply.isError);
+      yield result();
+    };
+  }
+
+  it("Build it switches the running session to the build model in place, and says so once", async () => {
+    const { fake, session, events } = start(approving(), { phase: "discussing", models });
+    session.sendTurn("add it");
+    const requested = await events.until("proposal.requested");
+    expect(fake.controls).toEqual([]);
+    session.respondToProposal(requested.requestId, "build");
+    await events.until("proposal.resolved");
+    const configured = await events.until("session.configured");
+    expect(configured.payload.model).toBe("sonnet");
+    await events.until("turn.completed");
+    expect(fake.controls).toEqual([{ setModel: "sonnet" }, { setMaxThinkingTokens: 0 }]);
+    // The next turn's report of the same switch is taken quietly: one event per switch.
+    session.sendTurn("go on");
+    await events.until("turn.completed");
+    expect(events.seen.filter((e) => e.type === "session.configured").map((e) => e.payload.model)).toEqual([
+      "claude-opus-5-5",
+      "sonnet",
+    ]);
+    await session.stop();
+  });
+
+  it("at Build it, an unset build model is the user's own default, not Claude Code's built-in one", async () => {
+    const fake = fakeQuery(approving(), { settings: { model: "claude-fable-1" } });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const models = { discuss: { model: "haiku", thinking: "off" as const }, build: { thinking: "medium" as const } };
+    const session = adapter.start({ threadId: THREAD, cwd: "/w/thread", phase: "discussing", models, prompts: PROMPTS });
+    const events = reader(session);
+    session.sendTurn("add it");
+    const requested = await events.until("proposal.requested");
+    session.respondToProposal(requested.requestId, "build");
+    await events.until("turn.completed");
+    // Their settings' model, live. Thinking that was off doesn't come back on live: the next
+    // turn starts a new session for it.
+    expect(fake.controls).toEqual([{ setModel: "claude-fable-1" }]);
+    expect(session.reconfigure({ models })).toBe("restart");
+    await session.stop();
+  });
+
+  it("reconfigure switches live what it can, and asks for a new session for the rest", async () => {
+    const { fake, session } = start(simpleTurn, { phase: "building", models, permissionMode: "acceptEdits" });
+    const settings = (build: { model?: string; thinking?: "off" | "low" | "medium" | "high" }, extra = {}) => ({
+      models: { ...models, build },
+      permissionMode: "acceptEdits" as const,
+      ...extra,
+    });
+    // Nothing changed.
+    expect(session.reconfigure(settings({ model: "sonnet", thinking: "off" }))).toBe("unchanged");
+    expect(fake.controls).toEqual([]);
+    // Another named model: live, and the caller can wait for it.
+    await session.reconfigure(settings({ model: "opus", thinking: "off" }));
+    expect(fake.controls).toEqual([{ setModel: "opus" }]);
+    // Back to the user's own model: live too, to what Claude says their default is (none here:
+    // setModel() is Claude Code's built-in one).
+    await session.reconfigure(settings({ thinking: "off" }));
+    expect(fake.controls).toEqual([{ setModel: "opus" }, { setModel: undefined }]);
+    // Thinking back on, another permission mode or subagent model: only a new session.
+    expect(session.reconfigure(settings({ thinking: "high" }))).toBe("restart");
+    expect(session.reconfigure(settings({ thinking: "off" }, { permissionMode: undefined }))).toBe("restart");
+    expect(
+      session.reconfigure({ models: { ...models, agents: "sonnet", build: { thinking: "off" } }, permissionMode: "acceptEdits" }),
+    ).toBe("restart");
+    expect(fake.controls).toHaveLength(2);
+    await session.stop();
+  });
+
+  it("the user's own default model is ANTHROPIC_MODEL first, then their settings", async () => {
+    const before = process.env.ANTHROPIC_MODEL;
+    process.env.ANTHROPIC_MODEL = "claude-from-env";
+    try {
+      const fake = fakeQuery(simpleTurn, { settings: { model: "claude-from-settings" } });
+      const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+      const session = adapter.start({ threadId: THREAD, cwd: "/w/thread", phase: "building", models });
+      await session.reconfigure({ models: { ...models, build: { thinking: "off" } } });
+      expect(fake.controls).toEqual([{ setModel: "claude-from-env" }]);
+      await session.stop();
+    } finally {
+      if (before === undefined) delete process.env.ANTHROPIC_MODEL;
+      else process.env.ANTHROPIC_MODEL = before;
+    }
+  });
+
+  it("a session the daemon restarted takes the user's own model before its first turn", async () => {
+    // Resumed without --model, Claude restores the conversation's last model when the user's
+    // settings name none: the first reconfigure puts their own default back.
+    const fake = fakeQuery(simpleTurn, { settings: { model: "claude-from-settings" } });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const settings = { models: { discuss: {}, build: {} } };
+    const session = adapter.start({ threadId: THREAD, cwd: "/w/thread", phase: "building", resumeSessionId: SESSION, restarted: true, ...settings });
+    await session.reconfigure(settings);
+    expect(fake.controls).toEqual([{ setModel: "claude-from-settings" }]);
+    expect(session.reconfigure(settings)).toBe("unchanged");
+    // Not restarted: whatever Claude restores is Claude's own resume, as in a terminal.
+    const plain = fakeQuery(simpleTurn);
+    const other = createClaudeAdapter({ query: plain.query, claudePath: "/opt/bin/claude" }).start({
+      threadId: THREAD,
+      cwd: "/w/thread",
+      phase: "building",
+      resumeSessionId: SESSION,
+      ...settings,
+    });
+    expect(other.reconfigure(settings)).toBe("unchanged");
+    await session.stop();
+    await other.stop();
+  });
+
+  it("between effort levels, back to the user's own and to thinking off, Claude switches live", async () => {
+    // Tenzo's own earlier switch sits in the flag layer, and so in the merged view: the user's
+    // own level is read from their sources without it.
+    const fake = fakeQuery(simpleTurn, {
+      settings: { effortLevel: "high" },
+      sources: [
+        { source: "userSettings", settings: { effortLevel: "medium" } },
+        { source: "projectSettings", settings: { effortLevel: "xhigh" } },
+        { source: "flagSettings", settings: { effortLevel: "high" } },
+      ],
+    });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const session = adapter.start({
+      threadId: THREAD,
+      cwd: "/w/thread",
+      phase: "building",
+      models: { discuss: {}, build: { thinking: "low" } },
+    });
+    await session.reconfigure({ models: { discuss: {}, build: { thinking: "high" } } });
+    await session.reconfigure({ models: { discuss: {}, build: {} } });
+    await session.reconfigure({ models: { discuss: {}, build: { thinking: "off" } } });
+    expect(fake.controls).toEqual([
+      { applyFlagSettings: { effortLevel: "high" } },
+      { applyFlagSettings: { effortLevel: "xhigh" } },
+      { setMaxThinkingTokens: 0 },
+    ]);
+    await session.stop();
+  });
+
+  it("a switch Claude refuses is reported, not thrown", async () => {
+    const fake = fakeQuery(simpleTurn, { controlError: new Error("model not found: nope") });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const session = adapter.start({ threadId: THREAD, cwd: "/w/thread", phase: "building", models });
+    const events = reader(session);
+    session.sendTurn("go");
+    await events.until("session.configured");
+    await session.reconfigure({ models: { ...models, build: { model: "nope", thinking: "off" } } });
+    const error = await events.until("runtime.error");
+    expect(error.payload.message).toBe("Couldn't switch to nope, thinking off: model not found: nope");
+    await session.stop();
+  });
+
+  it("knows when the agent has background work a restart would kill", async () => {
+    const tasks = (list: { task_id: string; task_type: string; description: string; ambient?: boolean }[]) =>
+      ({ type: "system", subtype: "background_tasks_changed", tasks: list, uuid: "u", session_id: SESSION }) as never;
+    let next = () => {};
+    const gate = () => new Promise<void>((resolve) => (next = resolve));
+    const script: Script = async function* () {
+      yield init();
+      yield tasks([{ task_id: "a", task_type: "local_agent", description: "Explore" }]);
+      await gate();
+      yield tasks([{ task_id: "w", task_type: "local_watcher", description: "watch", ambient: true }]);
+      await gate();
+      yield tasks([{ task_id: "m", task_type: "monitor_mcp", description: "CI", ambient: true }]);
+      await gate();
+      yield tasks([]);
+      yield result();
+    };
+    const { session, events } = start(script);
+    expect(session.backgroundWork).toBe(false);
+    session.sendTurn("go");
+    await events.until("session.configured");
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 5));
+    await settled();
+    expect(session.backgroundWork).toBe(true); // a background subagent
+    next();
+    await settled();
+    expect(session.backgroundWork).toBe(false); // Claude's own housekeeping only
+    next();
+    await settled();
+    expect(session.backgroundWork).toBe(true); // a Monitor the agent asked for
+    next();
+    await events.until("turn.completed");
+    expect(session.backgroundWork).toBe(false);
+    await session.stop();
+  });
+
+  it("planSwitch: live except thinking back on after off", () => {
+    expect(planSwitch({}, {})).toEqual({ restart: false });
+    expect(planSwitch({}, { model: "opus" })).toEqual({ model: "opus", restart: false });
+    expect(planSwitch({ model: "opus" }, {})).toEqual({ ownModel: true, restart: false });
+    expect(planSwitch({}, { thinking: "off" })).toEqual({ thinking: "off", restart: false });
+    expect(planSwitch({ thinking: "low" }, { thinking: "high" })).toEqual({ thinking: "high", restart: false });
+    expect(planSwitch({ thinking: "high" }, {})).toEqual({ ownThinking: true, restart: false });
+    expect(planSwitch({ thinking: "off" }, { thinking: "high" })).toEqual({ restart: true });
+    expect(planSwitch({ thinking: "off" }, {})).toEqual({ restart: true });
   });
 });
 

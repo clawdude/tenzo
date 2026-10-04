@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EnvironmentId } from "./ids.ts";
 
+export * from "./config.ts";
 export * from "./diff.ts";
 export * from "./finished.ts";
 export * from "./ids.ts";

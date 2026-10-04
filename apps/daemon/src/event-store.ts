@@ -155,6 +155,32 @@ export function openItems(store: Store, threadId?: ThreadId): QueueItem[] {
   );
 }
 
+/**
+ * A project's config cards (fold.ts, cause `config`): the open ones, of active threads, and the
+ * latest of all, open or not (a dismissed one keeps its problem away).
+ */
+export function configCards(
+  store: Store,
+  projectId: string,
+): { open: QueueItem[]; last: QueueItem | undefined } {
+  const all = queryItems(
+    store,
+    `WHERE kind = 'error' AND json_extract(body, '$.error.cause') = 'config'
+       AND thread_id IN (SELECT id FROM threads WHERE project_id = :project)`,
+    { project: projectId },
+  );
+  const active = new Set(
+    store.db
+      .prepare("SELECT id FROM threads WHERE project_id = ? AND status = 'active'")
+      .all(projectId)
+      .map((row) => String(row.id)),
+  );
+  return {
+    open: all.filter((item) => item.status === "open" && active.has(item.threadId)),
+    last: all.at(-1),
+  };
+}
+
 function queryItems(
   store: Store,
   where: string,

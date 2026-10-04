@@ -1,5 +1,6 @@
 import type {
   AgentKind,
+  PermissionModeName,
   RequestId,
   RuntimeEvent,
   ThreadId,
@@ -7,6 +8,7 @@ import type {
   TurnId,
   UserInputAnswers,
 } from "@tenzo/contracts";
+import type { SessionModels } from "../project-config.ts";
 import type { ThreadPrompts } from "../prompts.ts";
 
 /**
@@ -26,12 +28,26 @@ export interface StartSessionInput {
   cwd: string;
   /** The agent's session id from an earlier run (`AgentSession.sessionId`): continue it. */
   resumeSessionId?: string;
-  /** A model name the agent understands, e.g. "haiku". Default: the agent's own default. */
-  model?: string;
+  /**
+   * The daemon ended the thread's last session to change its settings (`reconfigure` said
+   * `restart`): what the conversation ran before is no guide to what this one should.
+   */
+  restarted?: boolean;
+  /**
+   * The models and thinking levels the thread runs with, per phase, Tenzo's precedence already
+   * applied (project-config.ts): `discuss` while discussing, `build` from Build it on, `agents`
+   * for subagents. Unset: the agent's own defaults (the user's config), as in their terminal.
+   */
+  models?: SessionModels;
+  /**
+   * The permission mode the project's config sets. Unset (the default): Tenzo sets none, and the
+   * user's own `defaultMode` applies, as in their terminal.
+   */
+  permissionMode?: PermissionModeName;
   /**
    * Where the thread is: which of Tenzo's thread prompts the session gets. Discussing: talk, don't
-   * change anything yet. Building or review: build. The permission mode is never Tenzo's: the
-   * user's own settings decide it, in every phase.
+   * change anything yet. Building or review: build. The permission mode is never Tenzo's unless
+   * the project's config sets one (`permissionMode`): the user's own settings decide it.
    */
   phase: ThreadPhase;
   /** Where `attach` keeps its copies (`<home>/attachments/<thread>`). None: attach refuses. */
@@ -45,6 +61,12 @@ export interface StartSessionInput {
   prompts?: ThreadPrompts;
   /** The daemon, for the tools that need it (`start_thread`, phase checks). None: they refuse. */
   host?: SessionHost;
+}
+
+/** What Tenzo chooses for a session: the models per phase, and the permission mode if any. */
+export interface SessionSettings {
+  models: SessionModels;
+  permissionMode?: PermissionModeName | undefined;
 }
 
 /** What a session asks of the daemon while it runs. */
@@ -89,6 +111,19 @@ export interface AgentSession {
    * change something, with a note saying what. The agent's `propose` call returns with it.
    */
   respondToProposal(requestId: RequestId, decision: "build" | "change", note?: string): void;
+  /**
+   * What the session should run with now (the thread's own choice or its project's config
+   * changed, or the phase did). `unchanged`: nothing to do. A promise: it is switching in place,
+   * settled once done (it never rejects); the daemon sends the next turn after it. `restart`: it
+   * can't take it live and changed nothing; the daemon ends the session at the turn boundary
+   * and starts it again with the new settings (`restarted`).
+   */
+  reconfigure(settings: SessionSettings): "unchanged" | "restart" | Promise<void>;
+  /**
+   * The agent has work running in the background (a background subagent, a background shell, a
+   * Monitor) that ending the session would kill: the daemon doesn't restart it meanwhile.
+   */
+  readonly backgroundWork: boolean;
   /**
    * Stops the running turn; the session stays up for the next one. Open questions and requests
    * are cancelled (`*.resolved` with cancel).

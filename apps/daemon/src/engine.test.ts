@@ -14,7 +14,7 @@ import { carryOn, RESTART_PROMPT } from "./answers.ts";
 import { executeCommand } from "./commands.ts";
 import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, sentence, STILL_LANDED } from "./engine.ts";
 import { STALLED_PROMPT } from "./prompts.ts";
-import { addProject } from "./projects.ts";
+import { addProject, findProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
 import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 import { getThread, projectOf } from "./threads.ts";
@@ -32,6 +32,9 @@ const color: UserInputQuestion = {
   multiSelect: false,
 };
 const blue = { kind: "question", answers: { "Which color?": "Blue (Recommended)" } } as const;
+
+/** A thread started with `model: "haiku"` runs it in every phase. */
+const HAIKU = { discuss: { model: "haiku" }, build: { model: "haiku" } };
 
 let home: string;
 let stores: Store[];
@@ -53,7 +56,7 @@ afterEach(async () => {
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
 function daemon(
   adapter = new FakeAdapter(),
-  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs"> = {},
+  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs" | "switchTimeoutMs"> = {},
 ) {
   const store = openStore(home);
   stores.push(store);
@@ -97,7 +100,7 @@ describe("Engine: running threads", () => {
     expect(ThreadView.parse(thread)).toEqual(thread);
     expect(thread).toMatchObject({ title: "Hello there", activity: "working", projectName: "app" });
     const session = d.adapter.last;
-    expect(session.input).toMatchObject({ cwd: thread.worktreePath, model: "haiku" });
+    expect(session.input).toMatchObject({ cwd: thread.worktreePath, models: HAIKU });
     expect(session.input.resumeSessionId).toBeUndefined();
     expect(session.prompts).toEqual(["Hello there"]);
 
@@ -174,7 +177,7 @@ describe("Engine: running threads", () => {
     d.engine.send(thread.id, "again");
     const second = d.adapter.last;
     expect(second).not.toBe(first);
-    expect(second.input).toMatchObject({ resumeSessionId: first.sessionId, model: "haiku" });
+    expect(second.input).toMatchObject({ resumeSessionId: first.sessionId, models: HAIKU });
     expect(second.prompts).toEqual(["again"]);
   });
 
@@ -206,12 +209,12 @@ describe("Engine: running threads", () => {
   it("runs threads started without a model on the default model, if there is one", async () => {
     const d = daemon(new FakeAdapter(), { defaultModel: "haiku" });
     await d.engine.createThread({ project: "app", prompt: "cheap" });
-    expect(d.adapter.last.input.model).toBe("haiku");
+    expect(d.adapter.last.input.models?.discuss.model).toBe("haiku");
     await d.engine.createThread({ project: "app", prompt: "dear", model: "opus" });
-    expect(d.adapter.last.input.model).toBe("opus");
+    expect(d.adapter.last.input.models?.discuss.model).toBe("opus");
     const plain = daemon();
     await plain.engine.createThread({ project: "app", prompt: "default" });
-    expect(plain.adapter.last.input.model).toBeUndefined();
+    expect(plain.adapter.last.input.models).toEqual({ discuss: {}, build: {} });
   });
 
   it("says when each thread was last active", async () => {
@@ -783,7 +786,7 @@ describe("Engine: restarts", () => {
 
     await second.engine.answer(items[0]?.id ?? "", blue);
     const resumed = second.adapter.last;
-    expect(resumed.input).toMatchObject({ resumeSessionId: sessionId, model: "haiku" });
+    expect(resumed.input).toMatchObject({ resumeSessionId: sessionId, models: HAIKU });
     expect(resumed.prompts[0]).toContain("My answer: Blue");
     resumed.say("Blue it is.");
     resumed.complete();
@@ -1915,5 +1918,538 @@ describe("Engine: error items", () => {
     expect(carryOn({ cause: "crash", message: "x", prompts: [RESTART_PROMPT] })).not.toContain(
       "It began with",
     );
+  });
+});
+
+describe("Engine: project config", () => {
+  const repo = (d: ReturnType<typeof daemon>) => findProject(d.store, "app").path;
+  function writeConfig(d: ReturnType<typeof daemon>, name: "config" | "local", value: unknown) {
+    mkdirSync(join(repo(d), ".tenzo"), { recursive: true });
+    writeFileSync(
+      join(repo(d), ".tenzo", `${name}.json`),
+      typeof value === "string" ? value : JSON.stringify(value),
+    );
+  }
+  /** The session ends between turns, so the thread's next prompt starts a new one. */
+  async function endSession(d: ReturnType<typeof daemon>) {
+    d.adapter.last.complete();
+    d.adapter.last.crash();
+    await settle();
+  }
+  const configItems = (d: ReturnType<typeof daemon>) =>
+    d.engine.snapshot().items.filter((i) => i.kind === "error" && i.error?.cause === "config");
+
+  it("passes the config's models per phase, subagents' model and permission mode to each session", async () => {
+    const d = daemon();
+    writeConfig(d, "config", {
+      agent: "claude",
+      models: {
+        discuss: { model: "haiku", thinking: "off" },
+        build: { model: "sonnet", thinking: "low" },
+        agents: { model: "haiku" },
+      },
+      permissions: "acceptEdits",
+    });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input).toMatchObject({
+      phase: "discussing",
+      models: {
+        discuss: { model: "haiku", thinking: "off" },
+        build: { model: "sonnet", thinking: "low" },
+        agents: "haiku",
+      },
+      permissionMode: "acceptEdits",
+    });
+    expect(configItems(d)).toEqual([]);
+  });
+
+  it("reads the config again as each session starts: an edit applies without a restart", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { models: { discuss: { model: "haiku" } } });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input.models?.discuss).toEqual({ model: "haiku" });
+    // Your own local.json overrides the committed file.
+    writeConfig(d, "local", { models: { discuss: { thinking: "high" } }, permissions: "dontAsk" });
+    await endSession(d);
+    d.engine.send(thread.id, "Again");
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.input).toMatchObject({
+      models: { discuss: { model: "haiku", thinking: "high" } },
+      permissionMode: "dontAsk",
+    });
+  });
+
+  it("with no config, a session gets no models, thinking or permission mode", async () => {
+    const d = daemon();
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input.models).toEqual({ discuss: {}, build: {} });
+    expect(d.adapter.last.input).not.toHaveProperty("permissionMode");
+    expect(d.engine.snapshot().threads[0]).toMatchObject({ model: null, thinking: null, landing: "merge" });
+  });
+
+  it("TENZO_DEFAULT_MODEL fills in where the config names no model", async () => {
+    const d = daemon(new FakeAdapter(), { defaultModel: "haiku" });
+    writeConfig(d, "config", { models: { discuss: { model: "opus" } } });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input.models).toEqual({ discuss: { model: "opus" }, build: { model: "haiku" } });
+    // The default is not the thread's own: it isn't stored on it.
+    expect(thread.model).toBeNull();
+  });
+
+  it("an invalid config is a clear error card, and the thread runs on the defaults meanwhile", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { models: { build: { thinking: "max" } } });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    // The thread went on: its prompt was sent, on the agent's own defaults.
+    expect(d.adapter.last.prompts).toEqual(["Go"]);
+    expect(d.adapter.last.input.models).toEqual({ discuss: {}, build: {} });
+    const [card, ...more] = configItems(d);
+    expect(more).toEqual([]);
+    expect(QueueItem.parse(card)).toEqual(card);
+    expect(card).toMatchObject({
+      threadId: thread.id,
+      lane: "quick",
+      ask: "The project's Tenzo config is invalid",
+      error: { cause: "config", prompts: [] },
+    });
+    expect(card?.error?.message).toMatch(/^\.tenzo\/config\.json: models\.build\.thinking: /);
+
+    // Still wrong at the next session: still the one card.
+    await endSession(d);
+    d.engine.send(thread.id, "Again");
+    await settle();
+    expect(configItems(d).map((i) => i.id)).toEqual([card?.id]);
+
+    // Wrong another way: the card says what is wrong now.
+    writeConfig(d, "config", "{");
+    await endSession(d);
+    d.engine.send(thread.id, "Once more");
+    await settle();
+    const [now] = configItems(d);
+    expect(now?.id).not.toBe(card?.id);
+    expect(now?.error?.message).toMatch(/isn't valid JSON/);
+
+    // Fixed: the card goes by itself at the next session.
+    writeConfig(d, "config", { models: { build: { thinking: "high" } } });
+    await endSession(d);
+    d.engine.send(thread.id, "Fixed");
+    await settle();
+    expect(configItems(d)).toEqual([]);
+    expect(d.adapter.last.input.models).toEqual({ discuss: {}, build: { thinking: "high" } });
+    const recovered = d.engine
+      .events(thread.id)
+      .events.filter((e) => e.event.type === "config.checked")
+      .map((e) => (e.event.type === "config.checked" ? e.event.payload.problem : undefined));
+    expect(recovered.at(-1)).toBeNull();
+  });
+
+  it("Retry on a config card reads the config again and sends the agent nothing", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { landing: "squash" });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const [card] = configItems(d);
+
+    // Not fixed yet: a new card, still saying what is wrong.
+    const again = await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    expect(again).toMatchObject({ delivery: "none", item: { resolution: { kind: "retried" } } });
+    const [next] = configItems(d);
+    expect(next?.id).not.toBe(card?.id);
+    expect(next?.error?.message).toMatch(/landing: /);
+
+    writeConfig(d, "config", { landing: "pr", models: { discuss: { model: "haiku" } } });
+    await d.engine.answer(next?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(configItems(d)).toEqual([]);
+    // The running session took the fixed config's models at once; no prompt went.
+    expect(d.adapter.last.reconfigured.at(-1)).toEqual({ models: { discuss: { model: "haiku" }, build: {} } });
+    expect(d.adapter.last.prompts).toEqual(["Go"]);
+    expect(d.adapter.sessions).toHaveLength(1);
+    expect(d.engine.snapshot().threads[0]?.landing).toBe("pr");
+  });
+
+  it("a config card survives the thread's next turn: only a fixed config clears it", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { agent: "codex" });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    d.adapter.last.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(d.adapter.last.prompts).toEqual(["Go", "Next"]);
+    expect(configItems(d)).toHaveLength(1);
+  });
+
+  it("never takes auto or bypassPermissions from the repo's files: a card says where they belong", async () => {
+    for (const [name, mode] of [
+      ["config", "auto"],
+      ["local", "bypassPermissions"],
+    ] as const) {
+      const d = daemon();
+      writeConfig(d, name, { permissions: mode });
+      const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+      await settle();
+      expect(d.adapter.last.input).not.toHaveProperty("permissionMode");
+      const card = configItems(d).find((i) => i.threadId === thread.id);
+      expect(card?.error?.message).toMatch(/never taken from a file in the repo.*~\/\.claude\/settings\.json/);
+      await d.engine.archive(thread.id);
+      rmSync(join(repo(d), ".tenzo"), { recursive: true });
+    }
+  });
+
+  it("takes a new setting before the next turn: live when it can, else in a new session at the turn boundary", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { models: { discuss: { model: "haiku" } } });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+
+    // An edit the session can take live: it does, and the next prompt goes to it.
+    writeConfig(d, "config", { models: { discuss: { model: "sonnet" } } });
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(first.reconfigured.at(-1)).toEqual({ models: { discuss: { model: "sonnet" }, build: {} } });
+    expect(first.prompts).toEqual(["Go", "Next"]);
+    expect(d.adapter.sessions).toHaveLength(1);
+
+    // One it can't (back to the user's own model): the session ends here, and the next one
+    // resumes it with the new settings and takes the prompt. No card: nothing went wrong.
+    rmSync(join(repo(d), ".tenzo"), { recursive: true });
+    first.reconfigureResult = "restart";
+    first.complete();
+    d.engine.send(thread.id, "Last");
+    await settle();
+    expect(first.stopped).toBe(true);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.input).toMatchObject({
+      resumeSessionId: first.sessionId,
+      restarted: true,
+      models: { discuss: {}, build: {} },
+    });
+    expect(d.adapter.last.prompts).toEqual(["Last"]);
+    expect(d.engine.snapshot().items).toEqual([]);
+  });
+
+  it("the first turn after a restart waits for the restarted session to take the settings", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    let done = () => {};
+    d.adapter.onStart = (session) => {
+      if (session.input.restarted) session.reconfigureResult = new Promise<void>((resolve) => (done = resolve));
+    };
+    first.reconfigureResult = "restart";
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    const second = d.adapter.last;
+    expect(second).not.toBe(first);
+    expect(second.input.restarted).toBe(true);
+    // The engine asked it, and the turn waits for its switch.
+    expect(second.reconfigured).toHaveLength(1);
+    expect(second.prompts).toEqual([]);
+    second.reconfigureResult = "unchanged";
+    done();
+    await settle();
+    expect(second.prompts).toEqual(["Next"]);
+  });
+
+  it("a switch that never answers times out into a restart at the turn boundary", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.reconfigureResult = new Promise<void>(() => {});
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    expect(first.stopped).toBe(true);
+    expect(first.prompts).toEqual(["Go"]);
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.input.restarted).toBe(true);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    const notes = d.engine.events(thread.id).events.filter((e) => e.event.type === "runtime.error");
+    expect(notes.map((e) => (e.event.type === "runtime.error" ? e.event.payload.message : ""))).toEqual([
+      "Claude didn't confirm the switch of model or thinking in time.",
+    ]);
+  });
+
+  it("a switch that always hangs restarts the session once, then the turn goes as things are", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 20 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    d.adapter.onStart = (session) => {
+      session.reconfigureResult = new Promise<void>(() => {});
+    };
+    d.adapter.last.reconfigureResult = new Promise<void>(() => {});
+    d.adapter.last.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.sessions[0]?.prompts).toEqual(["Go"]);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    const notes = d.engine
+      .events(thread.id)
+      .events.flatMap((e) => (e.event.type === "runtime.error" ? [e.event.payload.message] : []));
+    expect(notes).toEqual([
+      "Claude didn't confirm the switch of model or thinking in time.",
+      "Claude didn't confirm the switch of model or thinking in time; this turn runs on what it has.",
+    ]);
+    expect(d.engine.snapshot().items).toEqual([]);
+  });
+
+  it("never restarts in the middle of a turn Claude started by itself", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.complete();
+    // A background task reports: Claude opens a turn of its own.
+    first.emit({ type: "turn.started", turnId: "33333333-3333-4333-8333-333333333333", payload: {} });
+    await settle();
+    first.reconfigureResult = "restart";
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+  });
+
+  it("a session that won't end for a restart is let go of: its prompts go on a card, and Retry sends them", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.reconfigureResult = "restart";
+    first.stopHangs = true;
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    const [card] = d.engine.snapshot().items;
+    expect(card).toMatchObject({ kind: "error", error: { cause: "start", prompts: ["Next"] } });
+    expect(card?.error?.message).toMatch(/couldn't restart the agent to change its settings: it didn't stop/);
+    // Whatever the old one still says is no longer the thread's.
+    first.say("late words");
+    await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    expect(JSON.stringify(d.engine.events(thread.id).events)).not.toContain("late words");
+  });
+
+  it("never restarts a session with background work: the change waits, the turn goes", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.backgroundWork = true;
+    first.reconfigureResult = "restart";
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+    // Its background work done, the next turn boundary restarts it.
+    first.backgroundWork = false;
+    first.complete();
+    d.engine.send(thread.id, "Last");
+    await settle();
+    expect(first.stopped).toBe(true);
+    expect(d.adapter.last.prompts).toEqual(["Last"]);
+  });
+
+  it("nor after a switch times out while it has background work", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.backgroundWork = true;
+    first.reconfigureResult = new Promise<void>(() => {});
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    // Asked again after the timeout, it has nothing more to switch (as Claude's adapter, which
+    // counts a switch as done once asked).
+    first.reconfigureResult = "unchanged";
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+  });
+
+  it("a turn waits for a switch under way: it runs on the new model from its start", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const session = d.adapter.last;
+    let done = () => {};
+    session.reconfigureResult = new Promise<void>((resolve) => (done = resolve));
+    session.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(session.prompts).toEqual(["Go"]);
+    expect(d.engine.view(thread.id).working).toBe(true);
+    session.reconfigureResult = "unchanged";
+    done();
+    await settle();
+    expect(session.prompts).toEqual(["Go", "Next"]);
+    expect(d.adapter.sessions).toHaveLength(1);
+  });
+
+  it("one config card per project, however many threads find the problem", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { landing: "squash" });
+    const a = await d.engine.createThread({ project: "app", prompt: "A" });
+    await d.engine.createThread({ project: "app", prompt: "B" });
+    await settle();
+    expect(configItems(d).map((i) => i.threadId)).toEqual([a.id]);
+    // Fixed: a session start anywhere in the project clears it.
+    writeConfig(d, "config", { landing: "pr" });
+    await d.engine.createThread({ project: "app", prompt: "C" });
+    await settle();
+    expect(configItems(d)).toEqual([]);
+  });
+
+  it("Dismiss puts the card away until what is wrong changes; telling the agent isn't offered", async () => {
+    const d = daemon();
+    writeConfig(d, "config", { landing: "squash" });
+    await d.engine.createThread({ project: "app", prompt: "A" });
+    await settle();
+    const [card] = configItems(d);
+    expect(card?.options.map((o) => o.value)).toEqual(["retry", "dismiss"]);
+    await expect(d.engine.answer(card?.id ?? "", { kind: "error", action: "tell", text: "hi" })).rejects.toThrow(
+      /config card/,
+    );
+    await expect(d.engine.answer(card?.id ?? "", { kind: "error", action: "archive" })).rejects.toThrow(/config card/);
+    const dismissed = await d.engine.answer(card?.id ?? "", { kind: "error", action: "dismiss" });
+    expect(dismissed).toMatchObject({ delivery: "none", item: { resolution: { kind: "acknowledged" } } });
+    expect(d.adapter.last.prompts).toEqual(["A"]);
+
+    // The same problem: no card again.
+    await d.engine.createThread({ project: "app", prompt: "B" });
+    await settle();
+    expect(configItems(d)).toEqual([]);
+    // Another: a card.
+    writeConfig(d, "config", { agent: "codex" });
+    await d.engine.createThread({ project: "app", prompt: "C" });
+    await settle();
+    expect(configItems(d)).toHaveLength(1);
+  });
+
+  it("only a config card can be dismissed", async () => {
+    const d = daemon();
+    d.adapter.failWith = new Error("claude: command not found");
+    await d.engine.createThread({ project: "app", prompt: "hi" });
+    const [item] = d.engine.snapshot().items;
+    await expect(d.engine.answer(item?.id ?? "", { kind: "error", action: "dismiss" })).rejects.toThrow(
+      /can't be dismissed/,
+    );
+  });
+
+  it("carries the project's landing rule on every thread view, read again when it changes", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", title: "Quiet" });
+    expect(thread.landing).toBe("merge");
+    writeConfig(d, "config", { landing: "pr" });
+    expect(d.engine.view(thread.id).landing).toBe("pr");
+    expect(ThreadView.parse(d.engine.snapshot().threads[0])).toMatchObject({ landing: "pr" });
+    writeConfig(d, "local", { landing: "merge" });
+    expect(d.engine.view(thread.id).landing).toBe("merge");
+    // An invalid config lands the default way.
+    writeConfig(d, "local", "nope");
+    expect(d.engine.view(thread.id).landing).toBe("merge");
+  });
+});
+
+describe("Engine: a thread's own model (thread.setModel)", () => {
+  function writeConfig(d: ReturnType<typeof daemon>, value: unknown) {
+    const root = findProject(d.store, "app").path;
+    mkdirSync(join(root, ".tenzo"), { recursive: true });
+    writeFileSync(join(root, ".tenzo", "config.json"), JSON.stringify(value));
+  }
+
+  it("sets the thread's model over the project's config, persisted, and switches the running session", async () => {
+    const d = daemon();
+    writeConfig(d, { models: { discuss: { model: "haiku" }, build: { model: "sonnet", thinking: "low" }, agents: { model: "haiku" } } });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const command = Command.parse({ type: "thread.setModel", threadId: thread.id, model: "opus", thinking: "high" });
+    const outcome = await executeCommand(d.engine, command);
+    expect(outcome.ok).toBe(true);
+    const { thread: view } = CommandResults["thread.setModel"].parse(outcome.ok ? outcome.result : null);
+    expect(view).toMatchObject({ model: "opus", thinking: "high" });
+    expect(d.adapter.last.reconfigured).toEqual([
+      {
+        models: {
+          discuss: { model: "opus", thinking: "high" },
+          build: { model: "opus", thinking: "high" },
+          agents: "haiku",
+        },
+      },
+    ]);
+
+    // Kept across a restart, and the next session starts with it.
+    kill(d);
+    const next = daemon();
+    expect(next.engine.view(thread.id)).toMatchObject({ model: "opus", thinking: "high" });
+    next.engine.send(thread.id, "Again");
+    await settle();
+    expect(next.adapter.last.input.models?.discuss).toEqual({ model: "opus", thinking: "high" });
+
+    // A model alone keeps the thread's thinking.
+    next.engine.setModel(thread.id, { model: "sonnet" });
+    expect(next.engine.view(thread.id)).toMatchObject({ model: "sonnet", thinking: "high" });
+
+    // Cleared: the project's config decides again.
+    next.engine.setModel(thread.id, { model: null, thinking: null });
+    expect(next.engine.view(thread.id)).toMatchObject({ model: null, thinking: null });
+    expect(next.adapter.last.reconfigured.at(-1)).toEqual({
+      models: { discuss: { model: "haiku" }, build: { model: "sonnet", thinking: "low" }, agents: "haiku" },
+    });
+  });
+
+  it("refuses a name that isn't a model's, and keeps what the thread had", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", title: "Named" });
+    d.engine.setModel(thread.id, { model: "opus", thinking: "low" });
+    for (const bad of ["--dangerously-skip-permissions x", "-x", "--x", "a b", "x".repeat(101), "é"]) {
+      expect(() => d.engine.setModel(thread.id, { model: bad })).toThrow(/isn't a model name/);
+      expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: bad }).success).toBe(false);
+    }
+    expect(d.engine.view(thread.id)).toMatchObject({ model: "opus", thinking: "low" });
+    for (const good of ["claude-sonnet-5-5", "opus[1m]", "us.anthropic.claude-haiku-4-5-20251001-v1:0", "claude-opus@2026"]) {
+      expect(d.engine.setModel(thread.id, { model: good }).model).toBe(good);
+    }
+  });
+
+  it("a thinking level alone keeps the config's models", async () => {
+    const d = daemon();
+    writeConfig(d, { models: { build: { model: "sonnet" } } });
+    const thread = await d.engine.createThread({ project: "app", title: "Idle" });
+    const view = d.engine.setModel(thread.id, { model: null, thinking: "off" });
+    expect(view).toMatchObject({ model: null, thinking: "off" });
+    d.engine.send(thread.id, "Go");
+    await settle();
+    expect(d.adapter.last.input.models).toEqual({ discuss: { thinking: "off" }, build: { model: "sonnet", thinking: "off" } });
+  });
+
+  it("refuses an archived thread, and a model that is only spaces", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", title: "Gone" });
+    expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: "  " }).success).toBe(false);
+    expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: "x", thinking: "max" }).success).toBe(false);
+    await d.engine.archive(thread.id);
+    expect(() => d.engine.setModel(thread.id, { model: "opus" })).toThrow(/archived/);
   });
 });

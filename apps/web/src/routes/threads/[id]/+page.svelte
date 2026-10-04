@@ -1,6 +1,8 @@
 <script lang="ts">
 	import { page } from '$app/state';
 	import { emptyFeed, type Feed } from '@tenzo/client-runtime';
+	import ModelMenu from '#lib/ModelMenu.svelte';
+	import { runningModel } from '#lib/model.ts';
 	import Timeline from '#lib/Timeline.svelte';
 	import { back, leaveTo } from '#lib/nav.ts';
 	import { connectionLabel } from '#lib/status.ts';
@@ -40,7 +42,11 @@
 				Back
 			</button>
 			<span class="text-[13px] font-semibold tracking-[0.06em] text-mute uppercase">So far</span>
-			<span class="w-[72px]"></span>
+			<span class="flex w-[72px] justify-end">
+				{#if thread}
+					<ModelMenu {thread} running={runningModel(feed.events)} />
+				{/if}
+			</span>
 		</header>
 
 		<div class="shrink-0 px-6 pt-2 pb-3">

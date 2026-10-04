@@ -32,7 +32,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 
 ## M3 · Config and automations
 
-- [ ] `.tenzo/config.json` + `local.json`: agent, models per phase with thinking level, permissions, landing rule; per-thread model override
+- [x] #34 `.tenzo/config.json` + `local.json`: agent, models per phase with thinking level, permissions, landing rule; per-thread model override
 - [ ] Automations: saved prompt + project + trigger (schedule, run now); last-run summary, notes file, skip-if-running, per-run budget that pauses and asks
 - [ ] Automations list with "run now" (full screen is post-MVP)
 

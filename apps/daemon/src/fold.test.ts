@@ -968,6 +968,29 @@ describe("foldEvent: review actions and landing", () => {
     expect(next.state.open).toEqual([]);
   });
 
+  it("config.checked opens one config card that outlives our turns; a fix resolves it", () => {
+    const checked = (problem: string | null) => ev({ type: "config.checked", payload: { problem } });
+    const { state, items } = fold(
+      started(),
+      checked(".tenzo/config.json: landing: bad"),
+      checked(".tenzo/config.json: agent: bad"),
+      turnStarted(),
+    );
+    expect(state.open).toMatchObject([
+      {
+        kind: "error",
+        lane: "quick",
+        ask: "The project's Tenzo config is invalid",
+        error: { cause: "config", message: ".tenzo/config.json: agent: bad", prompts: [] },
+      },
+    ]);
+    expect(QueueItem.parse(state.open[0])).toEqual(state.open[0]);
+    expect(items.find((i) => i.error?.message.includes("landing"))?.resolution).toEqual({ kind: "superseded" });
+    const fixed = fold(started(), checked("wrong"), turnStarted(), checked(null));
+    expect(fixed.state.open).toEqual([]);
+    expect(fixed.items[0]?.resolution).toEqual({ kind: "recovered" });
+  });
+
   it("landed changes nothing by itself: the daemon archives the thread", () => {
     const before = fold(...built(), reviewed("merge"));
     const after = fold(

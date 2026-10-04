@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { ModelName, ThinkingLevel } from "./config.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
 import { EnvironmentId } from "./ids.ts";
@@ -21,7 +22,7 @@ export const Command = z.discriminatedUnion("type", [
     title: z.string().min(1).optional(),
     prompt: z.string().min(1).optional(),
     /** A model the agent understands, e.g. "haiku". Kept for the thread's later turns. */
-    model: z.string().min(1).optional(),
+    model: ModelName.optional(),
     /**
      * A key the client makes up for this one request (a random id per draft) and sends again
      * when it retries. The daemon answers a key it has seen with the thread it made then, so a
@@ -70,6 +71,18 @@ export const Command = z.discriminatedUnion("type", [
   }),
   /** WebSocket only: stop following a thread's events. */
   z.object({ type: z.literal("thread.unwatch"), threadId: z.string().min(1) }),
+  /**
+   * The thread's own model and thinking level, over its project's config, in every phase from
+   * now on. `model` null: the project's config decides the model again. `thinking` null: the
+   * same for thinking; left out: the thread's thinking stays as it is. A running session
+   * switches at once where Claude can, else at its next turn (engine.ts).
+   */
+  z.object({
+    type: z.literal("thread.setModel"),
+    threadId: z.string().min(1),
+    model: ModelName.nullable(),
+    thinking: ThinkingLevel.nullable().optional(),
+  }),
   /** What the thread changed against the project's default branch: files with +/−. */
   z.object({ type: z.literal("thread.diff"), threadId: z.string().min(1) }),
   /** The projects a thread can start in, by name. */
@@ -106,6 +119,7 @@ export const CommandResults = {
   "thread.create": z.object({ thread: ThreadView }),
   "thread.send": z.object({ thread: ThreadView }),
   "thread.archive": z.object({ thread: ThreadView }),
+  "thread.setModel": z.object({ thread: ThreadView }),
   "thread.list": z.object({ threads: z.array(ThreadView) }),
   "thread.events": z.object({
     thread: ThreadView,
@@ -135,8 +149,8 @@ export const CommandResults = {
      * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
      * asked had stopped, or nothing waits on the item (an error, finished work, a ready PR), so
      * the answer goes to it as its next prompt.
-     * `none`: nothing goes to the agent (finished work marked done). `archived`: an error item
-     * answered with Archive; the thread is gone.
+     * `none`: nothing goes to the agent (finished work marked done, a config card retried).
+     * `archived`: an error item answered with Archive; the thread is gone.
      */
     delivery: z.enum(["live", "message", "none", "archived"]),
     thread: ThreadView,

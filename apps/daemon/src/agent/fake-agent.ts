@@ -11,7 +11,13 @@ import type {
 } from "@tenzo/contracts";
 import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
-import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
+import type {
+  AgentAdapter,
+  AgentSession,
+  EventDraft,
+  SessionSettings,
+  StartSessionInput,
+} from "./agent.ts";
 import { boundedInput, summarizeTool } from "./claude-events.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import { AsyncQueue } from "./queue.ts";
@@ -266,6 +272,22 @@ export class FakeSession implements AgentSession {
     });
   }
 
+  /** Set by a test: the agent has background work running. */
+  backgroundWork = false;
+
+  /** What `reconfigure` was told, in order. */
+  readonly reconfigured: SessionSettings[] = [];
+  /**
+   * What `reconfigure` answers: `restart` for a change the agent can't take live, a promise for
+   * a switch under way (the test settles it).
+   */
+  reconfigureResult: "unchanged" | "restart" | Promise<void> = "unchanged";
+
+  reconfigure(settings: SessionSettings): "unchanged" | "restart" | Promise<void> {
+    this.reconfigured.push(settings);
+    return this.reconfigureResult;
+  }
+
   async interrupt(): Promise<void> {
     for (const [requestId, kind] of this.pending) {
       const turn = this.#inTurn();
@@ -281,8 +303,12 @@ export class FakeSession implements AgentSession {
     if (this.turnId) this.complete("interrupted");
   }
 
+  /** Set by a test: `stop` never finishes (a process that won't end). */
+  stopHangs = false;
+
   async stop(): Promise<void> {
     this.stopped = true;
+    if (this.stopHangs) return new Promise(() => {});
     this.#end("graceful");
   }
 

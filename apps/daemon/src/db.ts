@@ -172,6 +172,15 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX events_by_type ON events (type);
     `,
   },
+  {
+    name: "thread model override",
+    sql: `
+      -- The thread's own thinking level ('off' | 'low' | 'medium' | 'high'), over its project's
+      -- .tenzo/config.json; NULL: the config decides. \`model\` is the thread's own model the
+      -- same way (set at start or by thread.setModel); no longer filled from TENZO_DEFAULT_MODEL.
+      ALTER TABLE threads ADD COLUMN thinking TEXT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

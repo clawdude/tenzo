@@ -67,6 +67,8 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		status: 'active',
 		agent: 'claude',
 		model: null,
+		thinking: null,
+		landing: 'merge',
 		createdAt: at,
 		updatedAt: at,
 		archivedAt: null,

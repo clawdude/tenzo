@@ -56,6 +56,13 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     return { kind: "ready", decision: "changes", note };
   }
   if (answer.kind === "error") {
+    const config = item.error?.cause === "config";
+    if (config && answer.action !== "retry" && answer.action !== "dismiss") {
+      throw new TenzoError(`${item.id} is the project's config card: fix the file, then retry, or dismiss it.`);
+    }
+    if (!config && answer.action === "dismiss") {
+      throw new TenzoError(`${item.id} can't be dismissed: retry it, archive the thread, or tell it something.`);
+    }
     if (answer.action !== "tell") return { kind: "error", action: answer.action };
     const text = answer.text?.trim();
     if (!text) throw new TenzoError("Say what to tell it.");
@@ -164,7 +171,10 @@ export function errorPrompts(
   answer: Extract<ItemAnswer, { kind: "error" }>,
 ): string[] {
   if (answer.action === "tell") return [answer.text ?? ""];
+  if (answer.action === "dismiss") return [];
   const error = item.error;
+  // Retry on a config card reads the config again (engine.ts): nothing goes to the agent.
+  if (error?.cause === "config") return [];
   const resend =
     error?.cause === "start" || error?.cause === "stalled" || error?.cause === "unarchived";
   if (resend && error.prompts.length > 0) return error.prompts;
@@ -274,6 +284,11 @@ export function answerFromWords(item: QueueItem, words: readonly string[]): Item
   }
   if (item.kind === "error") {
     const text = words.join(" ").trim();
+    if (item.error?.cause === "config") {
+      if (/^(1|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
+      if (/^(2|d|dismiss)$/i.test(text)) return { kind: "error", action: "dismiss" };
+      throw new TenzoError("Answer with retry (once the file is fixed) or dismiss.");
+    }
     if (/^(1|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
     if (/^(2|archive)$/i.test(text)) return { kind: "error", action: "archive" };
     if (text === "") throw new TenzoError("Answer with retry, archive, or what to tell it.");
