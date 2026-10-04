@@ -46,6 +46,7 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
           ...(command.title ? { title: command.title } : {}),
           ...(command.prompt ? { prompt: command.prompt } : {}),
           ...(command.model ? { model: command.model } : {}),
+          ...(command.clientKey ? { clientKey: command.clientKey } : {}),
         }),
       };
     case "thread.send":

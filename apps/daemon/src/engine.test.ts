@@ -269,6 +269,84 @@ describe("Engine: names and projects", () => {
     expect(getThread(d.store, thread.id).title).toBe("Something long");
   });
 
+  it("names on startup a stand-in the last daemon stopped naming, gracefully or killed", async () => {
+    // Thinks until stopped, then has nothing (as the Claude titler does when aborted).
+    const slow = (_prompt: string, signal: AbortSignal) =>
+      new Promise<null>((resolve) => signal.addEventListener("abort", () => resolve(null)));
+    const d1 = daemon(new FakeAdapter(), { titler: slow });
+    const closed = await d1.engine.createThread({ project: "app", prompt: "Make the login page faster" });
+    engines.splice(engines.indexOf(d1.engine), 1);
+    await d1.engine.close(); // mid-naming
+    const d2 = daemon(new FakeAdapter(), { titler: slow });
+    const killed = await d2.engine.createThread({ project: "app", prompt: "Drop the legacy exporter" });
+    kill(d2); // mid-naming, without a word
+
+    const { titler, calls } = fakeTitler();
+    const d3 = daemon(new FakeAdapter(), { titler });
+    expect(calls.map((c) => c.prompt)).toEqual([
+      "Make the login page faster",
+      "Drop the legacy exporter",
+    ]);
+    calls[0]?.answer("Faster login");
+    calls[1]?.answer(null);
+    await settle();
+    expect(d3.engine.view(closed.id).title).toBe("Faster login");
+    expect(d3.engine.view(killed.id).title).toBe("Drop the legacy exporter");
+    expect(d3.changes).toContainEqual({
+      type: "thread",
+      thread: expect.objectContaining({ id: closed.id, title: "Faster login" }),
+    });
+
+    // Named, or settled on the stand-in: the next daemon asks nothing.
+    engines.splice(engines.indexOf(d3.engine), 1);
+    await d3.engine.close();
+    const again = fakeTitler();
+    daemon(new FakeAdapter(), { titler: again.titler });
+    expect(again.calls).toEqual([]);
+  });
+
+  it("never asks on startup for threads given a title, or archived ones", async () => {
+    const d1 = daemon(new FakeAdapter(), { titler: () => new Promise(() => {}) });
+    await d1.engine.createThread({ project: "app", title: "Mine", prompt: "Do the thing" });
+    const gone = await d1.engine.createThread({ project: "app", prompt: "Throw this away" });
+    await d1.engine.archive(gone.id, { force: true });
+    kill(d1);
+    const { titler, calls } = fakeTitler();
+    daemon(new FakeAdapter(), { titler });
+    expect(calls).toEqual([]);
+  });
+
+  it("answers a create retried with the same client key with the thread it made, once", async () => {
+    const d = daemon();
+    const ask = { project: "app", prompt: "Add a dark mode", clientKey: "key-0123456789" };
+    // The retry arrives while the first is still making its worktree, and again afterwards.
+    const [a, b] = await Promise.all([d.engine.createThread(ask), d.engine.createThread(ask)]);
+    const c = await d.engine.createThread(ask);
+    expect(b.id).toBe(a.id);
+    expect(c.id).toBe(a.id);
+    expect(d.engine.threads().map((t) => t.id)).toEqual([a.id]);
+    expect(d.adapter.sessions.flatMap((s) => s.prompts)).toEqual(["Add a dark mode"]);
+
+    // Another key is another thread.
+    const other = await d.engine.createThread({ ...ask, clientKey: "key-abcdefghij" });
+    expect(other.id).not.toBe(a.id);
+  });
+
+  it("remembers client keys across a restart, and lets a failed create be retried", async () => {
+    const d1 = daemon();
+    const made = await d1.engine.createThread({ project: "app", prompt: "Hi", clientKey: "key-restart-1" });
+    await expect(
+      d1.engine.createThread({ project: "nope", prompt: "Hi", clientKey: "key-failed-01" }),
+    ).rejects.toThrow(/No project/);
+    kill(d1);
+    const d2 = daemon();
+    const again = await d2.engine.createThread({ project: "app", prompt: "Hi", clientKey: "key-restart-1" });
+    expect(again.id).toBe(made.id);
+    const retried = await d2.engine.createThread({ project: "app", prompt: "Hi", clientKey: "key-failed-01" });
+    expect(retried.id).not.toBe(made.id);
+    expect(d2.engine.threads()).toHaveLength(2);
+  });
+
   it("lists the projects, in the snapshot too", async () => {
     const d = daemon();
     const projects = d.engine.projects();

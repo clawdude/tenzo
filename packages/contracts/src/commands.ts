@@ -17,6 +17,12 @@ export const Command = z.discriminatedUnion("type", [
     prompt: z.string().min(1).optional(),
     /** A model the agent understands, e.g. "haiku". Kept for the thread's later turns. */
     model: z.string().min(1).optional(),
+    /**
+     * A key the client makes up for this one request (a random id per draft) and sends again
+     * when it retries. The daemon answers a key it has seen with the thread it made then, so a
+     * retry after a dropped connection can't start a second thread.
+     */
+    clientKey: z.string().min(8).max(128).optional(),
   }),
   /** A prompt for a thread. Waits in the thread's queue while a turn is running. */
   z.object({
