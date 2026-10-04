@@ -50,4 +50,11 @@ body {
 	.opt:active {
 		transform: scale(0.975);
 	}
+	@media (prefers-reduced-motion: reduce) {
+		.opt,
+		.opt:active {
+			transition: none;
+			transform: none;
+		}
+	}
 }
