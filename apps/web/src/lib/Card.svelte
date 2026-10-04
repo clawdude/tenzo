@@ -1,7 +1,8 @@
 <script lang="ts">
 	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
 	import { onDestroy } from 'svelte';
-	import { ageLabel, answerOf, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
+	import { type Failure, fresh, refused, tap, unsent } from '#lib/answering.ts';
+	import { ageLabel, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 
 	interface Props {
@@ -9,40 +10,49 @@
 		/** The thread's name, for the small caps at the top. */
 		thread: string;
 		now: number;
-		/** Why the last answer didn't go, if it didn't. */
-		error: string | null;
+		failure: Failure | null;
+		/** Little room (the keyboard is up): the question and the answers only. */
+		compact?: boolean;
 		/** Sends the answer; false when it couldn't go (offline), and the card stays. */
 		onanswer: (answer: ItemAnswer) => boolean;
 	}
-	let { item, thread, now, error, onanswer }: Props = $props();
+	let { item, thread, now, failure, compact = false, onanswer }: Props = $props();
 
 	const steps = $derived(stepsOf(item));
-	/** One pick per question answered so far; the card asks the next. */
-	let picks = $state.raw<Pick[]>([]);
-	const step = $derived(steps[picks.length]);
+	// Which question the card is on, whether its answer has gone, and which taps to ignore.
+	let answering = $state.raw(fresh(performance.now()));
+	const step = $derived(steps[answering.picks.length]);
 	const answered = $derived(
-		picks.map((p, i) => ({ ask: steps[i]?.ask ?? '', said: 'text' in p ? p.text : p.choice.label }))
+		answering.picks.map((p, i) => ({
+			ask: steps[i]?.ask ?? '',
+			said: 'text' in p ? p.text : p.choice.label
+		}))
 	);
-	let sent = false;
 	let showOthers = $state(false);
 	let more = $state(false);
 	let text = $state('');
 	let stopListening = $state.raw<(() => void) | null>(null);
-	const dictation = canDictate();
+	let dictation = $state(canDictate());
 	const fieldId = $derived(`answer-${item.id}`);
+	let contextBox = $state(0);
+	let contextHeight = $state(0);
+
+	// Refused while the card was still lifting, Svelte brings this same card back: start over.
+	$effect(() => {
+		if (failure?.refused) answering = refused(performance.now());
+	});
 
 	function pick(chosen: Pick) {
-		if (sent) return;
+		const before = answering.picks.length;
+		const { state, answer } = tap(item, answering, chosen, performance.now());
+		if (state === answering) return; // sent already, or it has only just appeared
 		stopListening?.();
-		const next = [...picks, chosen];
-		if (next.length < steps.length) {
-			picks = next;
+		answering = state;
+		if (state.picks.length > before) {
 			showOthers = false;
 			text = '';
-			return;
 		}
-		// Sent: the card is lifting away, so a second tap must not answer again.
-		sent = onanswer(answerOf(item, next));
+		if (answer && !onanswer(answer)) answering = unsent(state);
 	}
 
 	function submit(event: SubmitEvent) {
@@ -59,7 +69,11 @@
 		const before = text.trim();
 		stopListening = dictate(
 			(heard) => (text = before ? `${before} ${heard}` : heard),
-			() => (stopListening = null)
+			() => {
+				stopListening = null;
+				// A home-screen app may not be allowed to listen: then the mic goes for good.
+				dictation = canDictate();
+			}
 		);
 	}
 
@@ -80,15 +94,34 @@
 		<span class="shrink-0 text-[13px] text-faint">{ageLabel(item.createdAt, now)}</span>
 	</header>
 
-	<!-- Text scrolls in here; the answers below never move. -->
-	<div class="scroll min-h-0 grow overflow-y-auto px-[22px] pt-4 pb-2">
-		{#if item.context}
-			<p
-				class={['mb-3.5 text-[18px] leading-[1.45] text-ink-soft', !more && 'line-clamp-3']}
-				data-testid="context"
+	<!-- Text scrolls in here and fades out above the answers, which never move. -->
+	<div
+		class="scroll min-h-0 grow overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
+	>
+		{#if item.context && !compact}
+			<!--
+				Three lines until More, one while the options are out. The end is what leads into the
+				question (the daemon keeps the end too), so a long context shows its last lines,
+				fading in at the top.
+			-->
+			<div
+				class={[
+					'mb-3.5 flex flex-col justify-end overflow-hidden',
+					!more && (showOthers ? 'max-h-[calc(1.45*18px)]' : 'max-h-[calc(3*1.45*18px)]'),
+					!more &&
+						contextHeight > contextBox + 1 &&
+						'[mask-image:linear-gradient(to_bottom,transparent,#000_1.2em)]'
+				]}
+				bind:clientHeight={contextBox}
 			>
-				{item.context}
-			</p>
+				<p
+					class="shrink-0 text-[18px] leading-[1.45] text-ink-soft"
+					bind:clientHeight={contextHeight}
+					data-testid="context"
+				>
+					{item.context}
+				</p>
+			</div>
 		{/if}
 		{#each answered as a, i (i)}
 			<p class="mb-2 text-[15px] leading-snug text-mute">
@@ -143,8 +176,10 @@
 	</div>
 
 	<div class="scroll flex max-h-[58%] shrink-0 flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
-		{#if error}
-			<p class="px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">{error}</p>
+		{#if failure}
+			<p class="px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">
+				{failure.message}
+			</p>
 		{/if}
 
 		{#if step && showOthers}
@@ -162,7 +197,7 @@
 			{@const suggested = step.suggested}
 			<button
 				type="button"
-				class="opt flex min-h-16 w-full flex-col items-start gap-[3px] rounded-[18px] bg-clay px-4 py-[13px] text-left text-on-clay"
+				class="opt flex min-h-16 w-full flex-col items-start justify-center gap-[3px] rounded-[18px] bg-clay px-4 py-[13px] text-left text-on-clay"
 				onclick={() => pick({ choice: suggested })}
 				data-testid="suggested"
 			>
@@ -174,7 +209,7 @@
 		{/if}
 
 		<form
-			class="flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4"
+			class="flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2 outline-offset-2 outline-transparent focus-within:outline-mute"
 			onsubmit={submit}
 		>
 			<label for={fieldId} class="sr-only">Your answer</label>
@@ -204,7 +239,9 @@
 					aria-pressed={stopListening !== null}
 					class={[
 						'opt flex size-10 shrink-0 items-center justify-center rounded-full',
-						stopListening ? 'animate-pulse bg-ink text-black' : 'bg-fill-strong'
+						stopListening
+							? 'animate-pulse bg-ink text-black motion-reduce:animate-none'
+							: 'bg-fill-strong'
 					]}
 					onclick={toggleMic}
 					data-testid="mic"

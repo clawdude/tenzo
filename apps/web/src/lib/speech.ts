@@ -10,7 +10,7 @@ interface Recognition {
 	continuous: boolean;
 	onresult: ((event: RecognitionEvent) => void) | null;
 	onend: (() => void) | null;
-	onerror: (() => void) | null;
+	onerror: ((event: { error?: string }) => void) | null;
 	start(): void;
 	stop(): void;
 }
@@ -29,8 +29,19 @@ function recognitionConstructor(): RecognitionConstructor | null {
 	return scope.SpeechRecognition ?? scope.webkitSpeechRecognition ?? null;
 }
 
+/**
+ * Set once the browser says listening isn't allowed here (a home-screen app on iOS says
+ * `service-not-allowed`): the mic stays hidden for the rest of the session.
+ */
+let refused = false;
+
+/** Errors that mean "not here, not now", rather than "didn't catch that". */
+export function isRefusal(error: string | undefined): boolean {
+	return error === 'not-allowed' || error === 'service-not-allowed';
+}
+
 export function canDictate(): boolean {
-	return recognitionConstructor() !== null;
+	return !refused && recognitionConstructor() !== null;
 }
 
 /**
@@ -59,7 +70,10 @@ export function dictate(onText: (text: string) => void, onEnd: () => void): (() 
 		onEnd();
 	};
 	recognition.onend = end;
-	recognition.onerror = end;
+	recognition.onerror = (event) => {
+		if (isRefusal(event.error)) refused = true;
+		end();
+	};
 	try {
 		recognition.start();
 	} catch {

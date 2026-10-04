@@ -8,9 +8,11 @@
 	import { onMount } from 'svelte';
 	import AllClear from '#lib/AllClear.svelte';
 	import Card from '#lib/Card.svelte';
+	import type { Failure } from '#lib/answering.ts';
 	import { forward, lift } from '#lib/motion.ts';
 	import { MAX_EDGES, pileEdges, pileOf } from '#lib/pass.ts';
 	import { connectionLabel, daemonSocketUrl } from '#lib/status.ts';
+	import { type Fit, watchViewport } from '#lib/viewport.ts';
 
 	// The Pass: the current item on top of the pile, nothing else competing with it.
 	const client = new TenzoClient({ url: daemonSocketUrl(location) });
@@ -19,7 +21,9 @@
 	let seen = $state(false);
 	/** Items answered here whose card is lifting away while the daemon confirms. */
 	let leaving = $state.raw<ReadonlySet<string>>(new Set());
-	let failure = $state.raw<{ itemId: string; message: string } | null>(null);
+	let failure = $state.raw<(Failure & { itemId: string }) | null>(null);
+	/** Where the Pass goes while the keyboard is up; null: the whole window. */
+	let fit = $state.raw<Fit | null>(null);
 	let now = $state(Date.now());
 
 	const pile = $derived(pileOf(tenzo.items, leaving));
@@ -43,7 +47,9 @@
 		});
 		client.connect();
 		const tick = setInterval(() => (now = Date.now()), 30_000);
+		const unwatch = watchViewport((next) => (fit = next));
 		return () => {
+			unwatch();
 			clearInterval(tick);
 			unsubscribe();
 			client.close();
@@ -57,7 +63,11 @@
 	 */
 	function answer(item: QueueItem, answer: ItemAnswer): boolean {
 		if (tenzo.connection.state !== 'connected') {
-			failure = { itemId: item.id, message: "Not connected to Tenzo. Try again once it's back." };
+			failure = {
+				itemId: item.id,
+				message: "Not connected to Tenzo. Try again once it's back.",
+				refused: false
+			};
 			return false;
 		}
 		failure = null;
@@ -65,7 +75,11 @@
 		client
 			.command({ type: 'item.answer', itemId: item.id, answer })
 			.catch((error: unknown) => {
-				failure = { itemId: item.id, message: error instanceof Error ? error.message : String(error) };
+				failure = {
+					itemId: item.id,
+					message: error instanceof Error ? error.message : String(error),
+					refused: true
+				};
 			})
 			.finally(() => {
 				const rest = new Set(leaving);
@@ -76,11 +90,16 @@
 	}
 </script>
 
-<main class="fixed inset-0 flex flex-col overflow-hidden bg-black text-ink">
+<main
+	class={['fixed inset-x-0 flex flex-col overflow-hidden bg-black text-ink', !fit && 'inset-y-0']}
+	style:top={fit ? `${fit.top}px` : null}
+	style:height={fit ? `${fit.height}px` : null}
+	data-compact={fit?.compact ?? false}
+>
 	<div
 		class="relative mx-auto flex h-full max-h-[920px] w-full max-w-[440px] flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:my-auto sm:pt-6 sm:pb-6"
 	>
-		<header class="mt-2 flex h-10 shrink-0 items-center justify-between px-5">
+		<header class={['mt-2 h-10 shrink-0 items-center justify-between px-5', fit ? 'hidden' : 'flex']}>
 			<p
 				class="text-[13px] text-faint"
 				data-testid="connection"
@@ -95,7 +114,8 @@
 
 		<section
 			class={[
-				'relative mx-4 mt-[52px] mb-4 grow transition-opacity',
+				'relative mx-4 grow transition-opacity',
+				fit ? 'mt-3 mb-3' : 'mt-[52px] mb-4',
 				seen && !tenzo.synced
 					? 'opacity-45 delay-500 duration-300'
 					: 'opacity-100 delay-0 duration-200'
@@ -105,7 +125,7 @@
 		>
 			{#each edgeDepths as depth (depth)}
 				<div
-					class="absolute inset-0 origin-top rounded-[28px] shadow-[inset_0_-2px_0_rgba(255,255,255,.04)] transition-transform duration-[380ms] ease-[cubic-bezier(.2,.8,.2,1)]"
+					class="absolute inset-0 origin-top rounded-[28px] shadow-[inset_0_-2px_0_rgba(255,255,255,.04)] transition-transform duration-[380ms] ease-[cubic-bezier(.2,.8,.2,1)] motion-reduce:transition-none"
 					style:background={SHADES[Math.min(depth, MAX_EDGES) - 1]}
 					style:transform={`translateY(-${11 * depth}px) scale(${1 - 0.035 * depth})`}
 					data-testid="edge"
@@ -118,7 +138,8 @@
 						{item}
 						thread={titles.get(item.threadId) ?? ''}
 						{now}
-						error={failure?.itemId === item.id ? failure.message : null}
+						failure={failure?.itemId === item.id ? failure : null}
+						compact={fit?.compact ?? false}
 						onanswer={(a) => answer(item, a)}
 					/>
 				</div>
