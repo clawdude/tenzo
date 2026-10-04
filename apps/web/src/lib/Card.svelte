@@ -2,6 +2,8 @@
 	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
 	import { onDestroy } from 'svelte';
 	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
+	import { finishedView, type Shot } from '#lib/finished.ts';
+	import { renderMarkdown } from '#lib/markdown.ts';
 	import { ageLabel, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 
@@ -19,6 +21,10 @@
 	let { item, thread, now, failure, compact = false, onanswer }: Props = $props();
 
 	const steps = $derived(stepsOf(item));
+	/** Finished work's content; null on every other card. */
+	const view = $derived(finishedView(item, thread));
+	/** The screenshot shown full screen, if one was tapped. */
+	let enlarged = $state.raw<Shot | null>(null);
 	// Which question the card is on, whether its answer has gone, and which taps to ignore.
 	let answering = $state.raw(fresh(performance.now()));
 	const step = $derived(steps[answering.picks.length]);
@@ -92,7 +98,10 @@
 >
 	<header class="flex shrink-0 items-center justify-between gap-4 px-[22px] pt-5">
 		<span
-			class="truncate text-[13px] font-semibold tracking-[0.06em] text-clay uppercase"
+			class={[
+				'truncate text-[13px] font-semibold tracking-[0.06em] uppercase',
+				view ? 'text-done' : 'text-clay'
+			]}
 			data-testid="thread">{thread}</span
 		>
 		<span class="shrink-0 text-[13px] text-faint">{ageLabel(item.createdAt, now)}</span>
@@ -102,7 +111,7 @@
 	<div
 		class="scroll min-h-0 grow overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
 	>
-		{#if item.context && !compact}
+		{#if item.context && !compact && !view}
 			<!--
 				Three lines until More, one while the options are out. The end is what leads into the
 				question (the daemon keeps the end too), so a long context shows its last lines,
@@ -133,7 +142,7 @@
 			</p>
 		{/each}
 		<h2 class="mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]" data-testid="ask">
-			{step?.ask ?? item.ask}
+			{view?.headline ?? step?.ask ?? item.ask}
 		</h2>
 		{#if item.permission && !item.ask.includes(item.permission.detail)}
 			<pre
@@ -142,13 +151,79 @@
 		{/if}
 		{#if item.proposal}
 			<!-- What it will change, where, and how it will check: what Build it says yes to. -->
-			<p
-				class="text-[17px] leading-[1.45] break-words whitespace-pre-line text-ink-soft"
-				data-testid="proposal-summary">{item.proposal.summary}</p>
+			<div class="md text-[17px] leading-[1.45] text-ink-soft" data-testid="proposal-summary">
+				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
+				{@html renderMarkdown(item.proposal.summary)}
+			</div>
 		{/if}
 
-		<!-- A proposal shows all it has; its back (what it looked at) comes with the card backs. -->
-		{#if item.kind !== 'proposal'}
+		{#if view}
+			{#if view.badges.length > 0}
+				<ul class="mb-4 flex flex-wrap gap-1.5" aria-label="Checks" data-testid="checks">
+					{#each view.badges as badge, i (i)}
+						<li
+							class={[
+								'inline-flex items-center gap-[5px] rounded-full px-[11px] py-1.5 text-[13px] font-medium',
+								badge.status === 'pass' && 'bg-done-soft text-done',
+								badge.status === 'fail' && 'bg-fail-soft text-fail',
+								badge.status === 'skipped' && 'bg-fill text-mute'
+							]}
+							title={badge.detail || null}
+							data-status={badge.status}
+							data-testid="check"
+						>
+							<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+								{#if badge.status === 'pass'}<path d="M5 12l5 5L20 7"></path>{:else if badge.status === 'fail'}<path d="M6 6l12 12M18 6L6 18"></path>{:else}<path d="M6 12h12"></path>{/if}
+							</svg>
+							{badge.label}
+						</li>
+					{/each}
+				</ul>
+			{/if}
+
+			<div class="md mb-4 text-[17px] leading-[1.45] text-ink-soft" data-testid="note">
+				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
+				{@html view.summaryHtml}
+			</div>
+
+			{#if view.shots.length > 0 || view.live}
+				<div class="scroll -mx-[22px] mb-4 flex gap-2.5 overflow-x-auto px-[22px]" data-testid="media">
+					{#each view.shots as shot (shot.url)}
+						<button
+							type="button"
+							class="opt h-[150px] w-24 shrink-0 overflow-hidden rounded-[14px] bg-fill"
+							aria-label={`Enlarge: ${shot.alt}`}
+							onclick={() => (enlarged = shot)}
+							data-testid="shot"
+						>
+							<img src={shot.url} alt={shot.alt} class="size-full object-cover object-top" loading="lazy" />
+						</button>
+					{/each}
+					{#if view.live}
+						<a
+							href={view.live}
+							target="_blank"
+							rel="noopener"
+							class="opt flex h-[150px] min-w-24 grow flex-col items-center justify-center gap-2 rounded-[14px] bg-fill px-4 text-[14px] font-medium text-ink"
+							data-testid="live"
+						>
+							<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 4h6v6M20 4l-9 9"></path><path d="M19 13v6a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1h6"></path></svg>
+							Open live
+						</a>
+					{/if}
+				</div>
+			{/if}
+
+			{#if view.howToTestHtml}
+				<h3 class="mb-1.5 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">How to test</h3>
+				<div class="md text-[16px] leading-[1.45] text-ink-soft" data-testid="how-to-test">
+					{@html view.howToTestHtml}
+				</div>
+			{/if}
+		{/if}
+
+		<!-- Proposals and finished work show all they have; their backs come with #22. -->
+		{#if item.kind !== 'proposal' && item.kind !== 'finished'}
 			<button
 				type="button"
 				class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"
@@ -221,6 +296,7 @@
 			</button>
 		{/if}
 
+		{#if step?.placeholder !== null}
 		<form
 			class="flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2 outline-offset-2 outline-transparent focus-within:outline-mute"
 			onsubmit={submit}
@@ -263,6 +339,19 @@
 				</button>
 			{/if}
 		</form>
+		{/if}
+
+		{#if step && step.row.length > 0}
+			<div class="flex justify-center gap-7" data-testid="row">
+				{#each step.row as choice (choice.value)}
+					<button
+						type="button"
+						class="min-h-9 text-[14px] text-mute"
+						onclick={() => pick({ choice })}>{choice.label}</button
+					>
+				{/each}
+			</div>
+		{/if}
 
 		{#if step && step.others.length > 0}
 			<button
@@ -275,3 +364,19 @@
 		{/if}
 	</div>
 </article>
+
+{#if enlarged}
+	<!-- A screenshot, full screen: tap anywhere (or Escape) to put it back. -->
+	<button
+		type="button"
+		class="fixed inset-0 z-50 flex flex-col items-center justify-center gap-3 bg-black/95 p-4 pt-[max(16px,env(safe-area-inset-top))] pb-[max(16px,env(safe-area-inset-bottom))]"
+		aria-label="Close the screenshot"
+		onclick={() => (enlarged = null)}
+		data-testid="enlarged"
+	>
+		<img src={enlarged.url} alt={enlarged.alt} class="min-h-0 max-w-full grow object-contain" />
+		{#if enlarged.caption}<span class="text-[15px] text-ink-soft">{enlarged.caption}</span>{/if}
+	</button>
+{/if}
+
+<svelte:window onkeydown={(e) => e.key === 'Escape' && (enlarged = null)} />

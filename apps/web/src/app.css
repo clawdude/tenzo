@@ -14,6 +14,10 @@
 	--color-faint: #6e6e73;
 	--color-working: #0a84ff;
 	--color-done: #6ccb8c;
+	/* Check badges on finished work: green passed, red failed, grey skipped. */
+	--color-done-soft: #1f2a22;
+	--color-fail: #ff6b61;
+	--color-fail-soft: #3a1f1e;
 }
 
 /*
@@ -57,5 +61,53 @@ body {
 			transition: none;
 			transform: none;
 		}
+	}
+
+	/* What an agent wrote, rendered by markdown.ts: quiet, readable on a phone. */
+	.md {
+		overflow-wrap: anywhere;
+	}
+	.md > * + * {
+		margin-top: 0.6em;
+	}
+	.md ul {
+		list-style: disc;
+		padding-left: 1.2em;
+	}
+	.md ol {
+		list-style: decimal;
+		padding-left: 1.4em;
+	}
+	.md li + li {
+		margin-top: 0.25em;
+	}
+	.md strong {
+		color: var(--color-ink);
+		font-weight: 600;
+	}
+	.md code {
+		border-radius: 6px;
+		background: var(--color-fill);
+		padding: 0.1em 0.35em;
+		font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+		font-size: 0.88em;
+	}
+	.md pre {
+		overflow-x: auto;
+		border-radius: 14px;
+		background: var(--color-fill);
+		padding: 0.7em 0.9em;
+		font-size: 0.85em;
+		line-height: 1.4;
+	}
+	.md pre code {
+		background: none;
+		padding: 0;
+		font-size: inherit;
+	}
+	.md a {
+		color: var(--color-ink);
+		text-decoration: underline;
+		text-underline-offset: 2px;
 	}
 }

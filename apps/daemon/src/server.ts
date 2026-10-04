@@ -1,4 +1,6 @@
+import type { IncomingMessage } from "node:http";
 import type { AddressInfo } from "node:net";
+import type { Duplex } from "node:stream";
 import { serve, type WebSocketServerLike } from "@hono/node-server";
 import type { EnvironmentId } from "@tenzo/contracts";
 import { WebSocketServer } from "ws";
@@ -9,6 +11,7 @@ import type { DaemonConfig } from "./config.ts";
 import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
+import { isLivePath, liveUpgrade } from "./live.ts";
 import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
 import { createClaudeTitler, type Titler } from "./titles.ts";
@@ -32,6 +35,23 @@ export interface DaemonDeps {
    * where threads then keep the prompt's first words: a test never spawns `claude` unasked.
    */
   titler?: Titler;
+}
+
+/**
+ * Sends WebSocket upgrades under `/live/` to the thread's dev server (live.ts); every other
+ * upgrade goes to Hono's `/ws` as before. One listener in front of Hono's: with two, Hono would
+ * stop refusing the upgrades it doesn't take.
+ */
+function routeLiveUpgrades(
+  server: ReturnType<typeof serve>,
+  options: Parameters<typeof liveUpgrade>[3],
+): void {
+  const hono = server.listeners("upgrade") as ((...args: unknown[]) => void)[];
+  server.removeAllListeners("upgrade");
+  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+    if (isLivePath(request.url)) return liveUpgrade(request, socket, head, options);
+    for (const listener of hono) listener.call(server, request, socket, head);
+  });
 }
 
 /**
@@ -98,6 +118,10 @@ export async function startDaemon(
     unlock();
     throw error;
   }
+  routeLiveUpgrades(server, {
+    policy: { allowedHosts: config.allowedHosts, devOrigins: config.devOrigins },
+    portOf: (threadId) => engine.livePort(threadId),
+  });
   engine.start();
   const stopHeartbeat = heartbeat(wss, deps.heartbeatMs);
   const { port } = server.address() as AddressInfo;

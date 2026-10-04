@@ -1,6 +1,8 @@
 import type {
   AgentKind,
+  Attachment,
   EnvironmentId,
+  Preview,
   QueueItem,
   QueueItemId,
   QueueItemResolution,
@@ -29,8 +31,12 @@ export interface ThreadRuntime {
   readonly turnId: TurnId | null;
   /** What the agent said last in the current turn, trimmed: the context of its next item. */
   readonly context: string;
-  /** Discussing until a proposal is approved, then building. */
+  /** Discussing until a proposal is approved, then building; review once the agent reports. */
   readonly phase: ThreadPhase;
+  /** Screenshots attached since the last report: they go on the next one. */
+  readonly attachments: readonly Attachment[];
+  /** The dev server the agent exposed last; the daemon forwards the thread's live base to it. */
+  readonly preview: Preview | null;
 }
 
 export interface FoldState {
@@ -59,6 +65,8 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   turnId: null,
   context: "",
   phase: "discussing",
+  attachments: [],
+  preview: null,
 };
 export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
@@ -75,6 +83,14 @@ export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
 export const PROPOSAL_OPTIONS: readonly UserInputOption[] = [
   { label: "Build it", value: "build", description: "", recommended: true },
 ];
+
+/** Finished work's one button for now; Merge, Open PR and Needs changes come with #21. */
+export const FINISHED_OPTIONS: readonly UserInputOption[] = [
+  { label: "Done", value: "done", description: "", recommended: true },
+];
+
+/** What a finished item asks when the agent gave no headline. */
+export const FINISHED_ASK = "Ready for review";
 
 type Asking =
   | RuntimeEventOf<"user-input.requested">
@@ -96,9 +112,10 @@ export function foldEvent(
     case "session.exited": {
       // Nothing is waiting on the open requests any more, and the turn is over. The items stay:
       // what was asked still needs an answer, and answering resumes the session (engine.ts).
+      // Finished work waits on you, not on the agent: it never detaches.
       const changes: ItemChange[] = [];
       const open = state.open.map((item) => {
-        if (item.detached) return item;
+        if (item.detached || item.kind === "finished") return item;
         const detached = { ...item, detached: true };
         changes.push({ type: "detached", item: detached });
         return detached;
@@ -172,6 +189,44 @@ export function foldEvent(
             : { kind: "cancelled" },
       );
     }
+    case "attachment.added":
+      return same({
+        ...state,
+        runtime: { ...runtime, attachments: [...runtime.attachments, event.payload.attachment] },
+      });
+    case "preview.exposed":
+      return same({
+        ...state,
+        runtime: { ...runtime, preview: { port: event.payload.port, path: event.payload.path } },
+      });
+    case "report.submitted": {
+      if (state.known.has(event.requestId)) return same(state);
+      // A newer report replaces the one still waiting: one finished card per thread.
+      const superseded = state.open
+        .filter((open) => open.kind === "finished")
+        .map(
+          (open): ItemChange => ({
+            type: "resolved",
+            item: {
+              ...open,
+              status: "resolved",
+              resolvedAt: event.createdAt,
+              resolution: { kind: "superseded" },
+            },
+          }),
+        );
+      const item = finishedItem(event, runtime, environmentId);
+      return {
+        state: {
+          runtime: { ...runtime, phase: "review", attachments: [] },
+          open: [...state.open.filter((open) => open.kind !== "finished"), item],
+          known: new Set([...state.known, event.requestId]),
+        },
+        changes: [...superseded, { type: "opened", item }],
+      };
+    }
+    case "report.resolved":
+      return resolve(state, event, { kind: "done" });
     case "thread.archived": {
       const changes = state.open.map(
         (open): ItemChange => ({
@@ -185,7 +240,11 @@ export function foldEvent(
         }),
       );
       return {
-        state: { ...state, runtime: { ...runtime, live: false, turnId: null }, open: [] },
+        state: {
+          ...state,
+          runtime: { ...runtime, live: false, turnId: null, preview: null },
+          open: [],
+        },
         changes,
       };
     }
@@ -307,12 +366,49 @@ function openItem(
   };
 }
 
+/** Finished work, from a report and what the agent attached and exposed before it. */
+function finishedItem(
+  event: RuntimeEventOf<"report.submitted">,
+  runtime: ThreadRuntime,
+  environmentId: EnvironmentId,
+): QueueItem {
+  const { headline, summary, howToTest, checks } = event.payload;
+  return {
+    id: itemIdFor(event.requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "review",
+    kind: "finished",
+    requestId: event.requestId,
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    context: runtime.context,
+    ask: headline || FINISHED_ASK,
+    options: [...FINISHED_OPTIONS],
+    suggested: "done",
+    questions: [],
+    finished: {
+      ...(headline ? { headline } : {}),
+      summary,
+      howToTest,
+      checks,
+      attachments: [...runtime.attachments],
+      live: runtime.preview,
+    },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+  };
+}
+
 function resolve(
   state: FoldState,
   event:
     | RuntimeEventOf<"user-input.resolved">
     | RuntimeEventOf<"request.resolved">
-    | RuntimeEventOf<"proposal.resolved">,
+    | RuntimeEventOf<"proposal.resolved">
+    | RuntimeEventOf<"report.resolved">,
   resolution: QueueItemResolution,
 ): Folded {
   const found = state.open.find((item) => item.requestId === event.requestId);

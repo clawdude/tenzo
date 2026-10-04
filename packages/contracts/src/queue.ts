@@ -1,9 +1,11 @@
 import { z } from "zod";
+import { Finished } from "./finished.ts";
 import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
   AgentKind,
   Fingerprint,
   RequestId,
+  ReviewDecision,
   RuntimeEvent,
   ToolKind,
   TurnId,
@@ -21,11 +23,11 @@ import {
 export const QueueItemId = z.string().regex(/^itm_[a-z0-9]{20}$/);
 export type QueueItemId = z.infer<typeof QueueItemId>;
 
-/** Quick: the agent is stuck waiting on you. Review: finished work waiting for a look (M2). */
+/** Quick: the agent is stuck waiting on you. Review: finished work waiting for a look. */
 export const Lane = z.enum(["quick", "review"]);
 export type Lane = z.infer<typeof Lane>;
 
-export const QueueItemKind = z.enum(["question", "permission", "proposal"]);
+export const QueueItemKind = z.enum(["question", "permission", "proposal", "finished"]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
 /** How an item left the queue. */
@@ -41,6 +43,10 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cancelled") }),
   /** Its thread was archived (`thread.archived`). */
   z.object({ kind: z.literal("dismissed") }),
+  /** Finished work you marked done. */
+  z.object({ kind: z.literal("done") }),
+  /** Finished work the agent reported again: the newer report replaces it. */
+  z.object({ kind: z.literal("superseded") }),
 ]);
 export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
 
@@ -75,6 +81,8 @@ export const QueueItem = z.object({
     .optional(),
   /** A proposal item: what the agent is going to do. `ask` is the headline. */
   proposal: z.object({ headline: z.string(), summary: z.string() }).optional(),
+  /** A finished item (review lane): the handoff note, checks, screenshots and live URL. */
+  finished: Finished.optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
   fingerprint: Fingerprint.optional(),
   createdAt: z.iso.datetime(),
@@ -82,7 +90,8 @@ export const QueueItem = z.object({
   /**
    * The agent process that asked has ended (a crash, a daemon restart) so nothing is waiting on
    * the request any more. Answering still works: the daemon resumes the agent's session and
-   * tells it what was asked and what you chose.
+   * tells it what was asked and what you chose. Never set on finished work: nothing waits on a
+   * report.
    */
   detached: z.boolean(),
   resolvedAt: z.iso.datetime().nullable(),
@@ -109,15 +118,16 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     decision: z.enum(["build", "change"]),
     note: z.string().optional(),
   }),
+  z.object({ kind: z.literal("finished"), decision: ReviewDecision }),
 ]);
 export type ItemAnswer = z.infer<typeof ItemAnswer>;
 
 /**
  * Where a thread is in its flow (PRODUCT.md §4). It starts `discussing`: the agent reads, asks
- * and proposes, and changes nothing. *Build it* on its proposal makes it `building`, for good.
- * Review and landing come with M2's later slices.
+ * and proposes, and changes nothing. *Build it* on its proposal makes it `building`. The agent's
+ * `report` makes it `review`: finished work waits for you. Landing comes with #21.
  */
-export const ThreadPhase = z.enum(["discussing", "building"]);
+export const ThreadPhase = z.enum(["discussing", "building", "review"]);
 export type ThreadPhase = z.infer<typeof ThreadPhase>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */

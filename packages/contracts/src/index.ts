@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EnvironmentId } from "./ids.ts";
 
+export * from "./finished.ts";
 export * from "./ids.ts";
 export * from "./runtime.ts";
 export * from "./queue.ts";

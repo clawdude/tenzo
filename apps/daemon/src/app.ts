@@ -2,12 +2,21 @@ import { readFile } from "node:fs/promises";
 import { extname, join } from "node:path";
 import { upgradeWebSocket } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { Command, type CommandResponse, type EnvironmentId, type Health } from "@tenzo/contracts";
+import {
+  Command,
+  type CommandResponse,
+  type EnvironmentId,
+  type Health,
+  liveBase,
+  ThreadId,
+} from "@tenzo/contracts";
 import { Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
 import { accessGuard } from "./access.ts";
+import { storedAttachment } from "./attachments.ts";
 import { executeCommand } from "./commands.ts";
 import type { Engine } from "./engine.ts";
+import { isLivePath, liveHandler } from "./live.ts";
 import { socketHandlers } from "./socket.ts";
 
 export const VERSION: string = pkg.version;
@@ -25,9 +34,11 @@ export interface AppOptions {
 }
 
 /**
- * The daemon's HTTP surface: `/health`, `POST /api/commands`, the `/ws` WebSocket, and the web
- * app with an SPA fallback. The WebSocket only upgrades when served by `startDaemon` (it needs the
- * Node server). A foreign `Host` is refused everywhere, a foreign `Origin` on the API and `/ws`.
+ * The daemon's HTTP surface: `/health`, `POST /api/commands`, the `/ws` WebSocket, attached
+ * screenshots under `/api/attachments/`, threads' live dev servers under `/live/` (live.ts), and
+ * the web app with an SPA fallback. WebSockets only upgrade when served by `startDaemon` (it
+ * needs the Node server). A foreign `Host` is refused everywhere, a foreign `Origin` on the API,
+ * `/ws` and `/live/`.
  */
 export function createApp({
   environmentId,
@@ -42,7 +53,7 @@ export function createApp({
     "*",
     accessGuard(
       { allowedHosts, devOrigins },
-      (path) => path === "/ws" || path.startsWith("/api/"),
+      (path) => path === "/ws" || path.startsWith("/api/") || isLivePath(path),
     ),
   );
 
@@ -72,7 +83,36 @@ export function createApp({
     if (outcome.ok) return c.json({ ok: true, result: outcome.result } satisfies CommandResponse);
     return fail(outcome.error, outcome.fault === "client" ? 400 : 500);
   });
+  // A screenshot an agent attached: only the daemon's own copies, by well-formed names
+  // (attachments.ts), served so that nothing in one can run: images only, never sniffed, and a
+  // sandbox if one is opened on its own.
+  app.get("/api/attachments/:thread/:file", async (c) => {
+    const stored = engine
+      ? storedAttachment(engine.store.home, c.req.param("thread"), c.req.param("file"))
+      : null;
+    let bytes: Buffer | null = null;
+    if (stored) bytes = await readFile(stored.path).catch(() => null);
+    if (!stored || !bytes) return c.text("No such attachment.\n", 404);
+    return c.body(new Uint8Array(bytes), 200, {
+      "Content-Type": stored.mediaType,
+      "X-Content-Type-Options": "nosniff",
+      "Content-Security-Policy": "default-src 'none'; sandbox",
+      // A copy never changes: its name is new for every attach.
+      "Cache-Control": "private, max-age=31536000, immutable",
+    });
+  });
   app.all("/api/*", (c) => c.json({ ok: false, error: "No such API." } satisfies CommandResponse, 404));
+
+  // A thread's live dev server, through this origin (live.ts). WebSocket upgrades under it are
+  // the Node server's (server.ts); this is plain HTTP.
+  const live = liveHandler((threadId) => engine?.livePort(threadId) ?? null);
+  app.all("/live/:thread", (c) => {
+    const thread = c.req.param("thread");
+    if (!ThreadId.safeParse(thread).success) return c.text("This thread has no live app.\n", 404);
+    return c.redirect(liveBase(thread), 308);
+  });
+  app.all("/live/:thread/*", live);
+  app.all("/live/*", (c) => c.text("This thread has no live app.\n", 404));
 
   // The access guard above has already refused a foreign Host or Origin before any upgrade.
   app.get(

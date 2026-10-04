@@ -14,5 +14,5 @@ The proposal is approved: build it in this worktree. My follow-up messages are i
 - Ask only if something blocks you, one question at a time, with AskUserQuestion.
 - Run the project's checks (tests, typecheck, lint) when you're done, and fix what fails.
 - Commit your work to this worktree's branch.
-- Finish with a short note: what changed, and how to try it.
-<!-- #20 replaces the last line: call `report(summary, how_to_test, checks)`. -->
+- If the change has something to see, show it: start the dev server in the background under the base `expose` names, call `expose(port)`, take a screenshot, save it in the worktree and `attach` it.
+- Then call `report` (Tenzo's MCP tool): a short handoff note, how to try it, and every check you ran with its result. That is your finished card; end your turn with one line.

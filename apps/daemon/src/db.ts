@@ -136,6 +136,17 @@ export const MIGRATIONS: readonly Migration[] = [
       UPDATE threads SET phase = 'building' WHERE session_id IS NOT NULL;
     `,
   },
+  {
+    name: "finished work",
+    sql: `
+      -- More projection of the thread's events (fold.ts); 'review' joins the phases as plain text.
+      -- Screenshots attached since the thread's last report (JSON array): they go on the next one.
+      ALTER TABLE threads ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]';
+      -- The dev server the agent exposed last (JSON {port, path}), NULL when none: what the
+      -- daemon forwards the thread's live base to.
+      ALTER TABLE threads ADD COLUMN preview TEXT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

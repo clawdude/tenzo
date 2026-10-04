@@ -20,7 +20,10 @@ export const FIXTURE = {
 } as const;
 
 /** Tenzo's own MCP server, which every thread gets beside the user's (PRODUCT.md §4). */
-export const TENZO_SERVER = { name: "tenzo", tool: "mcp__tenzo__propose" } as const;
+export const TENZO_SERVER = {
+  name: "tenzo",
+  tools: ["mcp__tenzo__propose", "mcp__tenzo__report", "mcp__tenzo__attach", "mcp__tenzo__expose"],
+} as const;
 
 /** The one prompt the thread gets. `word` is fresh per run, so the pong can't be guessed. */
 export function parityPrompt(word: string): string {
@@ -296,12 +299,14 @@ function checkTenzoServer(configured: Configured | undefined): Check {
     if (!server) return fail(name, `${wanted} isn't loaded; servers: ${list(names)}`);
     if (server.status !== "connected") return fail(name, `${wanted} is ${server.status}`);
   }
-  if (!configured.tools.includes(TENZO_SERVER.tool)) {
-    return fail(name, `${TENZO_SERVER.name} connected, but ${TENZO_SERVER.tool} isn't listed`);
+  const missing = TENZO_SERVER.tools.filter((tool) => !configured.tools.includes(tool));
+  if (missing.length > 0) {
+    const verb = missing.length === 1 ? "isn't" : "aren't";
+    return fail(name, `${TENZO_SERVER.name} connected, but ${list(missing)} ${verb} listed`);
   }
   return pass(
     name,
-    `${TENZO_SERVER.name} connected beside ${FIXTURE.mcpServer}, ${TENZO_SERVER.tool} listed`,
+    `${TENZO_SERVER.name} connected beside ${FIXTURE.mcpServer}, ${TENZO_SERVER.tools.length} tools listed`,
   );
 }
 
@@ -330,7 +335,9 @@ function checkTurn(events: readonly RuntimeEvent[], calls: readonly ToolCall[]):
         ? [`an answer to: ${e.payload.questions.map((q) => q.question).join("; ")}`]
         : e.type === "proposal.requested"
           ? [`a go-ahead for: ${e.payload.headline}`]
-          : [],
+          : e.type === "report.submitted"
+            ? [`a review of: ${e.payload.headline ?? e.payload.summary}`]
+            : [],
   );
   const errors = events.flatMap((e) => (e.type === "runtime.error" ? [e.payload.message] : []));
   const done = events.find(

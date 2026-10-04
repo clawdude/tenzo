@@ -12,6 +12,7 @@ import type {
   TurnId,
 } from "@tenzo/contracts";
 import type { AgentAdapter, AgentSession } from "./agent/agent.ts";
+import { attachmentsDir, removeAttachments } from "./attachments.ts";
 import {
   checkAnswer,
   deliveryPrompt,
@@ -263,6 +264,9 @@ export class Engine {
       throw error;
     }
     clearPrompts(this.store, thread.id);
+    await removeAttachments(this.store.home, thread.id).catch((error: unknown) => {
+      this.#log(`couldn't remove the attachments of ${thread.id}: ${String(error)}`);
+    });
     // Through the log, so folding it gives the dismissed items too.
     this.#append(draft(getThread(this.store, thread.id), { type: "thread.archived", payload: {} }));
     return this.#changed(thread.id);
@@ -278,6 +282,21 @@ export class Engine {
 
   view(threadId: string): ThreadView {
     return this.#viewOf(getThread(this.store, threadId));
+  }
+
+  /**
+   * The port an active thread's live base goes to: the dev server its agent exposed last, or
+   * null (live.ts). Only that thread's port, never one named by a request.
+   */
+  livePort(threadId: string): number | null {
+    let thread: Thread;
+    try {
+      thread = getThread(this.store, threadId);
+    } catch {
+      return null;
+    }
+    if (thread.status !== "active") return null;
+    return loadFoldState(this.store, thread.id).runtime.preview?.port ?? null;
   }
 
   events(threadId: string, after = 0): { thread: ThreadView; events: StoredEvent[] } {
@@ -302,7 +321,7 @@ export class Engine {
   async answer(
     itemId: string,
     answer: ItemAnswer,
-  ): Promise<{ item: QueueItem; delivery: "live" | "message"; thread: ThreadView }> {
+  ): Promise<{ item: QueueItem; delivery: "live" | "message" | "none"; thread: ThreadView }> {
     const item = getItem(this.store, itemId);
     if (!item) throw new TenzoError(`No item "${itemId}". \`tenzo items\` lists the open ones.`);
     if (item.status !== "open") {
@@ -311,6 +330,22 @@ export class Engine {
     if (this.#answering.has(item.id)) throw new TenzoError(`${item.id} is being answered already.`);
     const thread = this.#active(item.threadId);
     const checked = checkAnswer(item, answer);
+    if (checked.kind === "finished") {
+      // Nothing waits on a report: the daemon records your answer, and that is all (#21 adds the
+      // review actions that go back to the agent).
+      this.#append(
+        draft(thread, {
+          type: "report.resolved",
+          requestId: item.requestId,
+          payload: { decision: checked.decision },
+        }),
+      );
+      return {
+        item: getItem(this.store, item.id) ?? item,
+        delivery: "none",
+        thread: this.#changed(thread.id),
+      };
+    }
 
     const live = this.#live.get(thread.id);
     if (!item.detached && live) {
@@ -451,6 +486,7 @@ export class Engine {
       ...(thread.model ? { model: thread.model } : {}),
       phase: loadFoldState(this.store, thread.id).runtime.phase,
       prompts: this.#prompts(),
+      attachmentsDir: attachmentsDir(this.store.home, thread.id),
     });
     const live: Live = {
       threadId: thread.id,
@@ -659,10 +695,13 @@ function draft(thread: Thread, event: Draft): RuntimeEvent {
   } as RuntimeEvent;
 }
 
+/** An answer that goes to the agent: everything but finished work's. */
+type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" }>;
+
 function respond(
   session: AgentSession,
   requestId: QueueItem["requestId"],
-  answer: ItemAnswer | StandingReply,
+  answer: AgentAnswer | StandingReply,
 ): void {
   switch (answer.kind) {
     case "question":
@@ -675,7 +714,7 @@ function respond(
 }
 
 /** The event that records an answer the daemon delivers itself (the agent had stopped). */
-function resolutionOf(item: QueueItem, answer: ItemAnswer): Draft {
+function resolutionOf(item: QueueItem, answer: AgentAnswer): Draft {
   const requestId = item.requestId;
   switch (answer.kind) {
     case "question":

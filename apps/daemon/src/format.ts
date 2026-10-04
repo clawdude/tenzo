@@ -23,6 +23,18 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
       if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
     }
     lines.push("    1. Build it (suggested)", "    Or say what to change.");
+  } else if (item.kind === "finished" && item.finished) {
+    lines.push(`  ✓ ${item.ask}`);
+    const f = item.finished;
+    for (const line of f.summary.split("\n")) {
+      if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
+    }
+    if (f.checks.length > 0) {
+      lines.push(`    Checks: ${f.checks.map((c) => `${c.name} ${c.status}`).join(", ")}`);
+    }
+    if (f.attachments.length > 0) lines.push(`    Screenshots: ${f.attachments.length}`);
+    if (f.live) lines.push(`    Live: port ${f.live.port}`);
+    lines.push("    1. Done (suggested)");
   } else {
     lines.push(`  ? ${item.ask}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
@@ -107,6 +119,19 @@ function describe(event: RuntimeEvent): string {
       return event.payload.headline;
     case "proposal.resolved":
       return event.payload.decision + (event.payload.note ? `: ${event.payload.note}` : "");
+    case "attachment.added": {
+      const a = event.payload.attachment;
+      return `${a.name}${a.caption ? ` (${a.caption})` : ""}`;
+    }
+    case "preview.exposed":
+      return `port ${event.payload.port}${event.payload.path ? ` /${event.payload.path}` : ""}`;
+    case "report.submitted":
+      return [
+        event.payload.headline ?? oneLine(event.payload.summary, 80),
+        ...event.payload.checks.map((c) => `${c.name} ${c.status}`),
+      ].join(" · ");
+    case "report.resolved":
+      return event.payload.decision;
     case "runtime.error":
       return event.payload.message;
     case "thread.archived":

@@ -24,7 +24,10 @@ export default defineConfig({
 	server: {
 		proxy: {
 			'/health': `http://${daemon}`,
-			'/ws': { target: `ws://${daemon}`, ws: true }
+			'/ws': { target: `ws://${daemon}`, ws: true },
+			// Screenshots, and threads' live dev servers (HMR sockets included).
+			'/api/attachments': `http://${daemon}`,
+			'/live': { target: `http://${daemon}`, ws: true }
 		}
 	},
 	test: {

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { Attachment, Check, Preview } from "./finished.ts";
 import { ThreadId } from "./ids.ts";
 
 /**
@@ -55,6 +56,13 @@ export type RequestDecision = z.infer<typeof RequestDecision>;
 /** How a proposal was answered: build it, change something (with a note), or withdrawn. */
 export const ProposalDecision = z.enum(["build", "change", "cancel"]);
 export type ProposalDecision = z.infer<typeof ProposalDecision>;
+
+/**
+ * How finished work was answered. Done: looked at, nothing more to do. The review actions
+ * (Merge, Open PR, Needs changes) join it in #21.
+ */
+export const ReviewDecision = z.enum(["done"]);
+export type ReviewDecision = z.infer<typeof ReviewDecision>;
 
 export const UserInputOption = z.object({
   /** What to show. */
@@ -246,6 +254,46 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       decision: ProposalDecision,
       note: z.string().optional(),
     }),
+  }),
+  /**
+   * The agent attached a screenshot (Tenzo's `attach`): the daemon keeps a copy, and it goes on
+   * the thread's next report.
+   */
+  z.object({
+    ...base,
+    type: z.literal("attachment.added"),
+    payload: z.object({ attachment: Attachment }),
+  }),
+  /**
+   * The agent exposed a dev server running in the thread's worktree (Tenzo's `expose`): the
+   * daemon forwards the thread's live base to that port, and the next report links to it.
+   */
+  z.object({
+    ...base,
+    type: z.literal("preview.exposed"),
+    payload: Preview,
+  }),
+  /**
+   * The agent says the work is done (Tenzo's `report`): finished work for you to review. The
+   * call doesn't wait for you.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("report.submitted"),
+    payload: z.object({
+      headline: z.string().optional(),
+      summary: z.string(),
+      howToTest: z.string(),
+      checks: z.array(Check),
+    }),
+  }),
+  /** Recorded by the daemon: you answered finished work. */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("report.resolved"),
+    payload: z.object({ decision: ReviewDecision }),
   }),
   /**
    * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.

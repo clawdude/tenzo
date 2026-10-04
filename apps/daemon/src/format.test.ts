@@ -1,5 +1,6 @@
 import type { QueueItem, ThreadId } from "@tenzo/contracts";
 import { describe, expect, it } from "vitest";
+import { answerFromWords } from "./answers.ts";
 import { formatEvent, formatItem } from "./format.ts";
 
 const THREAD = "thr_abcdefghij0123456789" as ThreadId;
@@ -107,6 +108,50 @@ describe("formatItem", () => {
         "    Or say what to change.",
       ].join("\n"),
     );
+  });
+
+  it("shows finished work: headline, note, checks, screenshots, live app, Done", () => {
+    const finished: QueueItem = {
+      ...item,
+      lane: "review",
+      kind: "finished",
+      context: "",
+      ask: "Counter works",
+      suggested: "done",
+      questions: [],
+      finished: {
+        headline: "Counter works",
+        summary: "Added a counter.",
+        howToTest: "Tap it.",
+        checks: [
+          { name: "Tests", status: "pass" },
+          { name: "Lint", status: "fail" },
+        ],
+        attachments: [
+          {
+            id: "att_aaaaaaaaaaaaaaaaaaaa",
+            file: "att_aaaaaaaaaaaaaaaaaaaa.png",
+            name: "a.png",
+            mediaType: "image/png",
+            bytes: 1,
+          },
+        ],
+        live: { port: 5173, path: "" },
+      },
+    };
+    expect(formatItem(finished, "Counter")).toBe(
+      [
+        "itm_abcdefghij0123456789 · Counter · finished",
+        "  ✓ Counter works",
+        "    Added a counter.",
+        "    Checks: Tests pass, Lint fail",
+        "    Screenshots: 1",
+        "    Live: port 5173",
+        "    1. Done (suggested)",
+      ].join("\n"),
+    );
+    expect(answerFromWords(finished, ["done"])).toEqual({ kind: "finished", decision: "done" });
+    expect(() => answerFromWords(finished, ["merge"])).toThrow(/with done/);
   });
 
   it("says when answering resumes a stopped agent", () => {

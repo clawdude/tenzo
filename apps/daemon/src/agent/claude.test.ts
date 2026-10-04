@@ -1,4 +1,6 @@
-import { chmodSync, mkdirSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import {
@@ -98,8 +100,6 @@ describe("Claude adapter: starting", () => {
       cwd: "/w/thread",
       pathToClaudeCodeExecutable: "/opt/bin/claude",
       settingSources: ["user", "project", "local"],
-      // Discussing: the terminal's default mode, so an edit Claude tries anyway asks first.
-      permissionMode: "default",
       sessionId: session.sessionId,
     });
     expect(TurnId.safeParse(session.sessionId).success).toBe(true); // a UUID, as Claude wants
@@ -115,10 +115,13 @@ describe("Claude adapter: starting", () => {
     expect(Object.keys(options?.mcpServers ?? {})).toEqual(["tenzo"]);
     expect(options?.mcpServers?.tenzo).toMatchObject({ type: "sdk", name: "tenzo" });
     // Nothing that would narrow what Claude Code can do: no tool lists, no replaced agents,
-    // plugins, skills or settings. The environment is ours, only scrubbed of a parent Claude Code
-    // session's variables.
-    expect(options?.env).toEqual(claudeEnv(process.env));
+    // plugins, skills or settings, and no permission mode: the user's own defaultMode applies.
+    // The environment is ours, only scrubbed of a parent Claude Code session's variables, plus
+    // the thread's live base for `expose`.
+    expect(options?.env).toEqual({ ...claudeEnv(process.env), TENZO_LIVE_BASE: `/live/${THREAD}/` });
     for (const key of [
+      "permissionMode",
+      "allowDangerouslySkipPermissions",
       "tools",
       "allowedTools",
       "disallowedTools",
@@ -135,12 +138,14 @@ describe("Claude adapter: starting", () => {
     }
   });
 
-  it("builds with accept edits and the build prompt", () => {
-    const { fake } = start(simpleTurn, { phase: "building" });
-    expect(fake.calls[0]).toMatchObject({
-      permissionMode: "acceptEdits",
-      systemPrompt: { type: "preset", preset: "claude_code", append: PROMPTS.build },
-    });
+  it("builds and reviews with the build prompt, in the user's own permission mode", () => {
+    for (const phase of ["building", "review"] as const) {
+      const { fake } = start(simpleTurn, { phase });
+      expect(fake.calls[0]).toMatchObject({
+        systemPrompt: { type: "preset", preset: "claude_code", append: PROMPTS.build },
+      });
+      expect(fake.calls[0]).not.toHaveProperty("permissionMode");
+    }
   });
 
   it("appends nothing when it has no prompts", () => {
@@ -599,7 +604,7 @@ describe("Claude adapter: Tenzo's propose tool", () => {
     };
   }
 
-  it("waits for Build it, then tells Claude to build, with the build prompt, under accept edits", async () => {
+  it("waits for Build it, then tells Claude to build, with the build prompt, in the same mode", async () => {
     const outcome: { reply?: { text: string; isError: boolean } } = {};
     const { fake, session, events } = start(proposing(outcome), { phase: "discussing" });
     const turnId = session.sendTurn("add a CONTRIBUTING.md");
@@ -620,7 +625,8 @@ describe("Claude adapter: Tenzo's propose tool", () => {
       text: `Approved, build it.\n\n${PROMPTS.build}`,
       isError: false,
     });
-    expect(fake.permissionModes).toEqual(["acceptEdits"]);
+    // The approval carries the build prompt; the permission mode stays the user's own.
+    expect(fake.permissionModes).toEqual([]);
     expect(() => session.respondToProposal(requested.requestId, "build")).toThrow(/No open proposal/);
     await session.stop();
   });
@@ -640,7 +646,7 @@ describe("Claude adapter: Tenzo's propose tool", () => {
       text: "Not yet. Five rules, not three\n\nRevise, and propose again.",
       isError: false,
     });
-    expect(fake.permissionModes).toEqual([]); // still discussing
+    expect(fake.permissionModes).toEqual([]);
     await session.stop();
   });
 
@@ -677,7 +683,247 @@ describe("Claude adapter: Tenzo's propose tool", () => {
     );
     session.sendTurn("rename the flag");
     const requested = await events.until("proposal.requested");
-    expect(requested.payload.headline).toBe("Plan");
+    // A heading alone is not a headline: the first line that says something is.
+    expect(requested.payload.headline).toBe("Rename the flag to --dry.");
+    await session.stop();
+  });
+
+  it("turns away a second proposal while one waits: one proposal card per thread", async () => {
+    const replies: { text: string; isError: boolean }[] = [];
+    const { session, events } = start(
+      async function* (turn) {
+        yield init();
+        const first = turn.callTool("tenzo", "propose", plan);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+        replies.push(await turn.callTool("tenzo", "propose", { summary: "Something else." }));
+        replies.push(await first);
+        yield result();
+      },
+      { phase: "discussing" },
+    );
+    session.sendTurn("add a CONTRIBUTING.md");
+    const requested = await events.until("proposal.requested");
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    expect(replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/already waiting/) });
+    session.respondToProposal(requested.requestId, "build");
+    await events.until("turn.completed");
+    expect(replies[1]?.isError).toBe(false);
+    expect(events.seen.filter((e) => e.type === "proposal.requested")).toHaveLength(1);
     await session.stop();
   });
 });
+
+describe("Claude adapter: report, attach, expose", () => {
+  type Reply = { text: string; isError: boolean };
+  const PNG = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13]);
+
+  /** Claude calls Tenzo's tools one after another in a turn; the replies are collected. */
+  async function calls(
+    list: [string, Record<string, unknown>][],
+    input: Partial<Omit<StartSessionInput, "threadId" | "cwd">> & { cwd?: string } = {},
+  ) {
+    const replies: Reply[] = [];
+    const fake = fakeQuery(async function* (turn) {
+      yield init();
+      for (const [name, args] of list) replies.push(await turn.callTool("tenzo", name, args));
+      yield result();
+    });
+    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const session = adapter.start({
+      threadId: THREAD,
+      cwd: input.cwd ?? "/w/thread",
+      phase: "building",
+      prompts: PROMPTS,
+      ...input,
+    });
+    const events = reader(session);
+    session.sendTurn("build it");
+    await events.until("turn.completed");
+    await session.stop();
+    await events.rest();
+    return { replies, events: events.seen };
+  }
+
+  function worktree() {
+    const root = tempDir("wt");
+    const outside = tempDir("outside");
+    writeFileSync(join(root, "shot.png"), PNG);
+    writeFileSync(join(outside, "secret.png"), PNG);
+    return { root, outside, store: join(tempDir("home"), "attachments", THREAD) };
+  }
+
+  it("report hands over finished work at once, tidied", async () => {
+    const { replies, events } = await calls([
+      [
+        "report",
+        {
+          headline: "  Counter   works ",
+          summary: " Added a counter page. ",
+          how_to_test: "Open /counter and tap.",
+          checks: [
+            { name: "Tests", status: "pass", detail: "3 passed" },
+            { name: "Lint", status: "skipped", detail: "  " },
+          ],
+        },
+      ],
+    ]);
+    expect(replies[0]).toMatchObject({ isError: false, text: expect.stringMatching(/^Reported/) });
+    const reported = events.find((e) => e.type === "report.submitted");
+    expect(reported?.payload).toEqual({
+      headline: "Counter works",
+      summary: "Added a counter page.",
+      howToTest: "Open /counter and tap.",
+      checks: [
+        { name: "Tests", status: "pass", detail: "3 passed" },
+        { name: "Lint", status: "skipped" },
+      ],
+    });
+  });
+
+  it("report refuses a check status it doesn't know", async () => {
+    const { replies, events } = await calls([
+      ["report", { summary: "x", how_to_test: "", checks: [{ name: "Tests", status: "green" }] }],
+    ]);
+    expect(replies[0]?.isError).toBe(true);
+    expect(events.some((e) => e.type === "report.submitted")).toBe(false);
+  });
+
+  it("attach copies an image from the worktree and says what it took", async () => {
+    const wt = worktree();
+    mkdirSync(join(wt.root, "shots"));
+    writeFileSync(join(wt.root, "shots", "home.png"), PNG);
+    const { replies, events } = await calls(
+      [
+        ["attach", { path: "shot.png", caption: "The counter" }],
+        ["attach", { path: join(wt.root, "shots", "home.png") }],
+      ],
+      { cwd: wt.root, attachmentsDir: wt.store },
+    );
+    expect(replies.map((r) => r.isError)).toEqual([false, false]);
+    const added = events.filter((e) => e.type === "attachment.added");
+    expect(added.map((e) => e.payload.attachment)).toMatchObject([
+      { name: "shot.png", caption: "The counter", mediaType: "image/png", bytes: PNG.length },
+      { name: "home.png", mediaType: "image/png" },
+    ]);
+    for (const e of added) {
+      expect(readFileSync(join(wt.store, e.payload.attachment.file))).toEqual(PNG);
+    }
+  });
+
+  it("attach refuses anything outside the worktree, symlinks and traversal included", async () => {
+    const wt = worktree();
+    symlinkSync(join(wt.outside, "secret.png"), join(wt.root, "link.png"));
+    symlinkSync(wt.outside, join(wt.root, "linked-dir"));
+    const { replies, events } = await calls(
+      [
+        ["attach", { path: "../outside/secret.png" }],
+        ["attach", { path: join(wt.outside, "secret.png") }],
+        ["attach", { path: "link.png" }],
+        ["attach", { path: "linked-dir/secret.png" }],
+        ["attach", { path: `shot.png/../../${wt.outside.split("/").pop()}/secret.png` }],
+      ],
+      { cwd: wt.root, attachmentsDir: wt.store },
+    );
+    for (const reply of replies) {
+      expect(reply).toMatchObject({ isError: true });
+    }
+    expect(replies[1]?.text).toMatch(/outside this thread's worktree/);
+    expect(replies[2]?.text).toMatch(/outside this thread's worktree/);
+    expect(events.some((e) => e.type === "attachment.added")).toBe(false);
+  });
+
+  it("attach takes images only, small enough, and real files", async () => {
+    const wt = worktree();
+    writeFileSync(join(wt.root, "page.svg"), '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>');
+    writeFileSync(join(wt.root, "notes.png"), "not an image");
+    writeFileSync(join(wt.root, "huge.png"), Buffer.concat([PNG, Buffer.alloc(10 * 1024 * 1024)]));
+    mkdirSync(join(wt.root, "dir.png"));
+    const { replies } = await calls(
+      [
+        ["attach", { path: "page.svg" }],
+        ["attach", { path: "notes.png" }],
+        ["attach", { path: "huge.png" }],
+        ["attach", { path: "dir.png" }],
+        ["attach", { path: "missing.png" }],
+      ],
+      { cwd: wt.root, attachmentsDir: wt.store },
+    );
+    expect(replies.map((r) => r.isError)).toEqual([true, true, true, true, true]);
+    expect(replies[0]?.text).toMatch(/not a PNG, JPEG, GIF or WebP/);
+    expect(replies[2]?.text).toMatch(/limit is 10.0 MB/);
+    expect(replies[3]?.text).toMatch(/not a file/);
+    expect(replies[4]?.text).toMatch(/no file/);
+  });
+
+  it("expose registers a port that answers under the thread's base", async () => {
+    const base = `/live/${THREAD}/`;
+    const server = await listen((req, res) => {
+      res.setHeader("content-type", "text/html");
+      res.end(
+        req.url?.startsWith(base)
+          ? `<script type="module" src="${base}src/main.js"></script>`
+          : '<script src="/src/main.js"></script>',
+      );
+    });
+    try {
+      const { replies, events } = await calls([
+        ["expose", { port: server.port, path: "/counter" }],
+      ]);
+      expect(replies[0]).toMatchObject({ isError: false });
+      expect(replies[0]?.text).toContain(`${base}counter`);
+      expect(replies[0]?.text).not.toMatch(/Warning/);
+      expect(events.find((e) => e.type === "preview.exposed")?.payload).toEqual({
+        port: server.port,
+        path: "counter",
+      });
+    } finally {
+      server.close();
+    }
+  });
+
+  it("expose warns when the page points outside the base", async () => {
+    const server = await listen((_req, res) => {
+      res.setHeader("content-type", "text/html");
+      res.end('<script type="module" src="/@vite/client"></script>');
+    });
+    try {
+      const { replies, events } = await calls([["expose", { port: server.port }]]);
+      expect(replies[0]?.isError).toBe(false);
+      expect(replies[0]?.text).toMatch(/Warning: The page loads \/@vite\/client, outside/);
+      expect(events.some((e) => e.type === "preview.exposed")).toBe(true);
+    } finally {
+      server.close();
+    }
+  });
+
+  it("expose refuses bad ports, paths out of the base, and a port nobody answers on", async () => {
+    const free = await listen(() => {});
+    free.close(); // a port that was free a moment ago: nothing answers there now
+    const { replies, events } = await calls([
+      ["expose", { port: 80 }],
+      ["expose", { port: 70_000 }],
+      ["expose", { port: 5173.5 }],
+      ["expose", { port: 5173, path: "../../api/commands" }],
+      ["expose", { port: 5173, path: "https://evil.example/" }],
+      ["expose", { port: free.port }],
+    ]);
+    expect(replies.map((r) => r.isError)).toEqual([true, true, true, true, true, true]);
+    expect(replies[0]?.text).toMatch(/1024–65535/);
+    expect(replies[3]?.text).toMatch(/not a page under the live base/);
+    expect(replies[5]?.text).toMatch(/Nothing answers on localhost/);
+    expect(events.some((e) => e.type === "preview.exposed")).toBe(false);
+  });
+});
+
+/** A throwaway HTTP server on a free loopback port. */
+function listen(
+  handler: (req: IncomingMessage, res: ServerResponse) => void,
+): Promise<{ port: number; close: () => void }> {
+  return new Promise((resolve) => {
+    const server = createServer(handler);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      resolve({ port, close: () => server.close() });
+    });
+  });
+}

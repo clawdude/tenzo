@@ -226,7 +226,7 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
   return {
     query,
     calls,
-    /** Modes set with `setPermissionMode` while running, in order. */
+    /** Modes set with `setPermissionMode` while running, in order: Tenzo sets none. */
     permissionModes,
     get interrupts() {
       return interrupts;

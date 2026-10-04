@@ -82,9 +82,10 @@ export const CommandResults = {
     item: QueueItem,
     /**
      * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
-     * asked had stopped, so the answer goes to it as a message when its session resumes.
+     * asked had stopped, so the answer goes to it as a message when its session resumes. `none`:
+     * nothing goes to the agent (finished work marked done).
      */
-    delivery: z.enum(["live", "message"]),
+    delivery: z.enum(["live", "message", "none"]),
     thread: ThreadView,
   }),
 } satisfies Record<CommandType, z.ZodType>;

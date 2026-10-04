@@ -73,12 +73,13 @@ export function groupOf(thread: ThreadView, now: number): GroupKey {
 const ASKS: Record<QueueItem['kind'], string> = {
 	question: 'asking',
 	permission: 'allow?',
-	proposal: 'build?'
+	proposal: 'build?',
+	finished: 'review'
 };
 
 /**
- * The thread's dot and word: what it waits for (asking, allow?, build?), what it is doing
- * (discussing, building), done, or new (never started).
+ * The thread's dot and word: what it waits for (asking, allow?, build?, review), what it is
+ * doing (discussing, building), done, or new (never started).
  */
 export function rowOf(thread: ThreadView, items: readonly QueueItem[]): Row {
 	if (thread.activity === 'needs-you') {

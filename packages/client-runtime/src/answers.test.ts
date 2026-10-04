@@ -51,6 +51,11 @@ describe("suggestedAnswer", () => {
     expect(suggestedAnswer(proposal)).toEqual({ kind: "proposal", decision: "build" });
   });
 
+  it("marks finished work done", () => {
+    const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "done", questions: [] });
+    expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "done" });
+  });
+
   it("sends the suggested decision on a permission request, Allow when there is none", () => {
     const permission = item("x", "a", { kind: "permission", suggested: "allow" });
     expect(suggestedAnswer(permission)).toEqual({ kind: "permission", decision: "allow" });
