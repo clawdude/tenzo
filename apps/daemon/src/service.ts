@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { claudeEnv } from "./agent/claude.ts";
@@ -37,6 +37,11 @@ const SESSION_VARS = new Set([
   "INIT_CWD",
   "LC_TERMINAL",
   "LC_TERMINAL_VERSION",
+  "AI_AGENT", // set by an agent the install ran under
+  "GIT_EDITOR", // likewise: an agent's non-interactive editor
+  "NoDefaultCurrentDirectoryInExePath",
+  "COREPACK_ENABLE_AUTO_PIN",
+  "OSLogRateLimit",
 ]);
 const SESSION_PREFIXES = [
   "TERM",
@@ -166,7 +171,36 @@ export function launchAgentFor(config: DaemonConfig, env: NodeJS.ProcessEnv): La
   };
 }
 
-// The commands. Only these touch launchd; everything above is pure.
+/**
+ * What may go wrong later with an install from here: a checkout in a linked git worktree
+ * (`.git` is a file there) may be removed with its worktree, and the service would then fail at
+ * every start; an install from inside Claude Code takes that session's environment as the user's.
+ */
+export function installWarnings(env: NodeJS.ProcessEnv, linkedWorktree: boolean): string[] {
+  const warnings: string[] = [];
+  if (linkedWorktree) {
+    warnings.push(
+      "Warning: this checkout is a linked git worktree. If it is removed, the service fails at every start; install from the main checkout instead.",
+    );
+  }
+  if (env.CLAUDECODE) {
+    warnings.push(
+      "Warning: installed from inside Claude Code (CLAUDECODE is set), so the service has that session's environment, not your shell's. Run `tenzo service install` again from your own terminal.",
+    );
+  }
+  return warnings;
+}
+
+/** Whether `root` is a linked git worktree rather than a main checkout. */
+export function isLinkedWorktree(root: string): boolean {
+  try {
+    return statSync(join(root, ".git")).isFile();
+  } catch {
+    return false;
+  }
+}
+
+// The commands. Only these touch launchd; everything above is pure (or only reads).
 
 function domain(): string {
   return `gui/${userInfo().uid}`;
@@ -205,6 +239,7 @@ export function installService(config: DaemonConfig, env: NodeJS.ProcessEnv): st
     `  log    ${agent.log}`,
     `  runs   ${agent.node} ${agent.cli} serve`,
     "If another tenzo daemon holds this TENZO_HOME, the service retries every 10 s until it stops.",
+    ...installWarnings(env, isLinkedWorktree(agent.cwd)),
   ];
 }
 

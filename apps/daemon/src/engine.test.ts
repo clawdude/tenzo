@@ -332,6 +332,30 @@ describe("Engine: names and projects", () => {
     expect(other.id).not.toBe(a.id);
   });
 
+  it("refuses a client key reused for another project, prompt, title or model", async () => {
+    const d = daemon();
+    const ask = { project: "app", prompt: "Add a dark mode", clientKey: "key-reused-01" };
+    const reused = /already used for another thread\.create/;
+    // While the first is still being made, and after.
+    const first = d.engine.createThread(ask);
+    await expect(d.engine.createThread({ ...ask, prompt: "Add a light mode" })).rejects.toThrow(
+      reused,
+    );
+    const made = await first;
+    for (const other of [
+      { ...ask, project: "web" },
+      { ...ask, prompt: "Add a light mode" },
+      { ...ask, title: "Dark" },
+      { ...ask, model: "haiku" },
+    ]) {
+      await expect(d.engine.createThread(other)).rejects.toThrow(reused);
+    }
+    // The same words, give or take the spaces around them, are the same request.
+    const again = await d.engine.createThread({ ...ask, prompt: " Add a dark mode\n" });
+    expect(again.id).toBe(made.id);
+    expect(d.engine.threads()).toHaveLength(1);
+  });
+
   it("remembers client keys across a restart, and lets a failed create be retried", async () => {
     const d1 = daemon();
     const made = await d1.engine.createThread({ project: "app", prompt: "Hi", clientKey: "key-restart-1" });

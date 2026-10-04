@@ -1,9 +1,11 @@
 import { spawnSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
 import { readConfig } from "./config.ts";
 import {
+  installWarnings,
+  isLinkedWorktree,
   type LaunchAgent,
   launchAgentFor,
   launchAgentPlist,
@@ -101,6 +103,11 @@ describe("serviceEnv", () => {
       PNPM_SCRIPT_SRC_DIR: "/repo",
       CLAUDECODE: "1",
       CLAUDE_CODE_SSE_PORT: "1234",
+      AI_AGENT: "claude-code",
+      GIT_EDITOR: "true",
+      NoDefaultCurrentDirectoryInExePath: "1",
+      COREPACK_ENABLE_AUTO_PIN: "0",
+      OSLogRateLimit: "64",
       BAD: "a\u0001b",
       "NOT-A-NAME": "x",
       UNSET: undefined,
@@ -141,5 +148,25 @@ describe("launchAgentFor", () => {
 
   it("puts the plist with the user's launch agents", () => {
     expect(plistPath("/Users/me")).toBe(`/Users/me/Library/LaunchAgents/${SERVICE_LABEL}.plist`);
+  });
+});
+
+describe("installWarnings", () => {
+  it("warns about a linked worktree checkout and an install from inside Claude Code", () => {
+    expect(installWarnings({}, false)).toEqual([]);
+    const both = installWarnings({ CLAUDECODE: "1" }, true);
+    expect(both).toHaveLength(2);
+    expect(both[0]).toMatch(/linked git worktree.*main checkout/);
+    expect(both[1]).toMatch(/inside Claude Code \(CLAUDECODE is set\)/);
+  });
+
+  it("tells a linked worktree (.git is a file) from a main checkout (.git is a folder)", () => {
+    const main = tempDir("main");
+    mkdirSync(join(main, ".git"));
+    const linked = tempDir("linked");
+    writeFileSync(join(linked, ".git"), "gitdir: /elsewhere/.git/worktrees/linked\n");
+    expect(isLinkedWorktree(main)).toBe(false);
+    expect(isLinkedWorktree(linked)).toBe(true);
+    expect(isLinkedWorktree(tempDir("none"))).toBe(false);
   });
 });
