@@ -178,6 +178,13 @@ export function setThreadSession(
     .run(agent, sessionId, new Date().toISOString(), threadId);
 }
 
+/** Renames a thread. Its slug and branch keep the name it started with. */
+export function setThreadTitle(store: Store, threadId: ThreadId, title: string): void {
+  store.db
+    .prepare("UPDATE threads SET title = ?, updated_at = ? WHERE id = ?")
+    .run(title, new Date().toISOString(), threadId);
+}
+
 export function getThread(store: Store, threadId: string): Thread {
   const row = store.db.prepare("SELECT * FROM threads WHERE id = ?").get(threadId);
   if (!row) throw new TenzoError(`No thread "${threadId}". \`tenzo thread list\` shows them.`);

@@ -137,8 +137,14 @@ export class TenzoClient {
         const pending = this.#take(frame.id);
         if (!pending) return;
         const result = CommandResults[pending.type].safeParse(frame.result);
-        if (result.success) pending.resolve(result.data);
-        else {
+        if (result.success) {
+          // Projects change outside the daemon (`tenzo project add`), so no frame says so: a
+          // fresh list is news for everyone reading `state`.
+          if (pending.type === "project.list") {
+            this.#set({ projects: (result.data as CommandResult<"project.list">).projects });
+          }
+          pending.resolve(result.data);
+        } else {
           this.#log(`the answer to ${pending.type} doesn't match the contract`, result.error.issues);
           pending.reject(
             new CommandError("invalid", `Tenzo's answer to ${pending.type} didn't make sense.`),
@@ -181,7 +187,8 @@ export class TenzoClient {
       next.connection === this.#state.connection &&
       next.synced === this.#state.synced &&
       next.threads === this.#state.threads &&
-      next.items === this.#state.items
+      next.items === this.#state.items &&
+      next.projects === this.#state.projects
     ) {
       return;
     }

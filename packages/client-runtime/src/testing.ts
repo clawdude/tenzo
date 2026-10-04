@@ -1,4 +1,4 @@
-import type { QueueItem, ThreadView } from "@tenzo/contracts";
+import type { ProjectView, QueueItem, ThreadView } from "@tenzo/contracts";
 
 /**
  * Test-only doubles: a WebSocket the test drives by hand, a clock the test advances, and
@@ -124,7 +124,17 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
     queued: 0,
     openItems: 0,
     lastSeq: 1,
+    activeAt: at,
     ...overrides,
+  };
+}
+
+export function project(name: string): ProjectView {
+  return {
+    id: id("prj", name.charAt(0)) as ProjectView["id"],
+    environmentId,
+    name,
+    defaultBranch: "main",
   };
 }
 
@@ -153,6 +163,10 @@ export function item(tag: string, threadTag: string, overrides: Partial<QueueIte
   };
 }
 
-export function snapshotFrame(threads: ThreadView[], items: QueueItem[]) {
-  return { type: "snapshot", snapshot: { environmentId, threads, items } } as const;
+export function snapshotFrame(
+  threads: ThreadView[],
+  items: QueueItem[],
+  projects: ProjectView[] = [],
+) {
+  return { type: "snapshot", snapshot: { environmentId, threads, items, projects } } as const;
 }

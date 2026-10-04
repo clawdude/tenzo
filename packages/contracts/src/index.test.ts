@@ -73,4 +73,25 @@ describe("contracts", () => {
     expect(ServerFrame.safeParse({ ...snapshot, snapshot: { threads: [] } }).success).toBe(false);
     expect(ServerFrame.safeParse({ type: "item", change: "moved", item: {} }).success).toBe(false);
   });
+
+  it("carries projects in the snapshot, and lists them on request", () => {
+    expect(Command.parse({ type: "project.list" }).type).toBe("project.list");
+    const project = {
+      id: "prj_abcdefghij0123456789",
+      environmentId: "env_abcdefghij0123456789",
+      name: "app",
+      defaultBranch: "main",
+    };
+    const frame = ServerFrame.parse({
+      type: "snapshot",
+      snapshot: { environmentId: project.environmentId, threads: [], items: [], projects: [project] },
+    });
+    expect(frame.type === "snapshot" && frame.snapshot.projects).toEqual([project]);
+    // A snapshot from a daemon that sends no projects still reads, as none.
+    const bare = ServerFrame.parse({
+      type: "snapshot",
+      snapshot: { environmentId: project.environmentId, threads: [], items: [] },
+    });
+    expect(bare.type === "snapshot" && bare.snapshot.projects).toEqual([]);
+  });
 });

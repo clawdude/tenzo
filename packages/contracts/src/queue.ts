@@ -127,8 +127,20 @@ export const ThreadView = z.object({
   openItems: z.number().int().nonnegative(),
   /** The sequence number of the thread's latest event, 0 before the first. */
   lastSeq: z.number().int().nonnegative(),
+  /** When the thread's latest event happened; when it was created, before the first. */
+  activeAt: z.iso.datetime(),
 });
 export type ThreadView = z.infer<typeof ThreadView>;
+
+/** A project as clients see it: what New thread offers to start a thread in. */
+export const ProjectView = z.object({
+  id: ProjectId,
+  environmentId: EnvironmentId,
+  /** Short and unique: what `thread.create` takes as `project`. */
+  name: z.string(),
+  defaultBranch: z.string(),
+});
+export type ProjectView = z.infer<typeof ProjectView>;
 
 /** A runtime event as the daemon stored it: its place in the log and the machine it came from. */
 export const StoredEvent = z.object({

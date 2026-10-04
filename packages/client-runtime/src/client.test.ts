@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { CommandError, TenzoClient, type TenzoState } from "./client.ts";
-import { FakeClock, FakeSocket, hello, item, snapshotFrame, thread } from "./testing.ts";
+import { FakeClock, FakeSocket, hello, item, project, snapshotFrame, thread } from "./testing.ts";
 
 function setup() {
   FakeSocket.reset();
@@ -90,6 +90,23 @@ describe("TenzoClient", () => {
     });
     await expect(result).resolves.toMatchObject({ delivery: "live", item: { status: "resolved" } });
     expect(client.state.items).toEqual([]);
+  });
+
+  it("keeps the projects from the snapshot, and takes a fresh list when one is asked for", async () => {
+    const { client, latest, synced, lastCommand, seen } = setup();
+    client.connect();
+    synced(snapshotFrame([], [], [project("app")]));
+    expect(client.state.projects).toEqual([project("app")]);
+    const listed = client.command({ type: "project.list" });
+    const before = seen.length;
+    latest().serverSends({
+      type: "ok",
+      id: lastCommand().id,
+      result: { projects: [project("app"), project("blog")] },
+    });
+    await expect(listed).resolves.toEqual({ projects: [project("app"), project("blog")] });
+    expect(client.state.projects).toEqual([project("app"), project("blog")]);
+    expect(seen.length).toBe(before + 1);
   });
 
   it("matches answers to commands by id, in any order", async () => {

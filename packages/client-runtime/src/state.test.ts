@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import { applyFrame, EMPTY } from "./state.ts";
-import { item, snapshotFrame, thread } from "./testing.ts";
+import { item, project, snapshotFrame, thread } from "./testing.ts";
 
 describe("applyFrame", () => {
   it("replaces everything with a snapshot", () => {
-    const before = { threads: [thread("a")], items: [item("x", "a")] };
-    const after = applyFrame(before, snapshotFrame([thread("b")], []));
-    expect(after).toEqual({ threads: [thread("b")], items: [] });
+    const before = { threads: [thread("a")], items: [item("x", "a")], projects: [project("app")] };
+    const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")]));
+    expect(after).toEqual({ threads: [thread("b")], items: [], projects: [project("blog")] });
   });
 
   it("adds a new thread at the end and updates a known one in place", () => {

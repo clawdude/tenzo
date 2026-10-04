@@ -1,4 +1,4 @@
-import type { QueueItem, ServerFrame, ThreadView } from "@tenzo/contracts";
+import type { ProjectView, QueueItem, ServerFrame, ThreadView } from "@tenzo/contracts";
 
 /** What the daemon has, as far as the client knows: what the Pass and the Threads list draw. */
 export interface Data {
@@ -6,9 +6,11 @@ export interface Data {
   readonly threads: readonly ThreadView[];
   /** Open items, oldest first. */
   readonly items: readonly QueueItem[];
+  /** Projects a thread can start in, by name. */
+  readonly projects: readonly ProjectView[];
 }
 
-export const EMPTY: Data = { threads: [], items: [] };
+export const EMPTY: Data = { threads: [], items: [], projects: [] };
 
 /**
  * Applies one daemon frame to the data, as a pure function. A snapshot replaces everything; a
@@ -19,7 +21,11 @@ export const EMPTY: Data = { threads: [], items: [] };
 export function applyFrame(data: Data, frame: ServerFrame): Data {
   switch (frame.type) {
     case "snapshot":
-      return { threads: frame.snapshot.threads, items: frame.snapshot.items };
+      return {
+        threads: frame.snapshot.threads,
+        items: frame.snapshot.items,
+        projects: frame.snapshot.projects,
+      };
     case "thread": {
       const threads = put(data.threads, frame.thread, frame.thread.status === "active");
       return threads === data.threads ? data : { ...data, threads };

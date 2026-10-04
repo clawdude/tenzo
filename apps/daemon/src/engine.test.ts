@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { QueueItem, StoredEvent, ThreadView, type UserInputQuestion } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { FakeAdapter, type FakeSession } from "./agent/fake-agent.ts";
-import { Engine, type EngineChange } from "./engine.ts";
+import { Engine, type EngineChange, type EngineOptions } from "./engine.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
 import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
@@ -41,10 +41,13 @@ afterEach(async () => {
 });
 
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
-function daemon(adapter = new FakeAdapter()) {
+function daemon(
+  adapter = new FakeAdapter(),
+  options: Pick<EngineOptions, "titler" | "defaultModel"> = {},
+) {
   const store = openStore(home);
   stores.push(store);
-  const engine = new Engine({ store, adapters: { claude: adapter }, log: () => {} });
+  const engine = new Engine({ store, adapters: { claude: adapter }, log: () => {}, ...options });
   engines.push(engine);
   const changes: EngineChange[] = [];
   engine.subscribe((change) => changes.push(change));
@@ -174,6 +177,110 @@ describe("Engine: running threads", () => {
     expect(events.map((e) => e.event.type)).toEqual(["runtime.error"]);
     expect(JSON.stringify(events[0]?.event)).toMatch(/Couldn't start claude: claude not found/);
     expect(d.engine.view(thread.id)).toMatchObject({ queued: 0, activity: "idle" });
+  });
+
+  it("runs threads started without a model on the default model, if there is one", async () => {
+    const d = daemon(new FakeAdapter(), { defaultModel: "haiku" });
+    await d.engine.createThread({ project: "app", prompt: "cheap" });
+    expect(d.adapter.last.input.model).toBe("haiku");
+    await d.engine.createThread({ project: "app", prompt: "dear", model: "opus" });
+    expect(d.adapter.last.input.model).toBe("opus");
+    const plain = daemon();
+    await plain.engine.createThread({ project: "app", prompt: "default" });
+    expect(plain.adapter.last.input.model).toBeUndefined();
+  });
+
+  it("says when each thread was last active", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", title: "Quiet" });
+    expect(thread.activeAt).toBe(thread.createdAt);
+    const busy = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const { events } = d.engine.events(busy.id);
+    expect(d.engine.view(busy.id).activeAt).toBe(events.at(-1)?.event.createdAt);
+  });
+});
+
+describe("Engine: names and projects", () => {
+  /** A titler the test answers by hand. */
+  function fakeTitler() {
+    const calls: { prompt: string; signal: AbortSignal; answer: (title: string | null) => void }[] =
+      [];
+    const titler = (prompt: string, signal: AbortSignal) =>
+      new Promise<string | null>((resolve) => calls.push({ prompt, signal, answer: resolve }));
+    return { titler, calls };
+  }
+
+  it("starts a thread under the prompt's first words, then renames it and says so", async () => {
+    const { titler, calls } = fakeTitler();
+    const d = daemon(new FakeAdapter(), { titler });
+    const prompt = "Ask me whether to greet in English or Italian, then write greeting.txt";
+    const thread = await d.engine.createThread({ project: "app", prompt });
+    // The thread is running before any name exists: nothing waits for it.
+    expect(thread.title).toBe("Ask me whether to…");
+    expect(d.adapter.last.prompts).toEqual([prompt]);
+    expect(calls.map((c) => c.prompt)).toEqual([prompt]);
+
+    d.changes.length = 0;
+    calls[0]?.answer("Greeting language");
+    await settle();
+    expect(d.engine.view(thread.id).title).toBe("Greeting language");
+    expect(d.changes).toContainEqual({
+      type: "thread",
+      thread: expect.objectContaining({ id: thread.id, title: "Greeting language" }),
+    });
+    expect(getThread(d.store, thread.id).branch).toBe(thread.branch); // the branch keeps its name
+  });
+
+  it("keeps the stand-in, quietly, when no name comes back", async () => {
+    const titles = [null, new Error("no claude")];
+    const d = daemon(new FakeAdapter(), {
+      titler: async () => {
+        const next = titles.shift();
+        if (next instanceof Error) throw next;
+        return next ?? null;
+      },
+    });
+    const a = await d.engine.createThread({ project: "app", prompt: "Fix the flaky checkout test" });
+    const b = await d.engine.createThread({ project: "app", prompt: "Rename the session store" });
+    await settle();
+    expect(d.engine.view(a.id).title).toBe("Fix the flaky checkout…");
+    expect(d.engine.view(b.id).title).toBe("Rename the session store");
+  });
+
+  it("never renames a thread given a title, or one without a prompt", async () => {
+    const { titler, calls } = fakeTitler();
+    const d = daemon(new FakeAdapter(), { titler });
+    await d.engine.createThread({ project: "app", title: "Mine", prompt: "Do the thing" });
+    await d.engine.createThread({ project: "app", title: "Later" });
+    expect(calls).toEqual([]);
+  });
+
+  it("stops thinking of names on close, and drops a late one", async () => {
+    const { titler, calls } = fakeTitler();
+    const d = daemon(new FakeAdapter(), { titler });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Something long" });
+    const call = calls[0];
+    if (!call) throw new Error("the titler wasn't asked");
+    call.signal.addEventListener("abort", () => call.answer("Too late"));
+    engines.splice(engines.indexOf(d.engine), 1);
+    await d.engine.close();
+    expect(call.signal.aborted).toBe(true);
+    expect(getThread(d.store, thread.id).title).toBe("Something long");
+  });
+
+  it("lists the projects, in the snapshot too", async () => {
+    const d = daemon();
+    const projects = d.engine.projects();
+    expect(projects).toEqual([
+      {
+        id: expect.stringMatching(/^prj_/),
+        environmentId: d.store.environmentId,
+        name: "app",
+        defaultBranch: "main",
+      },
+    ]);
+    expect(d.engine.snapshot().projects).toEqual(projects);
   });
 });
 

@@ -53,4 +53,10 @@ describe("readConfig", () => {
     expect(config.home).toBe(join(process.cwd(), "relhome"));
     expect(config.webDir).toBe(join(process.cwd(), "web"));
   });
+
+  it("takes a default model for threads from TENZO_DEFAULT_MODEL", () => {
+    expect(readConfig({}).defaultModel).toBeUndefined();
+    expect(readConfig({ TENZO_DEFAULT_MODEL: " " }).defaultModel).toBeUndefined();
+    expect(readConfig({ TENZO_DEFAULT_MODEL: " haiku " }).defaultModel).toBe("haiku");
+  });
 });

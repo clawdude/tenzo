@@ -1,24 +1,17 @@
 <script lang="ts">
-	import {
-		type ItemAnswer,
-		type QueueItem,
-		TenzoClient,
-		type TenzoState
-	} from '@tenzo/client-runtime';
+	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
 	import { onMount } from 'svelte';
 	import AllClear from '#lib/AllClear.svelte';
 	import Card from '#lib/Card.svelte';
 	import type { Failure } from '#lib/answering.ts';
 	import { forward, lift } from '#lib/motion.ts';
 	import { MAX_EDGES, pileEdges, pileOf } from '#lib/pass.ts';
-	import { connectionLabel, daemonSocketUrl } from '#lib/status.ts';
+	import { connectionLabel } from '#lib/status.ts';
+	import { command, tenzo } from '#lib/tenzo.svelte.ts';
 	import { type Fit, watchViewport } from '#lib/viewport.ts';
 
 	// The Pass: the current item on top of the pile, nothing else competing with it.
-	const client = new TenzoClient({ url: daemonSocketUrl(location) });
-	let tenzo = $state.raw<TenzoState>(client.state);
-	/** The daemon's data has arrived at least once; until then an empty pile means nothing. */
-	let seen = $state(false);
+	const live = $derived(tenzo.state);
 	/** Items answered here whose card is lifting away while the daemon confirms. */
 	let leaving = $state.raw<ReadonlySet<string>>(new Set());
 	let failure = $state.raw<(Failure & { itemId: string }) | null>(null);
@@ -26,33 +19,28 @@
 	let fit = $state.raw<Fit | null>(null);
 	let now = $state(Date.now());
 
-	const pile = $derived(pileOf(tenzo.items, leaving));
+	const pile = $derived(pileOf(live.items, leaving));
 	const current = $derived(pile[0]);
 	const edges = $derived(pileEdges(pile.length));
-	const titles = $derived(new Map(tenzo.threads.map((t) => [t.id, t.title])));
-	const working = $derived(tenzo.threads.filter((t) => t.working && t.openItems === 0));
-	const online = $derived(tenzo.connection.state === 'connected');
+	const titles = $derived(new Map(live.threads.map((t) => [t.id, t.title])));
+	const working = $derived(live.threads.filter((t) => t.working && t.openItems === 0));
 	/** Darker the further back, from the mock-up. */
 	const SHADES = ['#19191B', '#151517', '#121214', '#0F0F11'];
 	const edgeDepths = $derived(Array.from({ length: edges }, (_, i) => edges - i));
 
+	// Back after a drop: an earlier "not connected" no longer holds.
+	let wasOnline = tenzo.online;
+	$effect(() => {
+		if (tenzo.online && !wasOnline) failure = null;
+		wasOnline = tenzo.online;
+	});
+
 	onMount(() => {
-		const unsubscribe = client.subscribe((next) => {
-			// Back after a drop: an earlier "not connected" no longer holds.
-			if (next.connection.state === 'connected' && tenzo.connection.state !== 'connected') {
-				failure = null;
-			}
-			if (next.synced) seen = true;
-			tenzo = next;
-		});
-		client.connect();
 		const tick = setInterval(() => (now = Date.now()), 30_000);
 		const unwatch = watchViewport((next) => (fit = next));
 		return () => {
 			unwatch();
 			clearInterval(tick);
-			unsubscribe();
-			client.close();
 		};
 	});
 
@@ -62,7 +50,7 @@
 	 * answer went out (not while offline: nothing is queued, the card just stays).
 	 */
 	function answer(item: QueueItem, answer: ItemAnswer): boolean {
-		if (tenzo.connection.state !== 'connected') {
+		if (!tenzo.online) {
 			failure = {
 				itemId: item.id,
 				message: "Not connected to Tenzo. Try again once it's back.",
@@ -72,8 +60,7 @@
 		}
 		failure = null;
 		leaving = new Set([...leaving, item.id]);
-		client
-			.command({ type: 'item.answer', itemId: item.id, answer })
+		command({ type: 'item.answer', itemId: item.id, answer })
 			.catch((error: unknown) => {
 				failure = {
 					itemId: item.id,
@@ -99,24 +86,41 @@
 	<div
 		class="relative mx-auto flex h-full max-h-[920px] w-full max-w-[440px] flex-col pt-[env(safe-area-inset-top)] pb-[env(safe-area-inset-bottom)] sm:my-auto sm:pt-6 sm:pb-6"
 	>
-		<header class={['mt-2 h-10 shrink-0 items-center justify-between px-5', fit ? 'hidden' : 'flex']}>
+		<header class={['mt-2 h-10 shrink-0 items-center justify-between gap-4 px-5', fit ? 'hidden' : 'flex']}>
 			<p
-				class="text-[13px] text-faint"
+				class="truncate text-[13px] text-faint"
 				data-testid="connection"
-				data-state={tenzo.connection.state}
-				data-synced={tenzo.synced}
+				data-state={live.connection.state}
+				data-synced={live.synced}
 				aria-live="polite"
 			>
-				{#if !online}{connectionLabel(tenzo.connection)}{/if}
+				{#if !tenzo.online}{connectionLabel(live.connection)}{/if}
 			</p>
-			<!-- New thread (+) and Threads (#9) go here, top right. -->
+			<nav class="flex shrink-0 gap-2">
+				<a
+					href="/new"
+					aria-label="New thread"
+					class="opt flex size-10 items-center justify-center rounded-full bg-card"
+					data-testid="new"
+				>
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+				</a>
+				<a
+					href="/threads"
+					aria-label="Threads"
+					class="opt flex size-10 items-center justify-center rounded-full bg-card"
+					data-testid="threads"
+				>
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h10"></path></svg>
+				</a>
+			</nav>
 		</header>
 
 		<section
 			class={[
 				'relative mx-4 grow transition-opacity',
 				fit ? 'mt-3 mb-3' : 'mt-[52px] mb-4',
-				seen && !tenzo.synced
+				tenzo.seen && !live.synced
 					? 'opacity-45 delay-500 duration-300'
 					: 'opacity-100 delay-0 duration-200'
 			]}
@@ -145,7 +149,7 @@
 				</div>
 			{/each}
 
-			{#if seen && !current}
+			{#if tenzo.seen && !current}
 				<AllClear {working} {now} />
 			{/if}
 		</section>

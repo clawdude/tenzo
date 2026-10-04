@@ -149,8 +149,15 @@ export function threadEvents(store: Store, threadId: ThreadId, after = 0): Store
 }
 
 export function lastSeq(store: Store, threadId: ThreadId): number {
-  const row = store.db.prepare("SELECT MAX(seq) AS seq FROM events WHERE thread_id = ?").get(threadId);
-  return Number(row?.seq ?? 0);
+  return lastEvent(store, threadId)?.seq ?? 0;
+}
+
+/** The thread's latest event: its place in the log and when it happened. */
+export function lastEvent(store: Store, threadId: ThreadId): { seq: number; at: string } | null {
+  const row = store.db
+    .prepare("SELECT seq, created_at FROM events WHERE thread_id = ? ORDER BY seq DESC LIMIT 1")
+    .get(threadId);
+  return row ? { seq: Number(row.seq), at: String(row.created_at) } : null;
 }
 
 /** Threads whose agent session was running when the daemon last stopped. */

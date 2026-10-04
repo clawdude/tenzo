@@ -1,10 +1,10 @@
 import type { QueueItem, ThreadId } from "@tenzo/contracts";
 import { describe, expect, it } from "vitest";
-import { formatEvent, formatItem, titleFrom } from "./format.ts";
+import { formatEvent, formatItem } from "./format.ts";
 
 const THREAD = "thr_abcdefghij0123456789" as ThreadId;
 
-describe("formatEvent and titleFrom", () => {
+describe("formatEvent", () => {
   it("prints one readable line per event", () => {
     const base = {
       eventId: "evt_abcdefghij0123456789",
@@ -41,15 +41,6 @@ describe("formatEvent and titleFrom", () => {
         payload: { decision: "deny", message: "no" },
       }),
     ).toBe("request.resolved     deny: no");
-  });
-
-  it("titles a thread after the first line of its prompt", () => {
-    expect(titleFrom("  Fix the login bug\nDetails follow")).toBe("Fix the login bug");
-    const long = `Refactor ${"the payment provider ".repeat(6)}`;
-    const title = titleFrom(long);
-    expect(title.length).toBeLessThanOrEqual(81);
-    expect(title.endsWith("…")).toBe(true);
-    expect(title).not.toMatch(/ …$/);
   });
 });
 

@@ -1,7 +1,7 @@
 <script lang="ts">
 	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
 	import { onDestroy } from 'svelte';
-	import { type Failure, fresh, refused, tap, unsent } from '#lib/answering.ts';
+	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
 	import { ageLabel, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 
@@ -37,9 +37,13 @@
 	let contextBox = $state(0);
 	let contextHeight = $state(0);
 
-	// Refused while the card was still lifting, Svelte brings this same card back: start over.
+	// Refused while the card was still lifting, Svelte brings this same card back: start over,
+	// once per refusal. The effect also runs when the item changes; that is not a new refusal.
+	let handled: Failure | null = null;
 	$effect(() => {
-		if (failure?.refused) answering = refused(performance.now());
+		if (!isNewRefusal(failure, handled)) return;
+		handled = failure;
+		answering = refused(performance.now());
 	});
 
 	function pick(chosen: Pick) {
