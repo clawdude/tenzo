@@ -11,6 +11,7 @@
     "build": "pnpm -r build",
     "tenzo": "node apps/daemon/src/cli.ts",
     "parity": "node tools/parity/src/parity.ts",
+    "smoke": "pnpm --filter @tenzo/web build && node tools/smoke/src/smoke.ts",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test",
     "check": "pnpm -r typecheck && pnpm -r test"

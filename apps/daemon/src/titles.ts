@@ -33,10 +33,16 @@ export function quickTitle(prompt: string, maxWords = 4, maxChars = 36): string 
 
 /**
  * A model's answer made into a title, or null when it isn't one: the first line, without quotes,
- * a "Title:" label, markdown or a trailing full stop; two to six words, at most 48 characters.
+ * a "Title:" label, markdown, a trailing full stop, or control and bidi characters (titles are
+ * printed to terminals too); one to six words (the model is asked for two to four), at most 48
+ * characters.
  */
 export function cleanTitle(raw: string): string | null {
   const line = raw
+    // Control characters except line breaks and tabs, and format characters (bidi overrides,
+    // zero-width joiners): nothing a terminal should be handed from a model.
+    .replaceAll(/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\p{Cf}]/gu, "")
+    .replaceAll("\t", " ")
     .trim()
     .split(/\r?\n/)
     .map((l) => l.trim())
@@ -67,6 +73,8 @@ export interface ClaudeTitlerOptions {
   claudePath?: string;
   /** Default: haiku, the cheapest. */
   model?: string;
+  /** Give up after this long, keeping the stand-in. Default: 30 s. */
+  timeoutMs?: number;
 }
 
 /**
@@ -79,8 +87,10 @@ export function createClaudeTitler(options: ClaudeTitlerOptions = {}): Titler {
   return async (prompt, signal) => {
     const abortController = new AbortController();
     const abort = () => abortController.abort();
-    if (signal.aborted) return null;
-    signal.addEventListener("abort", abort, { once: true });
+    // A run that hangs (a stalled network, a login prompt) must not keep a `claude` around.
+    const stop = AbortSignal.any([signal, AbortSignal.timeout(options.timeoutMs ?? 30_000)]);
+    if (stop.aborted) return null;
+    stop.addEventListener("abort", abort, { once: true });
     try {
       const run = query({
         prompt: `<task>\n${prompt.slice(0, MAX_PROMPT_CHARS)}\n</task>`,
@@ -108,7 +118,7 @@ export function createClaudeTitler(options: ClaudeTitlerOptions = {}): Titler {
     } catch {
       return null; // a name is a nicety: no claude, no network, an abort all mean "keep the stand-in"
     } finally {
-      signal.removeEventListener("abort", abort);
+      stop.removeEventListener("abort", abort);
     }
   };
 }

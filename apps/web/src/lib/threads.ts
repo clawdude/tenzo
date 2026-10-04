@@ -77,6 +77,7 @@ export function rowOf(thread: ThreadView, items: readonly QueueItem[]): Row {
 	}
 	if (thread.activity === 'working') return { thread, tone: 'working', word: 'working' };
 	if (thread.lastSeq === 0) return { thread, tone: 'quiet', word: 'new' };
+	// Idle after a failed turn reads "done" too, until failures become items of their own (M2).
 	return { thread, tone: 'done', word: 'done' };
 }
 

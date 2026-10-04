@@ -74,6 +74,13 @@ describe("projects", () => {
     expect(() => findProject(store(), "nope")).toThrow(/No project "nope"/);
   });
 
+  it("names a removed project by its name, even when asked by id", async () => {
+    const p = await addProject(store(), initRepo("app"));
+    removeProject(store(), "app");
+    expect(() => findProject(store(), p.id)).toThrow('"app" was removed from Tenzo. Pick another project.');
+    expect(() => findProject(store(), "app")).toThrow(/"app" was removed/);
+  });
+
   it("writes nothing into the repo", async () => {
     const repo = initRepo("app");
     const before = sh(repo, "rev-parse", "HEAD");
@@ -101,7 +108,7 @@ describe("projects", () => {
     await archiveThread(store(), thread.id);
     removeProject(store(), "app");
     expect(listProjects(store())).toEqual([]);
-    expect(() => findProject(store(), "app")).toThrow(/No project "app"/);
+    expect(() => findProject(store(), "app")).toThrow(/"app" was removed/);
     expect(getThread(store(), thread.id).status).toBe("archived");
 
     const again = await addProject(store(), repo);

@@ -1,0 +1,219 @@
+import { execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
+import { homedir, tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+import { type Browser, chromium, devices, type Page } from "playwright-core";
+
+/**
+ * `pnpm smoke`: the web app in a real browser against a scratch daemon, for what unit tests
+ * can't see: SvelteKit's router starting, screens sharing one connection, the history. It loads
+ * each screen directly (a reload, a bookmark) and walks New → Close → New → Close → Threads → ×,
+ * then checks there were no page errors, one WebSocket, one page load, and the draft survived.
+ *
+ * It needs a Chromium: TENZO_SMOKE_CHROMIUM, else the one Playwright caches. No agent runs, so
+ * no `claude` is needed. It never touches ~/.tenzo or the default port.
+ */
+
+const REPO_ROOT = resolve(import.meta.dirname, "../../..");
+const CLI = join(REPO_ROOT, "apps/daemon/src/cli.ts");
+const WEB_DIR = join(REPO_ROOT, "apps/web/build");
+
+function findChromium(): string | undefined {
+  if (process.env.TENZO_SMOKE_CHROMIUM) return process.env.TENZO_SMOKE_CHROMIUM;
+  const caches = [
+    join(homedir(), "Library/Caches/ms-playwright"),
+    join(homedir(), ".cache/ms-playwright"),
+  ];
+  const inside = [
+    "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-mac/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+    "chrome-linux64/chrome",
+    "chrome-linux/chrome",
+  ];
+  for (const cache of caches) {
+    if (!existsSync(cache)) continue;
+    const builds = readdirSync(cache)
+      .filter((d) => /^chromium-\d+$/.test(d))
+      .sort()
+      .reverse();
+    for (const build of builds) {
+      for (const path of inside) {
+        const candidate = join(cache, build, path);
+        if (existsSync(candidate)) return candidate;
+      }
+    }
+  }
+  return undefined; // Playwright's own lookup, which names what is missing
+}
+
+function freePort(): Promise<number> {
+  return new Promise((done, failed) => {
+    const server = createServer();
+    server.once("error", failed);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as AddressInfo;
+      server.close(() => done(port));
+    });
+  });
+}
+
+/** A scratch repo with one commit; git without the developer's config. */
+function scratchRepo(dir: string): string {
+  const repo = join(dir, "app");
+  mkdirSync(repo);
+  writeFileSync(join(repo, "README.md"), "# app\n");
+  const env = {
+    ...process.env,
+    GIT_CONFIG_GLOBAL: "/dev/null",
+    GIT_CONFIG_NOSYSTEM: "1",
+    GIT_AUTHOR_NAME: "Tenzo Smoke",
+    GIT_AUTHOR_EMAIL: "smoke@tenzo.invalid",
+    GIT_COMMITTER_NAME: "Tenzo Smoke",
+    GIT_COMMITTER_EMAIL: "smoke@tenzo.invalid",
+  };
+  for (const args of [["init", "-q", "-b", "main"], ["add", "."], ["commit", "-qm", "init"]]) {
+    execFileSync("git", args, { cwd: repo, env });
+  }
+  return repo;
+}
+
+async function startDaemon(env: NodeJS.ProcessEnv, port: number) {
+  const log: string[] = [];
+  const child = spawn(process.execPath, [CLI, "serve"], {
+    cwd: REPO_ROOT,
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.setEncoding("utf8").on("data", (chunk: string) => log.push(chunk));
+  }
+  const exited = new Promise<void>((done) => child.once("exit", () => done()));
+  const stop = async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    child.kill("SIGTERM");
+    await exited;
+  };
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    if (child.exitCode !== null) throw new Error(`tenzo serve exited:\n${log.join("")}`);
+    try {
+      if ((await fetch(`http://127.0.0.1:${port}/health`)).ok) return { stop };
+    } catch {
+      // not listening yet
+    }
+    if (Date.now() > deadline) {
+      await stop();
+      throw new Error(`tenzo serve didn't come up on port ${port}:\n${log.join("")}`);
+    }
+    await sleep(100);
+  }
+}
+
+interface Watch {
+  errors: string[];
+  sockets: number;
+  documents: number;
+}
+
+function watch(page: Page): Watch {
+  const seen: Watch = { errors: [], sockets: 0, documents: 0 };
+  page.on("pageerror", (error) => seen.errors.push(error.message));
+  page.on("websocket", () => seen.sockets++);
+  page.on("request", (request) => {
+    if (request.resourceType() === "document") seen.documents++;
+  });
+  return seen;
+}
+
+const path = (page: Page) => new URL(page.url()).pathname;
+
+/** From the Pass: New, type, Close, New (the draft is still there), Close, Threads, ×. */
+async function walk(page: Page): Promise<string> {
+  await page.getByTestId("new").first().tap();
+  await page.getByTestId("new-thread").waitFor();
+  await page.getByTestId("prompt").fill("A draft that must survive Close");
+  await page.getByTestId("close").tap();
+  await page.getByTestId("pass").waitFor();
+  await page.getByTestId("new").first().tap();
+  await page.getByTestId("new-thread").waitFor();
+  const draft = await page.getByTestId("prompt").inputValue();
+  await page.getByTestId("close").tap();
+  await page.getByTestId("pass").waitFor();
+  await page.getByTestId("threads").tap();
+  await page.getByTestId("threads-list").waitFor();
+  await page.getByTestId("to-pass").tap();
+  await page.getByTestId("pass").waitFor();
+  return draft;
+}
+
+/** Loads `start` directly, gets to the Pass the way a person would, then walks. */
+async function run(browser: Browser, base: string, start: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    await page.goto(base + start);
+    if (start === "/new") {
+      await page.getByTestId("new-thread").waitFor();
+      await page.getByTestId("close").tap();
+    } else if (start === "/threads") {
+      await page.getByTestId("threads-list").waitFor();
+      await page.getByTestId("to-pass").tap();
+    }
+    await page.getByTestId("pass").waitFor();
+    if (path(page) !== "/") problems.push(`landed on ${path(page)}, not the Pass`);
+    const draft = await walk(page);
+    if (draft !== "A draft that must survive Close") problems.push(`the draft was "${draft}"`);
+    if (path(page) !== "/") problems.push(`ended on ${path(page)}, not the Pass`);
+    // History: back from the Pass leaves the app's screens behind, not a pile of them.
+    const length = await page.evaluate(
+      () => (globalThis as unknown as { history: { length: number } }).history.length,
+    );
+    if (length > 4) problems.push(`${length} history entries`);
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  if (seen.sockets !== 1) problems.push(`${seen.sockets} WebSockets, not 1`);
+  if (seen.documents !== 1) problems.push(`${seen.documents} page loads, not 1`);
+  return problems;
+}
+
+async function main(): Promise<number> {
+  if (!existsSync(join(WEB_DIR, "index.html"))) {
+    console.error("No web build. Run `pnpm --filter @tenzo/web build` first (`pnpm smoke` does).");
+    return 1;
+  }
+  const root = mkdtempSync(join(tmpdir(), "tenzo-smoke-"));
+  const port = await freePort();
+  const env = { ...process.env, TENZO_HOME: join(root, "home"), TENZO_PORT: String(port) };
+  let daemon: { stop: () => Promise<void> } | undefined;
+  let browser: Browser | undefined;
+  try {
+    const repo = scratchRepo(root);
+    execFileSync(process.execPath, [CLI, "project", "add", repo], { cwd: REPO_ROOT, env });
+    daemon = await startDaemon(env, port);
+    const executablePath = findChromium();
+    browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+    let failed = false;
+    for (const start of ["/", "/new", "/threads"]) {
+      const problems = await run(browser, `http://127.0.0.1:${port}`, start);
+      failed ||= problems.length > 0;
+      console.log(`${problems.length === 0 ? "PASS" : "FAIL"}  start at ${start}`);
+      for (const problem of problems) console.log(`      ${problem}`);
+    }
+    return failed ? 1 : 0;
+  } finally {
+    await browser?.close();
+    await daemon?.stop();
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+process.exitCode = await main();

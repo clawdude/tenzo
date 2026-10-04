@@ -1,14 +1,12 @@
 <script lang="ts">
-	import { afterNavigate } from '$app/navigation';
 	import { onMount } from 'svelte';
-	import { leave } from '#lib/nav.ts';
+	import { leaveTo } from '#lib/nav.ts';
 	import { connectionLabel } from '#lib/status.ts';
 	import { tenzo } from '#lib/tenzo.svelte.ts';
 	import { groupThreads, type GroupKey, type Tone } from '#lib/threads.ts';
 
 	// Threads: every active thread, grouped by what it is doing, live from the daemon.
 	let now = $state(Date.now());
-	let from: string | null = null;
 	const live = $derived(tenzo.state);
 	const groups = $derived(groupThreads(live.threads, live.items, now));
 	const waiting = $derived(live.items.length);
@@ -28,10 +26,6 @@
 	};
 	/** Finished threads sit back a little, as in the mock-up. */
 	const quiet = (key: GroupKey) => key === 'today' || key === 'earlier';
-
-	afterNavigate((navigation) => {
-		from = navigation.from?.url.pathname ?? null;
-	});
 
 	onMount(() => {
 		const tick = setInterval(() => (now = Date.now()), 60_000);
@@ -66,7 +60,7 @@
 					'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold',
 					waiting > 0 ? 'bg-clay text-on-clay' : 'bg-card text-ink'
 				]}
-				onclick={() => leave(from)}
+				onclick={() => leaveTo('/')}
 				data-testid="to-pass"
 			>
 				{#if waiting > 0}
@@ -125,7 +119,7 @@
 									<!-- What it needs is on the Pass. -->
 									<a href="/" class="flex min-h-14 items-center gap-3.5 px-[18px]" onclick={(e) => {
 										e.preventDefault();
-										leave(from);
+										leaveTo('/');
 									}}>{@render content()}</a>
 								{:else}
 									<div class="flex min-h-14 items-center gap-3.5 px-[18px]">
