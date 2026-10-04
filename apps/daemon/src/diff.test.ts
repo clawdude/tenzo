@@ -92,6 +92,16 @@ describe("diffStat", () => {
     expect(diff.files).toEqual([{ path: "a b\tc ü.ts", status: "added", added: 1, deleted: 0 }]);
   });
 
+  it("keeps non-ASCII paths whole in a diff bigger than one chunk of git's output", async () => {
+    const { worktree } = setup();
+    const names = Array.from({ length: 3000 }, (_, i) => `ファイル-é-${i}.txt`);
+    for (const name of names) writeFileSync(join(worktree, name), "x\n");
+    sh(worktree, "add", ".");
+    sh(worktree, "commit", "-qm", "many files");
+    const diff = await diffStat(worktree, "main", { maxFiles: 5000 });
+    expect(diff.files.map((f) => f.path).sort()).toEqual([...names].sort());
+  });
+
   it("lists a file once when it left the index but is still on disk (git rm --cached)", async () => {
     const { worktree } = setup();
     sh(worktree, "rm", "-q", "--cached", "app.ts");

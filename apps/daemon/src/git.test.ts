@@ -1,8 +1,10 @@
 import { execFileSync } from "node:child_process";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { createServer, type ServerResponse } from "node:http";
+import type { AddressInfo, Socket } from "node:net";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { landedOn } from "./git.ts";
+import { landedOn, runGit, stopDetachedGit } from "./git.ts";
 import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 
 afterAll(removeTempDirs);
@@ -66,5 +68,102 @@ describe("landedOn", () => {
   it("refuses to tell without an origin to fetch from", async () => {
     const repo = initRepo("alone");
     await expect(landedOn(repo, "main")).rejects.toThrow(/Couldn't fetch main from origin/);
+  });
+});
+
+/** A local server that answers every request with `answer`, or never (it accepts and stalls). */
+async function fakeRemote(
+  answer?: (res: ServerResponse) => void,
+): Promise<{ url: string; close: () => void }> {
+  const sockets = new Set<Socket>();
+  const server = createServer((_req, res) => answer?.(res));
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  const { port } = server.address() as AddressInfo;
+  return {
+    url: `http://127.0.0.1:${port}/repo.git`,
+    close: () => {
+      for (const socket of sockets) socket.destroy();
+      server.close();
+    },
+  };
+}
+
+describe("landedOn's fetch, with nobody watching", () => {
+  it("gives up on a remote that never answers, and says so", async () => {
+    const remote = await fakeRemote();
+    try {
+      const repo = initRepo("stalled");
+      sh(repo, "remote", "add", "origin", remote.url);
+      const started = Date.now();
+      await expect(landedOn(repo, "main", 1000)).rejects.toThrow(
+        /Couldn't fetch main from origin: no answer in 1s\. Is origin reachable, and can git reach it without a password prompt\?/,
+      );
+      expect(Date.now() - started).toBeLessThan(5000);
+    } finally {
+      remote.close();
+    }
+  });
+
+  it("fails at once, never prompting, when origin wants a password", async () => {
+    const remote = await fakeRemote((res) => {
+      res.writeHead(401, { "WWW-Authenticate": 'Basic realm="origin"' });
+      res.end();
+    });
+    // Every askpass program the daemon could have inherited: none may be asked.
+    const asked = join(tempDir("askpass"), "asked");
+    const askpass = join(tempDir("askpass"), "askpass.sh");
+    writeFileSync(askpass, `#!/bin/sh\necho "$@" >> '${asked}'\necho secret\n`, { mode: 0o755 });
+    const saved = { GIT_ASKPASS: process.env.GIT_ASKPASS, SSH_ASKPASS: process.env.SSH_ASKPASS };
+    process.env.GIT_ASKPASS = askpass;
+    process.env.SSH_ASKPASS = askpass;
+    try {
+      const repo = initRepo("private");
+      sh(repo, "remote", "add", "origin", remote.url);
+      sh(repo, "config", "credential.helper", ""); // no stored password to find
+      sh(repo, "config", "http.proxy", ""); // straight to 127.0.0.1, whatever the environment says
+      sh(repo, "config", "core.askPass", askpass);
+      await expect(landedOn(repo, "main", 10_000)).rejects.toThrow(
+        /Couldn't fetch main from origin: .*terminal prompts disabled/,
+      );
+      expect(existsSync(asked)).toBe(false);
+    } finally {
+      for (const [key, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+      remote.close();
+    }
+  });
+
+  it("stops when the daemon does, helpers and all", async () => {
+    const remote = await fakeRemote();
+    try {
+      const repo = initRepo("stopping");
+      sh(repo, "remote", "add", "origin", remote.url);
+      const checking = landedOn(repo, "main", 60_000);
+      await new Promise((done) => setTimeout(done, 300));
+      const started = Date.now();
+      stopDetachedGit();
+      await expect(checking).rejects.toThrow(/git fetch was stopped: Tenzo is stopping/);
+      expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      remote.close();
+    }
+  });
+});
+
+describe("runGit", () => {
+  it("keeps characters whole that fall across two chunks of output", async () => {
+    const repo = initRepo("utf8");
+    const text = "é€😀".repeat(200_000); // 2, 3 and 4 bytes: some must straddle a chunk
+    writeFileSync(join(repo, "f.txt"), text);
+    sh(repo, "add", "f.txt");
+    const result = await runGit(repo, ["cat-file", "-p", ":f.txt"]);
+    expect(result.stdout).toHaveLength(text.length);
+    expect(result.stdout).toBe(text);
   });
 });

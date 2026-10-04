@@ -52,7 +52,7 @@ import {
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { branchExists, hasChanges, landedOn, resolveBase } from "./git.ts";
+import { branchExists, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
 import {
@@ -85,6 +85,19 @@ import { quickTitle, type Titler } from "./titles.ts";
 export const MAX_CHILD_THREADS = 10;
 /** Threads started by agents that may be active at once, across every thread. */
 export const MAX_AGENT_THREADS = 10;
+
+/**
+ * What a landed thread's stuck card adds: Retry gives it work, but it stays marked landed, so it
+ * archives anyway once a turn of its ends (or the daemon restarts). New work goes in a new thread.
+ */
+export const STILL_LANDED =
+  "It's already marked landed, so it archives at its next turn end or when Tenzo restarts: start a new thread for more work.";
+
+/** `text` ending as a sentence does, so another can follow it (git's errors mostly don't). */
+export function sentence(text: string): string {
+  const trimmed = text.trim();
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
+}
 
 /**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
@@ -569,6 +582,7 @@ export class Engine {
     this.#snoozes.clearAll();
     this.#wakes.clearAll();
     this.#stopNaming.abort();
+    stopDetachedGit(); // a `landed` check still fetching
     await Promise.all([
       ...[...this.#live.values()].map(async (live) => {
         // Tenzo's own restart is no error of the agent's: the turn picks up when it is back.
@@ -766,7 +780,7 @@ export class Engine {
       this.#landingStuck(
         threadId,
         "unarchived",
-        "It landed, but you sent it a message meanwhile, so it isn't archived. Retry sends your message; Archive drops it.",
+        `It landed, but you sent it a message meanwhile, so it isn't archived. Retry sends your message; Archive drops it. ${STILL_LANDED}`,
         waiting,
       );
       return;
@@ -776,7 +790,7 @@ export class Engine {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.#log(`couldn't archive ${threadId}, which landed: ${message}`);
-        this.#landingStuck(threadId, "unarchived", `It landed, but Tenzo couldn't archive it: ${message}`, [
+        this.#landingStuck(threadId, "unarchived", `It landed, but Tenzo couldn't archive it: ${sentence(message)} ${STILL_LANDED}`, [
           `Tenzo couldn't archive this thread after \`landed\`: ${message}\n\nLeave the worktree clean (commit or delete stray files), then call \`landed\` again.`,
         ]);
       })
@@ -788,10 +802,11 @@ export class Engine {
 
   /**
    * A landing turn of ours ended with nothing to come: no wake, no card, no `landed`, nothing
-   * queued. The thread would sit in Landing forever, so it gets an error card instead.
+   * queued. The thread would sit in Landing forever, so it gets an error card instead. A turn
+   * already running (`#pump` just sent what was queued) is something to come.
    */
   #checkStalled(live: Live): void {
-    if (this.#closing || live.landed) return;
+    if (this.#closing || live.landed || live.turnId) return;
     const { runtime, open } = loadFoldState(this.store, live.threadId);
     if (runtime.phase !== "landing" || runtime.wake !== null || open.length > 0) return;
     if (queuedCount(this.store, live.threadId) > 0) return;
