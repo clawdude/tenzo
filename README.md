@@ -35,7 +35,7 @@ pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
 
 The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS.
 
-On `/ws` the daemon sends a snapshot of active threads and open items, then every thread and item change as it happens; clients send the same commands as `POST /api/commands`, each answered by id. The frames are in `packages/contracts/src/frames.ts`; `packages/client-runtime` keeps the connection (reconnect, ping, wake-on-foreground) and a store the web app reads.
+On `/ws` the daemon sends a snapshot of active threads and open items, then every thread and item change as it happens; clients send the same commands as `POST /api/commands`, each answered by id. The frames are in `packages/contracts/src/frames.ts`; `packages/client-runtime` keeps the connection (reconnect, ping, wake-on-foreground) and a store the web app reads. A command whose connection drops before its answer fails as lost and isn't resent; to make trying again safe, `thread.create` takes a `clientKey` (New thread sends one per request), and the daemon answers a key it has seen, even before a restart, with the thread it made then.
 
 | Variable | Default | |
 |---|---|---|
@@ -46,6 +46,19 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 | `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads started without one (e.g. `haiku` for cheap trial runs) |
+
+### Keep it running (macOS)
+
+`tenzo service` runs the daemon as a launchd user agent, so it starts at login and comes back after a crash or a reboot:
+
+```bash
+pnpm build                                     # the service serves apps/web/build
+TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net pnpm tenzo service install
+pnpm tenzo service status                      # running (pid …), the plist and the log
+pnpm tenzo service uninstall                   # stops it and removes the agent
+```
+
+`install` writes `~/Library/LaunchAgents/dev.tenzo.daemon.plist` (readable only by you) and loads it. The agent runs `tenzo serve` from this checkout with the Node that ran `install`, in the environment of the shell you ran it from: your `PATH` (so threads find `claude`, `git` and your MCP servers' commands), `TENZO_*` settings such as `TENZO_ALLOWED_HOSTS` and `TENZO_PORT`, and your Claude configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, proxies). Terminal-session variables (`TERM*`, `TMUX*`, `SSH_*`, pnpm's, a parent Claude Code's) are left out, and `TENZO_HOME` and `TENZO_WEB_DIR` are written as absolute paths. Output goes to `$TENZO_HOME/daemon.log` (`~/.tenzo/daemon.log` by default). launchd starts the daemon again when it exits with an error, at most every 10 s; a clean stop (SIGTERM) leaves it stopped. After changing any of those settings, moving the checkout or upgrading Node, run `install` again: it replaces the old agent. Stop a `tenzo serve` you started by hand first: it holds the same `TENZO_HOME`, and the service retries until it can take it. Elsewhere than macOS, run `tenzo serve` under your own init system.
 
 ## Projects and threads
 
@@ -82,7 +95,7 @@ pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try
 
 Threads run your own `claude` (see `TENZO_CLAUDE_PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo only sets the permission mode to accept edits and catches questions and permission prompts so they can come to you. Threads get Tenzo's environment minus the variables a parent Claude Code session exports (`CLAUDECODE`, its session id, IDE port, bridge wiring), so running Tenzo from inside Claude Code doesn't tie its threads to that session; your configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, Bedrock/Vertex, proxies) passes through.
 
-A thread started from a prompt without a title is named in two steps: at once by the prompt's first few words, then, a few seconds later, by a 2–4 word name from a one-shot `claude` on haiku (no tools, no settings, not saved to your session history). If that fails, the first words stay.
+A thread started from a prompt without a title is named in two steps: at once by the prompt's first few words, then, a few seconds later, by a 2–4 word name from a one-shot `claude` on haiku (no tools, no settings, not saved to your session history). If that fails, the first words stay. If the daemon stops before the name comes, the next daemon asks again when it starts.
 
 The daemon runs the threads: thread commands go to it (start `pnpm tenzo serve` first, with the same `TENZO_HOME` and `TENZO_PORT`), so everything a client sees comes from one place.
 
@@ -99,7 +112,7 @@ pnpm tenzo thread log <thread-id> [--follow]                 # the thread's even
 
 `pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, run through a scratch daemon, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
 
-`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: it loads `/`, `/new` and `/threads` directly, walks New → Close → New → Close → Threads → ×, and fails on any page error, a second WebSocket or page load, or a lost draft. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's cached Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`). It is not part of `pnpm check` or CI; run it after changing routes or navigation.
+`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: it loads `/`, `/new` and `/threads` directly, walks New → Close → New → Close → Threads → ×, and fails on any page error, a second WebSocket or page load, or a lost draft; then it reloads on New and checks that Close goes back to the Pass behind it rather than stacking another. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
 
 ### Events and items
 

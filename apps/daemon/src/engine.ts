@@ -44,11 +44,13 @@ import {
   archiveThread,
   checkArchivable,
   createThread,
+  finishNaming,
   getThread,
   listThreads,
   projectOf,
-  setThreadTitle,
   type Thread,
+  threadByClientKey,
+  threadsToName,
 } from "./threads.ts";
 import { quickTitle, type Titler } from "./titles.ts";
 
@@ -74,6 +76,15 @@ export interface EngineOptions {
   /** The model for threads started without one (`TENZO_DEFAULT_MODEL`). Default: the agent's. */
   defaultModel?: string;
   log?: (message: string) => void;
+}
+
+/** `thread.create`'s arguments (see the command in contracts). */
+export interface NewThread {
+  project: string;
+  title?: string;
+  prompt?: string;
+  model?: string;
+  clientKey?: string;
 }
 
 /** What subscribers hear: each event as stored, each item change, each thread change. */
@@ -110,6 +121,8 @@ export class Engine {
   /** Names being thought of; `close` stops and waits for them. */
   readonly #naming = new Set<Promise<void>>();
   readonly #stopNaming = new AbortController();
+  /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
+  readonly #creating = new Map<string, Promise<ThreadView>>();
   #closing = false;
 
   constructor(options: EngineOptions) {
@@ -137,6 +150,8 @@ export class Engine {
       );
     }
     for (const threadId of threadsWithPrompts(this.store)) this.#pump(threadId);
+    // Names the last daemon stopped thinking of before it had one.
+    for (const { id, prompt } of threadsToName(this.store)) this.#name(id, prompt);
   }
 
   subscribe(listener: (change: EngineChange) => void): () => void {
@@ -144,12 +159,23 @@ export class Engine {
     return () => this.#listeners.delete(listener);
   }
 
-  async createThread(input: {
-    project: string;
-    title?: string;
-    prompt?: string;
-    model?: string;
-  }): Promise<ThreadView> {
+  /**
+   * A new thread. With a `clientKey`, a create the daemon has made (or is making) under that key
+   * answers with that thread instead: a client's retry never makes a second one.
+   */
+  async createThread(input: NewThread): Promise<ThreadView> {
+    const key = input.clientKey;
+    if (key === undefined) return this.#create(input);
+    const made = threadByClientKey(this.store, key);
+    if (made) return this.view(made.id);
+    const pending = this.#creating.get(key);
+    if (pending) return pending;
+    const creating = this.#create(input).finally(() => this.#creating.delete(key));
+    this.#creating.set(key, creating);
+    return creating;
+  }
+
+  async #create(input: NewThread): Promise<ThreadView> {
     const prompt = input.prompt?.trim();
     const given = input.title?.trim();
     // Without a title, the prompt's first words stand in until the titler has a name.
@@ -158,6 +184,8 @@ export class Engine {
     const model = input.model ?? this.#defaultModel;
     const thread = await createThread(this.store, input.project, title, {
       ...(model ? { model } : {}),
+      ...(prompt && !given ? { naming: prompt } : {}),
+      ...(input.clientKey ? { clientKey: input.clientKey } : {}),
     });
     if (prompt) enqueuePrompt(this.store, thread.id, prompt);
     this.#pump(thread.id);
@@ -330,20 +358,25 @@ export class Engine {
   /**
    * Asks the titler for the thread's name, in the background: the thread has started already.
    * A name that comes back replaces the stand-in and is announced; no name (or an error) leaves
-   * the stand-in, quietly.
+   * the stand-in, quietly, for good. Only a daemon stopping mid-naming leaves it to the next one.
    */
   #name(threadId: ThreadId, prompt: string): void {
     const titler = this.#titler;
     if (!titler) return;
     const naming = (async () => {
+      let title: string | null = null;
       try {
-        const title = await titler(prompt, this.#stopNaming.signal);
-        if (!title || this.#closing) return;
-        if (getThread(this.store, threadId).status !== "active") return;
-        setThreadTitle(this.store, threadId, title);
-        this.#changed(threadId);
+        title = await titler(prompt, this.#stopNaming.signal);
       } catch {
         // A name is a nicety; the stand-in stays.
+      }
+      if (this.#closing) return; // stopped mid-naming: the next daemon asks again
+      try {
+        if (getThread(this.store, threadId).status !== "active") return;
+        finishNaming(this.store, threadId, title);
+        if (title) this.#changed(threadId);
+      } catch (error) {
+        this.#log(`couldn't name ${threadId}: ${String(error)}`);
       }
     })();
     this.#naming.add(naming);

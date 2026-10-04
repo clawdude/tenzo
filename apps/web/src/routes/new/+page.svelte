@@ -1,10 +1,15 @@
 <script module lang="ts">
+	import type { CreateKey } from '#lib/create-key.ts';
+
 	/** What was typed and not yet started: closing New thread by mistake loses nothing. */
 	let draft = '';
+	/** The key the last Start of this draft used: Start again (after a failure) reuses it. */
+	let attempt: CreateKey | null = null;
 </script>
 
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
+	import { keyFor } from '#lib/create-key.ts';
 	import { back, leaveTo } from '#lib/nav.ts';
 	import { chooseProject, rememberedProject, rememberProject } from '#lib/projects.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
@@ -45,8 +50,12 @@
 		stopListening?.();
 		starting = true;
 		error = null;
+		// A Start that failed may have reached the daemon (the connection dropped before the
+		// answer): trying again under the same key gets that thread back, not a second one.
+		attempt = keyFor(attempt, prompt, project.id);
 		try {
-			await command({ type: 'thread.create', project: project.id, prompt });
+			await command({ type: 'thread.create', project: project.id, prompt, clientKey: attempt.key });
+			attempt = null;
 			rememberProject(project.id);
 			text = '';
 			leaveTo('/'); // to the Pass, wherever New was opened from

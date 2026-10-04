@@ -185,6 +185,38 @@ async function run(browser: Browser, base: string, start: string): Promise<strin
   return problems;
 }
 
+/**
+ * From an outside page: the Pass, New, reload, Close. Close must go back to the Pass the tab
+ * already has (the trail outlives the reload), so one more back leaves the app.
+ */
+async function reload(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    await page.goto("data:text/html,<title>outside</title>");
+    await page.goto(`${base}/`);
+    await page.getByTestId("new").first().tap();
+    await page.getByTestId("new-thread").waitFor();
+    await page.reload();
+    await page.getByTestId("new-thread").waitFor();
+    await page.getByTestId("close").tap();
+    await page.getByTestId("pass").waitFor();
+    if (path(page) !== "/") problems.push(`Close landed on ${path(page)}, not the Pass`);
+    await page.goBack();
+    if (!page.url().startsWith("data:")) {
+      problems.push(`back from the Pass went to ${page.url()}, not out of the app`);
+    }
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 async function main(): Promise<number> {
   if (!existsSync(join(WEB_DIR, "index.html"))) {
     console.error("No web build. Run `pnpm --filter @tenzo/web build` first (`pnpm smoke` does).");
@@ -200,12 +232,24 @@ async function main(): Promise<number> {
     execFileSync(process.execPath, [CLI, "project", "add", repo], { cwd: REPO_ROOT, env });
     daemon = await startDaemon(env, port);
     const executablePath = findChromium();
-    browser = await chromium.launch({ headless: true, ...(executablePath ? { executablePath } : {}) });
+    const launched = await chromium.launch({
+      headless: true,
+      ...(executablePath ? { executablePath } : {}),
+    });
+    browser = launched;
+    const base = `http://127.0.0.1:${port}`;
+    const checks: [string, () => Promise<string[]>][] = [
+      ...["/", "/new", "/threads"].map((start): [string, () => Promise<string[]>] => [
+        `start at ${start}`,
+        () => run(launched, base, start),
+      ]),
+      ["reload on New, then Close", () => reload(launched, base)],
+    ];
     let failed = false;
-    for (const start of ["/", "/new", "/threads"]) {
-      const problems = await run(browser, `http://127.0.0.1:${port}`, start);
+    for (const [name, check] of checks) {
+      const problems = await check();
       failed ||= problems.length > 0;
-      console.log(`${problems.length === 0 ? "PASS" : "FAIL"}  start at ${start}`);
+      console.log(`${problems.length === 0 ? "PASS" : "FAIL"}  ${name}`);
       for (const problem of problems) console.log(`      ${problem}`);
     }
     return failed ? 1 : 0;

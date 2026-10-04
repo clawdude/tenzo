@@ -17,3 +17,30 @@ jobs:
           cache: pnpm
       - run: pnpm install --frozen-lockfile
       - run: pnpm check
+
+  # The web app in headless Chromium against a scratch daemon (tools/smoke). A job of its own,
+  # so it runs alongside `check` and adds no time to it.
+  smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Playwright version
+        id: playwright
+        run: echo "version=$(pnpm --filter @tenzo/smoke exec playwright-core --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - name: Cache Chromium
+        id: chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: chromium-shell-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install Chromium
+        if: steps.chromium.outputs.cache-hit != 'true'
+        run: pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium
+      - run: pnpm smoke

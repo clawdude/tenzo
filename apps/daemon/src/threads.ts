@@ -48,7 +48,13 @@ export async function createThread(
   store: Store,
   projectRef: string,
   title: string,
-  options: { model?: string } = {},
+  options: {
+    model?: string;
+    /** The prompt `title` stands in for until the titler names the thread (`finishNaming`). */
+    naming?: string;
+    /** The client's key for this create (see `threadByClientKey`). */
+    clientKey?: string;
+  } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
   const base = await resolveBase(project.path, project.defaultBranch);
@@ -87,8 +93,8 @@ export async function createThread(
       .prepare(
         `INSERT INTO threads
            (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at,
-            environment_id, model)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_id, model, naming, client_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -102,6 +108,8 @@ export async function createThread(
         now,
         thread.environmentId,
         thread.model,
+        options.naming ?? null,
+        options.clientKey ?? null,
       );
   } catch (error) {
     // Nobody has seen this worktree or branch yet: undo both rather than leave strays.
@@ -178,11 +186,36 @@ export function setThreadSession(
     .run(agent, sessionId, new Date().toISOString(), threadId);
 }
 
-/** Renames a thread. Its slug and branch keep the name it started with. */
-export function setThreadTitle(store: Store, threadId: ThreadId, title: string): void {
+/**
+ * Ends a thread's naming: renames it to `title` when the titler found one (its slug and branch
+ * keep the name it started with), or keeps the stand-in for good when it found none.
+ */
+export function finishNaming(store: Store, threadId: ThreadId, title: string | null): void {
+  if (title === null) {
+    store.db.prepare("UPDATE threads SET naming = NULL WHERE id = ?").run(threadId);
+    return;
+  }
   store.db
-    .prepare("UPDATE threads SET title = ?, updated_at = ? WHERE id = ?")
+    .prepare("UPDATE threads SET title = ?, naming = NULL, updated_at = ? WHERE id = ?")
     .run(title, new Date().toISOString(), threadId);
+}
+
+/** Active threads still under a stand-in title, with the prompt to name each from. */
+export function threadsToName(store: Store): { id: ThreadId; prompt: string }[] {
+  return store.db
+    .prepare(
+      `SELECT id, naming FROM threads
+       WHERE status = 'active' AND naming IS NOT NULL
+       ORDER BY created_at, id`,
+    )
+    .all()
+    .map((row) => ({ id: String(row.id) as ThreadId, prompt: String(row.naming) }));
+}
+
+/** The thread an earlier `thread.create` with this client key made, if any. */
+export function threadByClientKey(store: Store, clientKey: string): Thread | undefined {
+  const row = store.db.prepare("SELECT * FROM threads WHERE client_key = ?").get(clientKey);
+  return row ? toThread(row) : undefined;
 }
 
 export function getThread(store: Store, threadId: string): Thread {

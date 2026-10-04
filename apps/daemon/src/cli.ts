@@ -10,6 +10,7 @@ import { TenzoError } from "./errors.ts";
 import { formatEvent, formatItem } from "./format.ts";
 import { addProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
+import { installService, serviceStatus, uninstallService } from "./service.ts";
 import { openStore, type Store } from "./store.ts";
 
 const USAGE = `tenzo ${VERSION}
@@ -20,6 +21,10 @@ Usage:
   tenzo project add <path>               register the git repo at <path>
   tenzo project list                     list projects
   tenzo project remove <name|path>       forget a project (its repo and thread history are kept)
+  tenzo service install                  macOS: run the daemon as a launchd agent, at login and
+                                         after a crash, with this shell's environment
+  tenzo service uninstall                stop it and remove the agent
+  tenzo service status                   whether it is installed and running
 
   Thread commands talk to the running daemon:
   tenzo thread start <project> <prompt…> new thread, and Claude Code starts on the prompt in its
@@ -120,6 +125,19 @@ async function project([sub, ...rest]: string[]): Promise<void> {
     default:
       usageError(`Unknown project command "${sub ?? ""}".`);
   }
+}
+
+function service([sub, ...rest]: string[]): void {
+  parseArgs(rest); // no options
+  const lines =
+    sub === "install"
+      ? installService(config(), process.env)
+      : sub === "uninstall"
+        ? uninstallService()
+        : sub === "status"
+          ? serviceStatus(config())
+          : usageError(`Unknown service command "${sub ?? ""}".`);
+  for (const line of lines) console.log(line);
 }
 
 async function thread([sub, ...rest]: string[]): Promise<void> {
@@ -317,6 +335,8 @@ async function main([command, ...args]: string[]): Promise<void> {
       return serve();
     case "project":
       return project(args);
+    case "service":
+      return service(args);
     case "thread":
       return thread(args);
     case "items":

@@ -112,6 +112,19 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE INDEX prompts_by_thread ON prompts (thread_id, seq);
     `,
   },
+  {
+    name: "unfinished names and create keys",
+    sql: `
+      -- The prompt a thread's stand-in title was cut from, while the titler still owes it a
+      -- name (titles.ts); NULL once it is named or the titler had none, and for given titles.
+      -- A daemon that stops mid-naming leaves it set, and the next one asks again.
+      ALTER TABLE threads ADD COLUMN naming TEXT;
+      -- The client's key for the thread.create that made this thread: the same key again (a
+      -- retry after a dropped connection) gets this thread back instead of a second one.
+      ALTER TABLE threads ADD COLUMN client_key TEXT;
+      CREATE UNIQUE INDEX threads_by_client_key ON threads (client_key);
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

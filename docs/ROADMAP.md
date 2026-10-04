@@ -18,6 +18,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 - [x] #7 WebSocket API: snapshot on connect, live events after; `packages/client-runtime` owns the connection and reconnect
 - [x] #8 The Pass, first card: the pile, a question card with one suggested answer, free text with mic, folded options; answering lifts the card
 - [x] #9 New thread from the web (text in, thread starts) and a minimal Threads list
+- [x] #24 Hardening from the M1 reviews: idempotent `thread.create`, stand-in titles named on restart, the web trail survives a reload, `pnpm smoke` in CI, `tenzo service` (launchd); the idle reaper moves to a later slice
 
 ## M2 · The whole card set
 
