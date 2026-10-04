@@ -272,6 +272,9 @@ export class FakeSession implements AgentSession {
     });
   }
 
+  /** Set by a test: the agent has background work running. */
+  backgroundWork = false;
+
   /** What `reconfigure` was told, in order. */
   readonly reconfigured: SessionSettings[] = [];
   /**
@@ -300,8 +303,12 @@ export class FakeSession implements AgentSession {
     if (this.turnId) this.complete("interrupted");
   }
 
+  /** Set by a test: `stop` never finishes (a process that won't end). */
+  stopHangs = false;
+
   async stop(): Promise<void> {
     this.stopped = true;
+    if (this.stopHangs) return new Promise(() => {});
     this.#end("graceful");
   }
 

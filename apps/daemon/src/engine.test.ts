@@ -56,7 +56,7 @@ afterEach(async () => {
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
 function daemon(
   adapter = new FakeAdapter(),
-  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs"> = {},
+  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs" | "switchTimeoutMs"> = {},
 ) {
   const store = openStore(home);
   stores.push(store);
@@ -2138,6 +2138,115 @@ describe("Engine: project config", () => {
     expect(d.engine.snapshot().items).toEqual([]);
   });
 
+  it("the first turn after a restart waits for the restarted session to take the settings", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    let done = () => {};
+    d.adapter.onStart = (session) => {
+      if (session.input.restarted) session.reconfigureResult = new Promise<void>((resolve) => (done = resolve));
+    };
+    first.reconfigureResult = "restart";
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    const second = d.adapter.last;
+    expect(second).not.toBe(first);
+    expect(second.input.restarted).toBe(true);
+    // The engine asked it, and the turn waits for its switch.
+    expect(second.reconfigured).toHaveLength(1);
+    expect(second.prompts).toEqual([]);
+    second.reconfigureResult = "unchanged";
+    done();
+    await settle();
+    expect(second.prompts).toEqual(["Next"]);
+  });
+
+  it("a switch that never answers times out into a restart at the turn boundary", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.reconfigureResult = new Promise<void>(() => {});
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    expect(first.stopped).toBe(true);
+    expect(first.prompts).toEqual(["Go"]);
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.input.restarted).toBe(true);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    const notes = d.engine.events(thread.id).events.filter((e) => e.event.type === "runtime.error");
+    expect(notes.map((e) => (e.event.type === "runtime.error" ? e.event.payload.message : ""))).toEqual([
+      "Claude didn't confirm the switch of model or thinking in time.",
+    ]);
+  });
+
+  it("a session that won't end for a restart is let go of: its prompts go on a card, and Retry sends them", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.reconfigureResult = "restart";
+    first.stopHangs = true;
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    const [card] = d.engine.snapshot().items;
+    expect(card).toMatchObject({ kind: "error", error: { cause: "start", prompts: ["Next"] } });
+    expect(card?.error?.message).toMatch(/couldn't restart the agent to change its settings: it didn't stop/);
+    // Whatever the old one still says is no longer the thread's.
+    first.say("late words");
+    await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.prompts).toEqual(["Next"]);
+    expect(JSON.stringify(d.engine.events(thread.id).events)).not.toContain("late words");
+  });
+
+  it("never restarts a session with background work: the change waits, the turn goes", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.backgroundWork = true;
+    first.reconfigureResult = "restart";
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+    // Its background work done, the next turn boundary restarts it.
+    first.backgroundWork = false;
+    first.complete();
+    d.engine.send(thread.id, "Last");
+    await settle();
+    expect(first.stopped).toBe(true);
+    expect(d.adapter.last.prompts).toEqual(["Last"]);
+  });
+
+  it("nor after a switch times out while it has background work", async () => {
+    const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
+    const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const first = d.adapter.last;
+    first.backgroundWork = true;
+    first.reconfigureResult = new Promise<void>(() => {});
+    first.complete();
+    d.engine.send(thread.id, "Next");
+    await settle();
+    // Asked again after the timeout, it has nothing more to switch (as Claude's adapter, which
+    // counts a switch as done once asked).
+    first.reconfigureResult = "unchanged";
+    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    expect(first.stopped).toBe(false);
+    expect(first.prompts).toEqual(["Go", "Next"]);
+  });
+
   it("a turn waits for a switch under way: it runs on the new model from its start", async () => {
     const d = daemon();
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
@@ -2273,7 +2382,7 @@ describe("Engine: a thread's own model (thread.setModel)", () => {
     const d = daemon();
     const thread = await d.engine.createThread({ project: "app", title: "Named" });
     d.engine.setModel(thread.id, { model: "opus", thinking: "low" });
-    for (const bad of ["--dangerously-skip-permissions x", "a b", "x".repeat(101), "é"]) {
+    for (const bad of ["--dangerously-skip-permissions x", "-x", "--x", "a b", "x".repeat(101), "é"]) {
       expect(() => d.engine.setModel(thread.id, { model: bad })).toThrow(/isn't a model name/);
       expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: bad }).success).toBe(false);
     }

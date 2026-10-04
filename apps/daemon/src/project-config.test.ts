@@ -76,6 +76,7 @@ describe("project config: parsing and merging", () => {
     [{ config: json({ models: { discuss: { model: "" } } }) }, /models\.discuss\.model: must be a model name/],
     [{ config: json({ models: { build: { model: "--dangerously-skip-permissions x" } } }) }, /models\.build\.model: must be a model name/],
     [{ config: json({ models: { agents: { model: "x".repeat(101) } } }) }, /models\.agents\.model: must be a model name/],
+    [{ local: json({ models: { discuss: { model: "-sonnet" } } }) }, /models\.discuss\.model: must be a model name/],
     [{ config: json({ permissions: "plan" }) }, /permissions: /],
     [{ config: json({ landing: "squash" }) }, /landing: /],
     [{ config: json([]) }, /^\.tenzo\/config\.json: /],

@@ -41,8 +41,8 @@ export const ModelName = z
   .string()
   .trim()
   .regex(
-    /^[A-Za-z0-9._:@/[\]-]{1,100}$/,
-    'must be a model name such as "sonnet" (letters, digits and . _ : @ / [ ] -, at most 100)',
+    /^[A-Za-z0-9][A-Za-z0-9._:@/[\]-]{0,99}$/,
+    'must be a model name such as "sonnet" (a letter or digit, then letters, digits and . _ : @ / [ ] -, at most 100)',
   );
 
 /** The model and thinking of one phase. */

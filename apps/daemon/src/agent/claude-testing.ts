@@ -166,7 +166,13 @@ export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMes
  */
 export function fakeQuery(
   script: Script,
-  fake: { exitError?: Error; controlError?: Error; settings?: Record<string, unknown> } = {},
+  fake: {
+    exitError?: Error;
+    controlError?: Error;
+    /** What `getSettings` reports as merged; `sources` as each source's (default: all the user's). */
+    settings?: Record<string, unknown>;
+    sources?: { source: string; settings: Record<string, unknown> }[];
+  } = {},
 ) {
   const calls: Options[] = [];
   const permissionModes: string[] = [];
@@ -232,7 +238,11 @@ export function fakeQuery(
       setMaxThinkingTokens: async (tokens: number | null) => {
         controls.push({ setMaxThinkingTokens: tokens });
       },
-      getSettings: async () => ({ effective: fake.settings ?? {}, sources: [], applied: {} }),
+      getSettings: async () => ({
+        effective: fake.settings ?? {},
+        sources: fake.sources ?? [{ source: "userSettings", settings: fake.settings ?? {} }],
+        applied: {},
+      }),
       applyFlagSettings: async (settings: Record<string, unknown>) => {
         controls.push({ applyFlagSettings: settings });
       },

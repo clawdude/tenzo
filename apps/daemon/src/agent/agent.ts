@@ -120,6 +120,11 @@ export interface AgentSession {
    */
   reconfigure(settings: SessionSettings): "unchanged" | "restart" | Promise<void>;
   /**
+   * The agent has work running in the background (a background subagent, a background shell, a
+   * Monitor) that ending the session would kill: the daemon doesn't restart it meanwhile.
+   */
+  readonly backgroundWork: boolean;
+  /**
    * Stops the running turn; the session stays up for the next one. Open questions and requests
    * are cancelled (`*.resolved` with cancel).
    */

@@ -922,7 +922,16 @@ describe("Claude adapter: models, thinking, subagents, permissions", () => {
   });
 
   it("between effort levels, back to the user's own and to thinking off, Claude switches live", async () => {
-    const fake = fakeQuery(simpleTurn, { settings: { effortLevel: "xhigh" } });
+    // Tenzo's own earlier switch sits in the flag layer, and so in the merged view: the user's
+    // own level is read from their sources without it.
+    const fake = fakeQuery(simpleTurn, {
+      settings: { effortLevel: "high" },
+      sources: [
+        { source: "userSettings", settings: { effortLevel: "medium" } },
+        { source: "projectSettings", settings: { effortLevel: "xhigh" } },
+        { source: "flagSettings", settings: { effortLevel: "high" } },
+      ],
+    });
     const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
     const session = adapter.start({
       threadId: THREAD,
@@ -951,6 +960,41 @@ describe("Claude adapter: models, thinking, subagents, permissions", () => {
     await session.reconfigure({ models: { ...models, build: { model: "nope", thinking: "off" } } });
     const error = await events.until("runtime.error");
     expect(error.payload.message).toBe("Couldn't switch to nope, thinking off: model not found: nope");
+    await session.stop();
+  });
+
+  it("knows when the agent has background work a restart would kill", async () => {
+    const tasks = (list: { task_id: string; task_type: string; description: string; ambient?: boolean }[]) =>
+      ({ type: "system", subtype: "background_tasks_changed", tasks: list, uuid: "u", session_id: SESSION }) as never;
+    let next = () => {};
+    const gate = () => new Promise<void>((resolve) => (next = resolve));
+    const script: Script = async function* () {
+      yield init();
+      yield tasks([{ task_id: "a", task_type: "local_agent", description: "Explore" }]);
+      await gate();
+      yield tasks([{ task_id: "w", task_type: "local_watcher", description: "watch", ambient: true }]);
+      await gate();
+      yield tasks([{ task_id: "m", task_type: "monitor_mcp", description: "CI", ambient: true }]);
+      await gate();
+      yield tasks([]);
+      yield result();
+    };
+    const { session, events } = start(script);
+    expect(session.backgroundWork).toBe(false);
+    session.sendTurn("go");
+    await events.until("session.configured");
+    const settled = () => new Promise((resolve) => setTimeout(resolve, 5));
+    await settled();
+    expect(session.backgroundWork).toBe(true); // a background subagent
+    next();
+    await settled();
+    expect(session.backgroundWork).toBe(false); // Claude's own housekeeping only
+    next();
+    await settled();
+    expect(session.backgroundWork).toBe(true); // a Monitor the agent asked for
+    next();
+    await events.until("turn.completed");
+    expect(session.backgroundWork).toBe(false);
     await session.stop();
   });
 

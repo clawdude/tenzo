@@ -498,9 +498,16 @@ function startSession(
   };
 
   let stopping = false;
+  /** Background tasks that would die with the process (Claude reports the set as it changes). */
+  let background = 0;
   const done = (async () => {
     try {
-      for await (const message of run) apply(translate(state, message));
+      for await (const message of run) {
+        if (message.type === "system" && message.subtype === "background_tasks_changed") {
+          background = message.tasks.filter((task) => isWork(task)).length;
+        }
+        apply(translate(state, message));
+      }
       emit({ type: "session.exited", ...inTurn(), payload: { exitKind: "graceful" } });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
@@ -588,19 +595,29 @@ function startSession(
     const model = (await effectiveSettings())?.model;
     return typeof model === "string" && model.trim() !== "" ? model : undefined;
   };
-  /** The user's own effort level (`effortLevel` in their settings); null: the model's default. */
+  /**
+   * The user's own effort level (`effortLevel` in their settings); null: the model's default.
+   * From the settings' own sources, never the flag layer: that is where Tenzo's earlier
+   * `applyFlagSettings({effortLevel})` went, so the merged view would hand it back.
+   */
   const ownEffort = async (): Promise<EffortLevel | null> => {
-    const level = (await effectiveSettings())?.effortLevel;
+    const settings = await claudeSettings();
+    let level: unknown;
+    for (const { source, settings: values } of settings?.sources ?? []) {
+      if (source === "flagSettings") continue;
+      if (values?.effortLevel !== undefined) level = values.effortLevel;
+    }
     return typeof level === "string" && ["low", "medium", "high", "xhigh", "max"].includes(level)
       ? (level as EffortLevel)
       : null;
   };
   /** Claude's merged settings (its `get_settings` control request), if this SDK can ask. */
-  const effectiveSettings = async (): Promise<Record<string, unknown> | undefined> => {
-    const ask = (run as unknown as { getSettings?: () => Promise<{ effective?: Record<string, unknown> }> })
-      .getSettings;
+  const effectiveSettings = async (): Promise<Record<string, unknown> | undefined> =>
+    (await claudeSettings())?.effective;
+  const claudeSettings = async (): Promise<ClaudeSettings | undefined> => {
+    const ask = (run as unknown as { getSettings?: () => Promise<ClaudeSettings> }).getSettings;
     if (typeof ask !== "function") return undefined;
-    return (await ask.call(run))?.effective;
+    return ask.call(run);
   };
 
   const answer = (requestId: RequestId, outcome: Settled): void => {
@@ -647,6 +664,9 @@ function startSession(
     respondToProposal(requestId, decision, note) {
       answer(requestId, { kind: "proposal", decision, ...(note ? { note } : {}) });
     },
+    get backgroundWork() {
+      return background > 0;
+    },
     reconfigure(settings) {
       models = settings.models;
       if (prompts.closed) return "unchanged"; // ended: the next session starts with them
@@ -685,6 +705,23 @@ function startSession(
 export function choiceFor(models: SessionModels | undefined, phase: ThreadPhase): ModelChoice {
   if (!models) return {};
   return phase === "discussing" ? models.discuss : models.build;
+}
+
+/**
+ * What Claude's `get_settings` answers: the merged settings, and each source's own (user,
+ * project, local, flag, policy), lowest precedence first.
+ */
+interface ClaudeSettings {
+  effective?: Record<string, unknown>;
+  sources?: { source: string; settings?: Record<string, unknown> }[];
+}
+
+/**
+ * A background task that is work ending the session would kill: a subagent, a shell, a Monitor.
+ * Claude's own housekeeping (`ambient`) isn't, unless it is a Monitor the agent asked for.
+ */
+export function isWork(task: { task_type: string; ambient?: boolean }): boolean {
+  return !task.ambient || task.task_type.startsWith("monitor");
 }
 
 /** A model the session may run that isn't Tenzo's choice: the one a resume restored. */

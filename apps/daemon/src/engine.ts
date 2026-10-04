@@ -141,6 +141,11 @@ export interface EngineOptions {
   prompts?: () => ThreadPrompts;
   /** How long a swipe snoozes an item. Default 15 minutes; `TENZO_SNOOZE_MS` for trying it. */
   snoozeMs?: number;
+  /**
+   * How long the next turn waits for the agent to switch model or thinking, and for a session
+   * to end when it is restarted to change its settings. Default 15 s.
+   */
+  switchTimeoutMs?: number;
   log?: (message: string) => void;
 }
 
@@ -192,6 +197,8 @@ interface Live {
   restarting: boolean;
   /** Switching model or thinking in place: the next turn waits for it. */
   switching: boolean;
+  /** Let go of (it wouldn't end): nothing it still says reaches the log. */
+  abandoned: boolean;
 }
 
 export class Engine {
@@ -223,6 +230,7 @@ export class Engine {
   /** `start_thread` calls under way, by parent: they count against the limits already. */
   readonly #startingChildren = new Map<ThreadId, number>();
   readonly #snoozeMs: number;
+  readonly #switchTimeoutMs: number;
   /** A timer per snoozed item, to bring it back when its time comes. */
   readonly #snoozes = new Timers<QueueItemId>();
   /** A timer per thread whose agent asked to be woken (`wake_me`). */
@@ -238,6 +246,7 @@ export class Engine {
     this.#defaultModel = options.defaultModel;
     this.#prompts = options.prompts ?? (() => loadThreadPrompts());
     this.#snoozeMs = options.snoozeMs ?? SNOOZE_MS;
+    this.#switchTimeoutMs = options.switchTimeoutMs ?? 15_000;
     this.#log = options.log ?? ((message) => console.error(`tenzo: ${message}`));
   }
 
@@ -1062,31 +1071,19 @@ export class Engine {
     // The thread's settings may have changed since its session started (its own model, its
     // project's config, Build it): the session takes them before the turn goes, or, when it
     // can't live, ends here at the turn boundary and the next one starts with them (#read pumps
-    // again).
+    // again). Not while it has work running in the background, which ending it would kill: the
+    // turn goes to it as it is, and the change waits for a turn boundary without, or for the
+    // session's natural end (the next one starts with the settings of the day).
     if (live) {
       const change = live.session.reconfigure(this.#settingsOf(thread));
-      if (change === "restart") {
-        live.restarting = true;
-        this.#restarted.add(threadId);
-        void live.session.stop().catch((error: unknown) => {
-          this.#log(`couldn't restart ${threadId}'s session: ${String(error)}`);
-        });
-        return;
-      }
-      if (change !== "unchanged") {
-        const switching = live;
-        switching.switching = true;
-        void change.finally(() => {
-          switching.switching = false;
-          this.#pump(threadId);
-        });
-        return;
-      }
+      if (change === "restart" && !live.session.backgroundWork) return this.#restartSession(live);
+      if (change !== "unchanged" && change !== "restart") return this.#awaitSwitch(live, change);
     }
 
     if (!live) {
+      const restarted = this.#restarted.delete(threadId);
       try {
-        live = this.#startSession(thread, this.#restarted.delete(threadId));
+        live = this.#startSession(thread, restarted);
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         const unsent = queuedPrompts(this.store, threadId);
@@ -1104,6 +1101,13 @@ export class Engine {
         this.#changed(threadId);
         return;
       }
+      // Started again to change its settings: Claude may have restored the conversation's model
+      // with it, so it takes the thread's settings before its first turn too. (Never a second
+      // restart from here: a new session has nothing else to drop.)
+      if (restarted) {
+        const change = live.session.reconfigure(this.#settingsOf(thread));
+        if (change !== "unchanged" && change !== "restart") return this.#awaitSwitch(live, change);
+      }
     }
 
     let turnId: TurnId;
@@ -1117,6 +1121,85 @@ export class Engine {
     removePrompt(this.store, prompt.seq);
     live.turnId = turnId;
     live.standing = prompt.reply ? [prompt.reply] : [];
+  }
+
+  /**
+   * The next turn waits for a switch under way, up to `switchTimeoutMs`. Claude not answering
+   * by then, the session ends at this turn boundary instead (`#restartSession`), unless it has
+   * background work, which would die with it: then the turn goes as things are.
+   */
+  #awaitSwitch(live: Live, change: Promise<void>): void {
+    live.switching = true;
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<"late">((resolve) => {
+      timer = setTimeout(() => resolve("late"), this.#switchTimeoutMs);
+    });
+    void Promise.race([change.then(() => "done" as const, () => "done" as const), late]).then((outcome) => {
+      clearTimeout(timer);
+      live.switching = false;
+      if (this.#live.get(live.threadId) !== live) return;
+      if (outcome === "late") {
+        this.#log(`${live.threadId}'s agent didn't confirm a model switch in ${this.#switchTimeoutMs} ms`);
+        this.#append(
+          draft(getThread(this.store, live.threadId), {
+            type: "runtime.error",
+            payload: { message: "Claude didn't confirm the switch of model or thinking in time." },
+          }),
+        );
+        if (!live.session.backgroundWork) return this.#restartSession(live);
+      }
+      this.#pump(live.threadId);
+    });
+  }
+
+  /**
+   * Ends the thread's session at this turn boundary so the next one starts with its settings
+   * (#read pumps once it has ended). One that won't end within `switchTimeoutMs` is let go of:
+   * its queued prompts go on an error card, whose Retry starts a new session with them, so the
+   * thread never sits stalled.
+   */
+  #restartSession(live: Live): void {
+    live.restarting = true;
+    this.#restarted.add(live.threadId);
+    let timer: NodeJS.Timeout | undefined;
+    const late = new Promise<string>((resolve) => {
+      timer = setTimeout(() => resolve(`it didn't stop within ${this.#switchTimeoutMs} ms`), this.#switchTimeoutMs);
+    });
+    const stopped = live.session.stop().then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : String(error)),
+    );
+    void Promise.race([stopped, late]).then((failure) => {
+      clearTimeout(timer);
+      if (failure !== null) this.#abandon(live, failure);
+    });
+  }
+
+  /** Lets go of a session that won't end, and puts what it was to do on an error card. */
+  #abandon(live: Live, reason: string): void {
+    if (this.#live.get(live.threadId) !== live) return;
+    live.abandoned = true;
+    this.#live.delete(live.threadId);
+    this.#restarted.delete(live.threadId);
+    this.#log(`let go of ${live.threadId}'s session: ${reason}`);
+    try {
+      const thread = getThread(this.store, live.threadId);
+      const unsent = queuedPrompts(this.store, thread.id);
+      clearPrompts(this.store, thread.id);
+      this.#append(draft(thread, { type: "session.exited", payload: { exitKind: "error", reason } }));
+      this.#append(
+        draft(thread, {
+          type: "runtime.error",
+          payload: {
+            message: `Tenzo couldn't restart the agent to change its settings: ${reason} (${unsent.length} prompt(s) not sent)`,
+            unsent,
+          },
+        }),
+      );
+      this.#changed(thread.id);
+    } catch (error) {
+      this.#log(`couldn't record letting go of ${live.threadId}'s session: ${String(error)}`);
+    }
   }
 
   #startSession(thread: Thread, restarted = false): Live {
@@ -1162,6 +1245,7 @@ export class Engine {
       landed: false,
       restarting: false,
       switching: false,
+      abandoned: false,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -1171,6 +1255,7 @@ export class Engine {
   async #read(live: Live): Promise<void> {
     try {
       for await (const event of live.session.events) {
+        if (live.abandoned) continue;
         try {
           this.#ingest(live, event);
         } catch (error) {
@@ -1178,6 +1263,7 @@ export class Engine {
         }
       }
     } finally {
+      if (live.abandoned) return;
       if (this.#live.get(live.threadId) === live) this.#live.delete(live.threadId);
       // An agent that ended without saying so must not look alive.
       if (loadFoldState(this.store, live.threadId).runtime.live) {
