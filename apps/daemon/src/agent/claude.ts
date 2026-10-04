@@ -10,6 +10,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
+  PermissionModeName,
   RequestId,
   RuntimeEvent,
   ThreadPhase,
@@ -29,11 +30,13 @@ import {
   lsofListenerDirs,
   probeLive,
 } from "../live.ts";
+import type { ModelChoice, SessionModels } from "../project-config.ts";
 import { promptFor, proposalReply, wakePrompt } from "../prompts.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
   boundedInput,
   type ClaudeTranslation,
+  type Configured,
   initialTranslation,
   startTurn,
   summarizeTool,
@@ -76,9 +79,20 @@ import {
  * - a `canUseTool` hook, which is how questions (`AskUserQuestion`) and permission prompts reach
  *   the Pass instead of a terminal.
  *
- * It never sets the permission mode, in any phase: the user's own `defaultMode` (from their user,
- * project or local settings) applies, as in their terminal. Discussing is held by the discuss
- * prompt and `propose`, not by a mode.
+ * It never sets the permission mode, in any phase, unless the project's `.tenzo/` config does: the
+ * user's own `defaultMode` (from their user, project or local settings) applies, as in their
+ * terminal. Discussing is held by the discuss prompt and `propose`, not by a mode.
+ *
+ * Models come from the project's config and the thread (project-config.ts), per phase:
+ * - the model as `model` (`--model`), thinking `off` as `thinking: disabled`, and `low`,
+ *   `medium`, `high` as `effort` (Claude's effort levels, as `/effort` sets them);
+ * - Build it switches a running session to the build model in place (`setModel`, and
+ *   `applyFlagSettings({effortLevel})` / `setMaxThinkingTokens` for thinking): the build goes on
+ *   in the same turn, so it can't wait for a new session. Only to a model or level that is set:
+ *   Claude can't be told "your own default" in place (that is Claude Code's built-in one, not
+ *   the user's `model` setting), so an unset one applies from the thread's next session;
+ * - the subagents' model as `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code uses for a subagent
+ *   only when neither the subagent's own definition nor the call names a model.
  */
 export interface ClaudeAdapterOptions {
   /** The SDK's `query`. Tests pass a fake, so they never spawn Claude. */
@@ -241,8 +255,10 @@ function startSession(
     if (decision === "change") {
       return { text: proposalReply({ decision, note: note ?? "" }, input.prompts) };
     }
-    // The approval carries the build prompt; the permission mode stays the user's own.
+    // The approval carries the build prompt, and the build model takes over at once: the build
+    // goes on in this same turn. The permission mode stays as it was.
     phase = "building";
+    if (models) await switchTo(models.build);
     return { text: proposalReply({ decision }, input.prompts) };
   };
   /** Where this session's thread is: discussing until a proposal is approved. */
@@ -451,11 +467,17 @@ function startSession(
     mcpServers: {
       [TENZO_MCP_SERVER]: tenzoMcpServer(host, { liveBase: liveBase(input.threadId) }),
     },
-    // No permissionMode: the user's own defaultMode applies, in every phase.
+    // No permissionMode unless the project's config sets one: the user's own defaultMode
+    // applies, in every phase.
+    ...permissionOptions(input.permissionMode),
     canUseTool,
-    env: { ...claudeEnv(process.env), TENZO_LIVE_BASE: liveBase(input.threadId) },
+    env: {
+      ...claudeEnv(process.env),
+      TENZO_LIVE_BASE: liveBase(input.threadId),
+      ...(input.models?.agents ? { CLAUDE_CODE_SUBAGENT_MODEL: input.models.agents } : {}),
+    },
     ...(resumed ? { resume: sessionId } : { sessionId }),
-    ...(input.model ? { model: input.model } : {}),
+    ...modelOptions(choiceFor(input.models, input.phase)),
   };
 
   const run = query({ prompt: prompts, options });
@@ -491,6 +513,44 @@ function startSession(
       events.close();
     }
   })();
+
+  /** The model and thinking the session runs with now; unset: what it started with. */
+  let running: ModelChoice = choiceFor(input.models, input.phase);
+  let models = input.models;
+  /**
+   * Switches the running session to `next`'s model and thinking level, those of them that are
+   * set and differ (see above). A model switch is reported as `session.configured`, since
+   * Claude reports its configuration again only at its next turn.
+   */
+  const switchTo = async (next: ModelChoice): Promise<void> => {
+    try {
+      if (next.model && next.model !== running.model) {
+        await run.setModel(next.model);
+        running = { ...running, model: next.model };
+        if (state.configured) {
+          const configured: Configured = { ...state.configured, model: next.model };
+          state = { ...state, configured };
+          emit({ type: "session.configured", ...inTurn(), payload: configured });
+        }
+      }
+      if (next.thinking && next.thinking !== running.thinking) {
+        if (next.thinking === "off") {
+          await run.setMaxThinkingTokens(0);
+        } else {
+          if (running.thinking === "off") await run.setMaxThinkingTokens(null);
+          await run.applyFlagSettings({ effortLevel: next.thinking });
+        }
+        running = { ...running, thinking: next.thinking };
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      emit({
+        type: "runtime.error",
+        ...inTurn(),
+        payload: { message: `Couldn't switch to ${describeChoice(next)}: ${message}` },
+      });
+    }
+  };
 
   const answer = (requestId: RequestId, outcome: Settled): void => {
     const open = pending.get(requestId);
@@ -536,6 +596,11 @@ function startSession(
     respondToProposal(requestId, decision, note) {
       answer(requestId, { kind: "proposal", decision, ...(note ? { note } : {}) });
     },
+    async setModels(next) {
+      models = next;
+      if (prompts.closed) return; // ended: the next session starts with them
+      await switchTo(choiceFor(next, phaseNow()));
+    },
     async interrupt() {
       cancelPending(false);
       await run.interrupt().catch(() => {}); // already finished: nothing to interrupt
@@ -556,6 +621,44 @@ function startSession(
       await done;
     },
   };
+}
+
+/** The phase's model and thinking: discuss's while discussing, build's from Build it on. */
+export function choiceFor(models: SessionModels | undefined, phase: ThreadPhase): ModelChoice {
+  if (!models) return {};
+  return phase === "discussing" ? models.discuss : models.build;
+}
+
+/** A model choice as the SDK's options: `model`, and thinking as `thinking` or `effort`. */
+export function modelOptions(choice: ModelChoice): Pick<Options, "model" | "thinking" | "effort"> {
+  return {
+    ...(choice.model ? { model: choice.model } : {}),
+    ...(choice.thinking === "off"
+      ? { thinking: { type: "disabled" as const } }
+      : choice.thinking
+        ? { effort: choice.thinking }
+        : {}),
+  };
+}
+
+/**
+ * The project's permission mode as the SDK's options, or nothing. `bypassPermissions` needs the
+ * SDK's explicit opt-in; the config takes it only from the user's own local.json.
+ */
+export function permissionOptions(
+  mode: PermissionModeName | undefined,
+): Pick<Options, "permissionMode" | "allowDangerouslySkipPermissions"> {
+  if (!mode) return {};
+  return {
+    permissionMode: mode,
+    ...(mode === "bypassPermissions" ? { allowDangerouslySkipPermissions: true } : {}),
+  };
+}
+
+function describeChoice(choice: ModelChoice): string {
+  return [choice.model, choice.thinking ? `thinking ${choice.thinking}` : undefined]
+    .filter(Boolean)
+    .join(", ");
 }
 
 /** Runs a tool's work: a TenzoError is the agent's to read and fix, anything else is ours. */

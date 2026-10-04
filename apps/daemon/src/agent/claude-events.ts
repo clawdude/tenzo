@@ -5,7 +5,13 @@ import type {
   SDKSystemMessage,
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import type { ItemPayload, ToolKind, TurnId, TurnState } from "@tenzo/contracts";
+import type {
+  ItemPayload,
+  RuntimeEventOf,
+  ToolKind,
+  TurnId,
+  TurnState,
+} from "@tenzo/contracts";
 import type { EventDraft } from "./agent.ts";
 
 /**
@@ -16,7 +22,11 @@ export interface ClaudeTranslation {
   /** The session was started with `resume`. */
   readonly resumed: boolean;
   readonly sessionStarted: boolean;
-  readonly configured: boolean;
+  /**
+   * What the session said it loaded, last: Claude reports it as each turn starts, and Tenzo
+   * passes it on the first time and whenever the model changed (Build it, `thread.setModel`).
+   */
+  readonly configured: Configured | null;
   /** The turn in progress, if any. */
   readonly turnId: TurnId | null;
   /** The open turn is one Claude started by itself, not one of our prompts. */
@@ -32,6 +42,9 @@ interface ToolCall {
   parentItemId: string | null;
 }
 
+/** What a `session.configured` event says the session loaded. */
+export type Configured = RuntimeEventOf<"session.configured">["payload"];
+
 export interface Translated {
   state: ClaudeTranslation;
   events: EventDraft[];
@@ -44,7 +57,7 @@ export function initialTranslation(options: { resumed: boolean }): ClaudeTransla
   return {
     resumed: options.resumed,
     sessionStarted: false,
-    configured: false,
+    configured: null,
     turnId: null,
     synthetic: false,
     tools: new Map(),
@@ -115,25 +128,22 @@ function onInit(state: ClaudeTranslation, message: SDKSystemMessage): Translated
       }),
     );
   }
-  if (!state.configured) {
-    events.push(
-      withTurn(state, {
-        type: "session.configured",
-        payload: {
-          model: message.model,
-          cwd: message.cwd,
-          permissionMode: message.permissionMode,
-          agentVersion: message.claude_code_version,
-          tools: message.tools,
-          mcpServers: message.mcp_servers.map(({ name, status }) => ({ name, status })),
-          skills: message.skills,
-          plugins: message.plugins.map((p) => p.name),
-          agents: message.agents ?? [],
-        },
-      }),
-    );
+  let configured = state.configured;
+  if (configured === null || configured.model !== message.model) {
+    configured = {
+      model: message.model,
+      cwd: message.cwd,
+      permissionMode: message.permissionMode,
+      agentVersion: message.claude_code_version,
+      tools: message.tools,
+      mcpServers: message.mcp_servers.map(({ name, status }) => ({ name, status })),
+      skills: message.skills,
+      plugins: message.plugins.map((p) => p.name),
+      agents: message.agents ?? [],
+    };
+    events.push(withTurn(state, { type: "session.configured", payload: configured }));
   }
-  return { state: { ...state, sessionStarted: true, configured: true }, events };
+  return { state: { ...state, sessionStarted: true, configured }, events };
 }
 
 function onAssistant(state: ClaudeTranslation, message: SDKAssistantMessage): Translated {

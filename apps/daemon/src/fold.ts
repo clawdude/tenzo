@@ -203,10 +203,11 @@ export function foldEvent(
     case "turn.started": {
       // A prompt of ours went: whatever failed before is behind it, so its error card goes. A
       // turn the agent starts by itself (a background task reporting) changes nothing about it.
+      // A config card stays: the config is still wrong (`config.checked` says when it isn't).
       const ours = event.payload.prompt !== undefined;
       const changes: ItemChange[] = [];
       const open = state.open.filter((item) => {
-        if (item.kind !== "error" || !ours) return true;
+        if (item.kind !== "error" || !ours || item.error?.cause === "config") return true;
         changes.push({
           type: "resolved",
           item: {
@@ -447,6 +448,29 @@ export function foldEvent(
       const { cause, message, prompts } = event.payload;
       return withError(rest, superseded, event, runtime, environmentId, { cause, message, prompts });
     }
+    case "config.checked": {
+      // One config card at a time: a newer problem replaces it, none resolves it.
+      const problem = event.payload.problem;
+      const cards = state.open.filter((open) => open.kind === "error" && open.error?.cause === "config");
+      const closed = cards.map(
+        (open): ItemChange => ({
+          type: "resolved",
+          item: {
+            ...open,
+            status: "resolved",
+            resolvedAt: event.createdAt,
+            resolution: problem === null ? { kind: "recovered" } : { kind: "superseded" },
+          },
+        }),
+      );
+      const rest: FoldState = { ...state, open: state.open.filter((open) => !cards.includes(open)) };
+      if (problem === null) return { state: rest, changes: closed };
+      return withError(rest, closed, event, runtime, environmentId, {
+        cause: "config",
+        message: problem,
+        prompts: [],
+      });
+    }
     case "thread.archived": {
       const changes = state.open.map(
         (open): ItemChange => ({
@@ -519,6 +543,8 @@ export function errorHeadline(cause: ItemError["cause"], agent: AgentKind): stri
       return "Landing stalled";
     case "unarchived":
       return "Landed, but not archived";
+    case "config":
+      return "The project's Tenzo config is invalid";
   }
 }
 

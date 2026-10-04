@@ -255,6 +255,20 @@ describe('stepsOf: finished work', () => {
 		expect(suggestedAnswer(card)).toEqual({ kind: 'finished', decision: 'done' });
 	});
 
+	it("fills Open PR instead when the project's landing rule is pr, Merge moving to the row", () => {
+		const card = finished('f');
+		const [step] = stepsOf(card, 'pr');
+		expect(step?.suggested).toEqual({ label: 'Open PR', value: 'pr', description: '' });
+		expect(step?.row).toEqual([
+			{ label: 'Merge', value: 'merge', description: '' },
+			{ label: 'Done', value: 'done', description: '' }
+		]);
+		expect(answerOf(card, [{ choice: step!.suggested! }])).toEqual({ kind: 'finished', decision: 'pr' });
+		expect(answerOf(card, [{ choice: step!.row[0]! }])).toEqual({ kind: 'finished', decision: 'merge' });
+		// Only finished work: a ready PR's button is Merge whatever the rule.
+		expect(stepsOf(ready('r'), 'pr')[0]?.suggested?.value).toBe('merge');
+	});
+
 	it('sends each row button by its value, and words as what needs changing', () => {
 		const card = finished('f');
 		const [open, done] = stepsOf(card)[0]?.row ?? [];

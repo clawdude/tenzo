@@ -1,6 +1,12 @@
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
-import type { AgentKind, EnvironmentId, ThreadId, ThreadOrigin } from "@tenzo/contracts";
+import {
+  type AgentKind,
+  type EnvironmentId,
+  type ThreadId,
+  ThinkingLevel,
+  type ThreadOrigin,
+} from "@tenzo/contracts";
 import { TenzoError } from "./errors.ts";
 import {
   addWorktree,
@@ -33,8 +39,13 @@ export interface Thread {
   agent: AgentKind | null;
   /** The agent's own session id: what resumes the conversation after a restart. */
   sessionId: string | null;
-  /** The model the thread runs, when one was picked; else the agent's default. */
+  /**
+   * The thread's own model, over its project's config: given at start (`--model`) or by
+   * `thread.setModel`. Null: the config decides, else `TENZO_DEFAULT_MODEL`, else the agent.
+   */
   model: string | null;
+  /** The thread's own thinking level, over its project's config. */
+  thinking: ThinkingLevel | null;
   /** Who started it: you, or another thread's agent (`start_thread`), `parentId`. */
   origin: ThreadOrigin;
   parentId: ThreadId | null;
@@ -90,6 +101,7 @@ export async function createThread(
     agent: null,
     sessionId: null,
     model: options.model ?? null,
+    thinking: null,
     origin: options.parent ? "agent" : "user",
     parentId: options.parent ?? null,
   };
@@ -194,6 +206,17 @@ export function setThreadSession(
   store.db
     .prepare("UPDATE threads SET agent = ?, session_id = ?, updated_at = ? WHERE id = ?")
     .run(agent, sessionId, new Date().toISOString(), threadId);
+}
+
+/** Sets the thread's own model and thinking level (null: its project's config decides). */
+export function setThreadModel(
+  store: Store,
+  threadId: ThreadId,
+  choice: { model: string | null; thinking: ThinkingLevel | null },
+): void {
+  store.db
+    .prepare("UPDATE threads SET model = ?, thinking = ?, updated_at = ? WHERE id = ?")
+    .run(choice.model, choice.thinking, new Date().toISOString(), threadId);
 }
 
 /**
@@ -319,6 +342,7 @@ function toThread(row: Record<string, unknown>): Thread {
     sessionId:
       row.session_id === null || row.session_id === undefined ? null : String(row.session_id),
     model: row.model === null || row.model === undefined ? null : String(row.model),
+    thinking: ThinkingLevel.safeParse(row.thinking).data ?? null,
     origin: row.origin === "agent" ? "agent" : "user",
     parentId:
       row.parent_id === null || row.parent_id === undefined ? null : (String(row.parent_id) as ThreadId),

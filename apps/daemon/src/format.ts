@@ -164,6 +164,8 @@ function describe(event: RuntimeEvent): string {
       return `${event.payload.cause}: ${event.payload.message}`;
     case "runtime.error":
       return event.payload.message;
+    case "config.checked":
+      return event.payload.problem ?? "fine again";
     case "thread.archived":
       return "worktree removed, open items dismissed";
     case "item.snoozed":

@@ -10,7 +10,8 @@ import {
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import type { Options, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import { resolveModels } from "../project-config.ts";
 import {
   RuntimeEvent,
   type RuntimeEventOf,
@@ -208,7 +209,7 @@ describe("Claude adapter: starting", () => {
   it("resumes a stored session instead of starting a new one", async () => {
     const { fake, session, events } = start(simpleTurn, {
       resumeSessionId: SESSION,
-      model: "haiku",
+      models: { discuss: { model: "haiku" }, build: { model: "haiku" } },
     });
     expect(session.sessionId).toBe(SESSION);
     expect(fake.calls[0]).toMatchObject({ resume: SESSION, model: "haiku" });
@@ -642,8 +643,10 @@ describe("Claude adapter: Tenzo's propose tool", () => {
       text: `Approved, build it.\n\n${PROMPTS.build}`,
       isError: false,
     });
-    // The approval carries the build prompt; the permission mode stays the user's own.
+    // The approval carries the build prompt; the permission mode stays the user's own, and with
+    // no models configured nothing about the model changes either.
     expect(fake.permissionModes).toEqual([]);
+    expect(fake.controls).toEqual([]);
     expect(() => session.respondToProposal(requested.requestId, "build")).toThrow(/No open proposal/);
     await session.stop();
   });
@@ -726,6 +729,135 @@ describe("Claude adapter: Tenzo's propose tool", () => {
     await events.until("turn.completed");
     expect(replies[1]?.isError).toBe(false);
     expect(events.seen.filter((e) => e.type === "proposal.requested")).toHaveLength(1);
+    await session.stop();
+  });
+});
+
+describe("Claude adapter: models, thinking, subagents, permissions", () => {
+  /** The options a session gets, with what differs between any two runs (ids, handlers) left out. */
+  function comparable(options: Options | undefined) {
+    const { canUseTool, mcpServers, sessionId, ...rest } = options ?? {};
+    return { ...rest, canUseTool: typeof canUseTool, mcpServers: Object.keys(mcpServers ?? {}), sessionId: typeof sessionId };
+  }
+
+  it("with no config, the options are today's exactly: no model, thinking, effort, mode or subagent model", () => {
+    const none = resolveModels({ thread: { model: null, thinking: null }, config: {} });
+    for (const phase of ["discussing", "building", "review", "landing"] as const) {
+      const before = start(simpleTurn, { phase }).fake.calls[0];
+      const now = start(simpleTurn, { phase, models: none }).fake.calls[0];
+      expect(comparable(now)).toEqual(comparable(before));
+      expect(Object.keys(now ?? {}).sort()).toEqual(
+        ["canUseTool", "cwd", "env", "mcpServers", "pathToClaudeCodeExecutable", "sessionId", "settingSources", "systemPrompt"],
+      );
+      expect(now?.env).not.toHaveProperty("CLAUDE_CODE_SUBAGENT_MODEL");
+    }
+  });
+
+  const models = {
+    discuss: { model: "opus", thinking: "high" as const },
+    build: { model: "sonnet", thinking: "off" as const },
+    agents: "haiku",
+  };
+
+  it("discusses on the discuss model and builds on the build model, thinking as effort or disabled", () => {
+    expect(start(simpleTurn, { phase: "discussing", models }).fake.calls[0]).toMatchObject({
+      model: "opus",
+      effort: "high",
+    });
+    for (const phase of ["building", "review", "landing"] as const) {
+      const options = start(simpleTurn, { phase, models }).fake.calls[0];
+      expect(options).toMatchObject({ model: "sonnet", thinking: { type: "disabled" } });
+      expect(options).not.toHaveProperty("effort");
+    }
+    // Only what is set: a thinking level alone leaves the model the user's own.
+    const options = start(simpleTurn, {
+      phase: "discussing",
+      models: { discuss: { thinking: "low" }, build: {} },
+    }).fake.calls[0];
+    expect(options).toMatchObject({ effort: "low" });
+    expect(options).not.toHaveProperty("model");
+    expect(options).not.toHaveProperty("thinking");
+  });
+
+  it("gives subagents the agents model through CLAUDE_CODE_SUBAGENT_MODEL", () => {
+    const options = start(simpleTurn, { phase: "discussing", models }).fake.calls[0];
+    expect(options?.env).toEqual({
+      ...claudeEnv(process.env),
+      TENZO_LIVE_BASE: `/live/${THREAD}/`,
+      CLAUDE_CODE_SUBAGENT_MODEL: "haiku",
+    });
+  });
+
+  it("sets the permission mode only when the project's config does", () => {
+    expect(start(simpleTurn, { permissionMode: "acceptEdits" }).fake.calls[0]).toMatchObject({
+      permissionMode: "acceptEdits",
+    });
+    expect(start(simpleTurn, { permissionMode: "acceptEdits" }).fake.calls[0]).not.toHaveProperty(
+      "allowDangerouslySkipPermissions",
+    );
+    expect(start(simpleTurn, { permissionMode: "bypassPermissions" }).fake.calls[0]).toMatchObject({
+      permissionMode: "bypassPermissions",
+      allowDangerouslySkipPermissions: true,
+    });
+  });
+
+  function approving(): Script {
+    const plan = { headline: "Add it", summary: "Add it." };
+    return async function* (turn) {
+      yield init({ model: "claude-opus-5-5" });
+      yield assistant([toolUse("toolu_p", "mcp__tenzo__propose", plan)]);
+      const reply = await turn.callTool("tenzo", "propose", plan);
+      yield toolResult("toolu_p", reply.text, reply.isError);
+      yield result();
+    };
+  }
+
+  it("Build it switches the running session to the build model in place, and says so", async () => {
+    const { fake, session, events } = start(approving(), { phase: "discussing", models });
+    session.sendTurn("add it");
+    const requested = await events.until("proposal.requested");
+    expect(fake.controls).toEqual([]);
+    session.respondToProposal(requested.requestId, "build");
+    await events.until("proposal.resolved");
+    const configured = await events.until("session.configured");
+    expect(configured.payload.model).toBe("sonnet");
+    await events.until("turn.completed");
+    expect(fake.controls).toEqual([{ setModel: "sonnet" }, { setMaxThinkingTokens: 0 }]);
+    expect(events.seen.filter((e) => e.type === "session.configured").map((e) => e.payload.model)).toEqual([
+      "claude-opus-5-5",
+      "sonnet",
+    ]);
+    await session.stop();
+  });
+
+  it("turns thinking back on as an effort level, and switches nothing to an unset model", async () => {
+    const { fake, session, events } = start(approving(), {
+      phase: "discussing",
+      models: { discuss: { model: "haiku", thinking: "off" }, build: { thinking: "medium" } },
+    });
+    session.sendTurn("add it");
+    const requested = await events.until("proposal.requested");
+    session.respondToProposal(requested.requestId, "build");
+    await events.until("turn.completed");
+    // No setModel(): that would be Claude Code's built-in default, not the user's own.
+    expect(fake.controls).toEqual([
+      { setMaxThinkingTokens: null },
+      { applyFlagSettings: { effortLevel: "medium" } },
+    ]);
+    await session.stop();
+  });
+
+  it("a thread's new models reach the running session at once, for the phase it is in", async () => {
+    const { fake, session } = start(simpleTurn, { phase: "building", models });
+    await session.setModels({ ...models, build: { model: "opus", thinking: "high" } });
+    expect(fake.controls).toEqual([
+      { setModel: "opus" },
+      { setMaxThinkingTokens: null },
+      { applyFlagSettings: { effortLevel: "high" } },
+    ]);
+    // The same again changes nothing.
+    await session.setModels({ ...models, build: { model: "opus", thinking: "high" } });
+    expect(fake.controls).toHaveLength(3);
     await session.stop();
   });
 });

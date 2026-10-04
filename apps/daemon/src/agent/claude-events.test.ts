@@ -49,7 +49,7 @@ function expectValid(events: EventDraft[]) {
 
 describe("session events", () => {
   it("reports the session and what it loaded, once", () => {
-    const { events, state } = run([init(), init({ model: "other" })]);
+    const { events, state } = run([init(), init()]);
     expect(events.map((e) => e.type)).toEqual(["session.started", "session.configured"]);
     expect(events[0]).toEqual({
       type: "session.started",
@@ -67,6 +67,14 @@ describe("session events", () => {
       agents: ["general-purpose"],
     });
     expect(state.sessionStarted).toBe(true);
+    expectValid(events);
+  });
+
+  it("reports what it loaded again when the model changed (Build it, thread.setModel)", () => {
+    const { events, state } = run([init(), init(), init({ model: "claude-sonnet-5-5" }), init({ model: "claude-sonnet-5-5" })]);
+    const configured = events.filter((e) => e.type === "session.configured");
+    expect(configured.map((e) => e.payload.model)).toEqual(["claude-haiku-4-5", "claude-sonnet-5-5"]);
+    expect(state.configured?.model).toBe("claude-sonnet-5-5");
     expectValid(events);
   });
 

@@ -165,6 +165,8 @@ export function errorPrompts(
 ): string[] {
   if (answer.action === "tell") return [answer.text ?? ""];
   const error = item.error;
+  // Retry on a config card reads the config again (engine.ts): nothing goes to the agent.
+  if (error?.cause === "config") return [];
   const resend =
     error?.cause === "start" || error?.cause === "stalled" || error?.cause === "unarchived";
   if (resend && error.prompts.length > 0) return error.prompts;

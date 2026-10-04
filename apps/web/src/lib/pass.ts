@@ -1,5 +1,6 @@
 import {
 	isSnoozed,
+	type LandingRule,
 	type ItemAnswer,
 	type QueueItem,
 	suggestedDecision,
@@ -109,21 +110,24 @@ export interface Step {
 /** What was picked on a step: a button, or words typed or dictated into the field. */
 export type Pick = { choice: Choice } | { text: string };
 
-export function stepsOf(item: QueueItem): Step[] {
+/**
+ * The card's steps. `landing` is the project's landing rule (`.tenzo/config.json`): which of
+ * Merge and Open PR is finished work's filled button.
+ */
+export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[] {
 	if (item.kind === 'finished') {
+		const merge: Choice = { label: 'Merge', value: 'merge', description: '' };
+		const pr: Choice = { label: 'Open PR', value: 'pr', description: '' };
 		return [
 			{
 				key: 'finished',
 				ask: item.finished?.headline || item.ask,
 				// Landing is what finished work is for: the filled button, no "Suggested" over it.
-				suggested: { label: 'Merge', value: 'merge', description: '' },
+				suggested: landing === 'pr' ? pr : merge,
 				recommended: false,
 				others: [],
-				// Open PR (land it, but ask before merging) and Done (nothing to land), quietly.
-				row: [
-					{ label: 'Open PR', value: 'pr', description: '' },
-					{ label: 'Done', value: 'done', description: '' }
-				],
+				// The other landing, and Done (nothing to land), quietly.
+				row: [landing === 'pr' ? merge : pr, { label: 'Done', value: 'done', description: '' }],
 				// Words are Needs changes: they go back to the agent, which builds again.
 				placeholder: 'Needs changes'
 			}

@@ -280,6 +280,15 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 			case 'landing.stuck':
 				push({ kind: 'note', key: `note:${seq}`, at, text: event.payload.message, tone: 'fail' });
 				break;
+			case 'config.checked': {
+				const problem = event.payload.problem;
+				push(
+					problem === null
+						? { kind: 'note', key: `note:${seq}`, at, text: "The project's config is fine again", tone: 'quiet' }
+						: { kind: 'note', key: `note:${seq}`, at, text: `${problem} (running on the defaults)`, tone: 'fail' }
+				);
+				break;
+			}
 
 			case 'attachment.added': {
 				const a = event.payload.attachment;

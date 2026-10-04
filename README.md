@@ -52,7 +52,7 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
-| `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads started without one (e.g. `haiku` for cheap trial runs) |
+| `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads whose project's `.tenzo/config.json` names none and that weren't given one (e.g. `haiku` for cheap trial runs) |
 | `TENZO_SNOOZE_MS` | 15 minutes | how long a swipe snoozes a card, in ms (e.g. `20000` to watch one come back) |
 
 ### Keep it running (macOS)
@@ -101,7 +101,7 @@ pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try
 
 ## Running Claude Code in a thread
 
-Threads run your own `claude` (see `TENZO_CLAUDE_PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo never sets the permission mode, in any phase: your own `defaultMode` applies, as in the terminal. It only appends its thread prompts to Claude Code's, adds its own MCP server (`tenzo`: `propose`, `report`, `attach`, `expose`, `wake_me`, `ready_to_merge`, `landed`, `start_thread`) next to yours, and catches questions and permission prompts so they can come to you. Threads get Tenzo's environment minus the variables a parent Claude Code session exports (`CLAUDECODE`, its session id, IDE port, bridge wiring), so running Tenzo from inside Claude Code doesn't tie its threads to that session; your configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, Bedrock/Vertex, proxies) passes through.
+Threads run your own `claude` (see `TENZO_CLAUDE_PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo never sets the permission mode, in any phase, unless the project's config says to (below): your own `defaultMode` applies, as in the terminal. It only appends its thread prompts to Claude Code's, adds its own MCP server (`tenzo`: `propose`, `report`, `attach`, `expose`, `wake_me`, `ready_to_merge`, `landed`, `start_thread`) next to yours, and catches questions and permission prompts so they can come to you. Threads get Tenzo's environment minus the variables a parent Claude Code session exports (`CLAUDECODE`, its session id, IDE port, bridge wiring), so running Tenzo from inside Claude Code doesn't tie its threads to that session; your configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, Bedrock/Vertex, proxies) passes through.
 
 A thread started from a prompt without a title is named in two steps: at once by the prompt's first few words, then, a few seconds later, by a 2–4 word name from a one-shot `claude` on haiku (no tools, no settings, not saved to your session history). If that fails, the first words stay. If the daemon stops before the name comes, the next daemon asks again when it starts.
 
@@ -121,6 +121,33 @@ pnpm tenzo thread log <thread-id> [--follow]                 # the thread's even
 `pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, run through a scratch daemon, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
 
 `pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: it loads `/`, `/new` and `/threads` directly, walks New → Close → New → Close → Threads → ×, and fails on any page error, a second WebSocket or page load, or a lost draft; then it reloads on New and checks that Close goes back to the Pass behind it rather than stacking another. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
+
+### Project config: `.tenzo/config.json`
+
+A project can say how its threads run in `.tenzo/config.json` (commit it) and `.tenzo/local.json` (yours, gitignore it), both optional, in the repo's main checkout. Tenzo only reads them, as each thread's session starts, so an edit applies to the next session without a restart; `local.json` overrides `config.json` key by key. Anything missing is Claude's own default, from your Claude settings.
+
+```json
+{
+  "agent": "claude",
+  "models": {
+    "discuss": { "model": "opus",   "thinking": "high" },
+    "build":   { "model": "sonnet", "thinking": "medium" },
+    "agents":  { "model": "haiku" }
+  },
+  "permissions": "acceptEdits",
+  "landing": "pr"
+}
+```
+
+| Key | | How Claude gets it |
+|---|---|---|
+| `models.discuss` | while the thread discusses, until *Build it* | `model` (`--model`); `thinking` `off` as thinking disabled, `low`/`medium`/`high` as Claude's effort level (`--effort`, what `/effort` sets) |
+| `models.build` | from *Build it* on: building, review, landing | the same; *Build it* switches the running session in place (`setModel`, effort and thinking set live), since the build goes on in that same turn. Only to what is set: Claude can't be told "your own default" mid-session, so an unset build model or level applies from the thread's next session |
+| `models.agents` | subagents (`model` only) | `CLAUDE_CODE_SUBAGENT_MODEL`, which Claude Code uses only for a subagent whose own definition (frontmatter `model`) and call name no model: your subagents' own choices win |
+| `permissions` | the permission mode in every phase: `default`, `acceptEdits`, `auto`, `dontAsk`, `bypassPermissions` | `permissionMode`. Absent (the usual), Tenzo sets none and your `defaultMode` applies. `bypassPermissions` only from `local.json`, never from a committed file; `plan` isn't offered (nothing could be built) |
+| `landing` | the finished card's filled button: `merge` (default) or `pr` | the other one and *Done* stay in the row under it |
+
+Which model wins, field by field: the thread's own (its "⋯" on the phone, `thread.setModel`, or `thread start --model`), then the project's config, then `TENZO_DEFAULT_MODEL`, then Claude's own. A thread's own model applies in every phase and reaches a running session at once. With no config at all, threads run exactly as before: no model, thinking, effort, permission mode or subagent model is passed. An invalid file never stops a thread: it runs on the defaults, and an error card says which file and key is wrong (Retry reads it again; the card also goes by itself once a session starts with the file fixed). Each model change shows in the thread's events as `session.configured` (`pnpm tenzo thread log <id>`).
 
 ### Events and items
 

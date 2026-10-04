@@ -63,7 +63,7 @@
 		turning = false;
 	}
 
-	const steps = $derived(stepsOf(item));
+	const steps = $derived(stepsOf(item, threadView?.landing));
 	/** Finished work's content; null on every other card. */
 	const view = $derived(finishedView(item, thread, liveOrigin));
 	/** The screenshot shown full screen, if one was tapped. */

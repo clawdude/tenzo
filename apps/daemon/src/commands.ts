@@ -57,6 +57,13 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
           ...(command.force !== undefined ? { force: command.force } : {}),
         }),
       };
+    case "thread.setModel":
+      return {
+        thread: engine.setModel(command.threadId, {
+          model: command.model,
+          ...(command.thinking !== undefined ? { thinking: command.thinking } : {}),
+        }),
+      };
     case "thread.list":
       return {
         threads: engine.threads({

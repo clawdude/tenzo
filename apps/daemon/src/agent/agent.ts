@@ -1,5 +1,6 @@
 import type {
   AgentKind,
+  PermissionModeName,
   RequestId,
   RuntimeEvent,
   ThreadId,
@@ -7,6 +8,7 @@ import type {
   TurnId,
   UserInputAnswers,
 } from "@tenzo/contracts";
+import type { SessionModels } from "../project-config.ts";
 import type { ThreadPrompts } from "../prompts.ts";
 
 /**
@@ -26,12 +28,21 @@ export interface StartSessionInput {
   cwd: string;
   /** The agent's session id from an earlier run (`AgentSession.sessionId`): continue it. */
   resumeSessionId?: string;
-  /** A model name the agent understands, e.g. "haiku". Default: the agent's own default. */
-  model?: string;
+  /**
+   * The models and thinking levels the thread runs with, per phase, Tenzo's precedence already
+   * applied (project-config.ts): `discuss` while discussing, `build` from Build it on, `agents`
+   * for subagents. Unset: the agent's own defaults (the user's config), as in their terminal.
+   */
+  models?: SessionModels;
+  /**
+   * The permission mode the project's config sets. Unset (the default): Tenzo sets none, and the
+   * user's own `defaultMode` applies, as in their terminal.
+   */
+  permissionMode?: PermissionModeName;
   /**
    * Where the thread is: which of Tenzo's thread prompts the session gets. Discussing: talk, don't
-   * change anything yet. Building or review: build. The permission mode is never Tenzo's: the
-   * user's own settings decide it, in every phase.
+   * change anything yet. Building or review: build. The permission mode is never Tenzo's unless
+   * the project's config sets one (`permissionMode`): the user's own settings decide it.
    */
   phase: ThreadPhase;
   /** Where `attach` keeps its copies (`<home>/attachments/<thread>`). None: attach refuses. */
@@ -89,6 +100,11 @@ export interface AgentSession {
    * change something, with a note saying what. The agent's `propose` call returns with it.
    */
   respondToProposal(requestId: RequestId, decision: "build" | "change", note?: string): void;
+  /**
+   * The thread's models changed (`thread.setModel`): the session switches to the current
+   * phase's at once, where the agent can (what it can't, its next session picks up).
+   */
+  setModels(models: SessionModels): Promise<void>;
   /**
    * Stops the running turn; the session stays up for the next one. Open questions and requests
    * are cancelled (`*.resolved` with cancel).

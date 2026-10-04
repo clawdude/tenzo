@@ -11,6 +11,7 @@ import {
   type RuntimeEvent,
   type Snapshot,
   type StoredEvent,
+  type ThinkingLevel,
   type ThreadDiff,
   type ThreadId,
   type ThreadView,
@@ -54,6 +55,13 @@ import { diffStat } from "./diff.ts";
 import { type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
 import { branchExists, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
+import {
+  type ConfigRead,
+  landingOf,
+  permissionsOf,
+  ProjectConfigs,
+  resolveModels,
+} from "./project-config.ts";
 import { findProject, listProjects } from "./projects.ts";
 import {
   loadThreadPrompts,
@@ -74,6 +82,7 @@ import {
   getThread,
   listThreads,
   projectOf,
+  setThreadModel,
   type Thread,
   threadByClientKey,
   threadsToName,
@@ -118,7 +127,10 @@ export interface EngineOptions {
    * Without one, threads keep the prompt's first words.
    */
   titler?: Titler;
-  /** The model for threads started without one (`TENZO_DEFAULT_MODEL`). Default: the agent's. */
+  /**
+   * The model for threads whose project's config names none (`TENZO_DEFAULT_MODEL`). Default:
+   * the agent's own.
+   */
   defaultModel?: string;
   /**
    * Tenzo's thread prompts, read as each session starts so an edit applies to the next one.
@@ -191,6 +203,8 @@ export class Engine {
   readonly #titler: Titler | undefined;
   readonly #defaultModel: string | undefined;
   readonly #prompts: () => ThreadPrompts;
+  /** Projects' `.tenzo/` configs, read again whenever their files change (project-config.ts). */
+  readonly #configs = new ProjectConfigs();
   /** Names being thought of; `close` stops and waits for them. */
   readonly #naming = new Set<Promise<void>>();
   readonly #stopNaming = new AbortController();
@@ -303,7 +317,9 @@ export class Engine {
     // Without a title, the prompt's first words stand in until the titler has a name.
     const title = given || (prompt ? quickTitle(prompt) : "");
     if (title === "") throw new TenzoError("A new thread needs a title or a prompt.");
-    const model = input.model ?? this.#defaultModel;
+    // Only a model asked for is the thread's own: TENZO_DEFAULT_MODEL and the project's config
+    // are looked up as each session starts, so a change to either applies to running threads.
+    const model = input.model;
     const thread = await createThread(this.store, input.project, title, {
       ...(model ? { model } : {}),
       ...(prompt && !given ? { naming: prompt } : {}),
@@ -340,6 +356,29 @@ export class Engine {
     }
     enqueuePrompt(this.store, thread.id, text);
     this.#pump(thread.id);
+    return this.#changed(thread.id);
+  }
+
+  /**
+   * Sets the thread's own model and thinking level, over its project's config, for every phase
+   * from now on (null: the config decides again). A running session switches at once where the
+   * agent can; the rest applies from its next session.
+   */
+  setModel(
+    threadId: string,
+    choice: { model: string | null; thinking?: ThinkingLevel | null | undefined },
+  ): ThreadView {
+    const thread = this.#active(threadId);
+    const model = choice.model?.trim() || null;
+    setThreadModel(this.store, thread.id, { model, thinking: choice.thinking ?? null });
+    const live = this.#live.get(thread.id);
+    if (live) {
+      const updated = getThread(this.store, thread.id);
+      const read = this.#configs.read(projectOf(this.store, updated).path);
+      live.session.setModels(this.#modelsOf(updated, read)).catch((error: unknown) => {
+        this.#log(`couldn't switch the model of ${thread.id}: ${String(error)}`);
+      });
+    }
     return this.#changed(thread.id);
   }
 
@@ -639,11 +678,12 @@ export class Engine {
     item: QueueItem,
     thread: Thread,
     answer: Extract<ItemAnswer, { kind: "error" }>,
-  ): Promise<{ item: QueueItem; delivery: "message" | "archived"; thread: ThreadView }> {
+  ): Promise<{ item: QueueItem; delivery: "message" | "none" | "archived"; thread: ThreadView }> {
     if (answer.action === "archive") {
       const archived = await this.archive(thread.id);
       return { item: getItem(this.store, item.id) ?? item, delivery: "archived", thread: archived };
     }
+    if (item.error?.cause === "config" && answer.action === "retry") return this.#retryConfig(item, thread);
     const resolution = draft(thread, {
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...resolutionOf(item, answer),
@@ -660,6 +700,68 @@ export class Engine {
       delivery: "message",
       thread: this.#changed(thread.id),
     };
+  }
+
+  /**
+   * Retry on a config card: read the project's config again. Still wrong, a new card says what
+   * is wrong now; fixed, a running session takes its models at once.
+   */
+  #retryConfig(
+    item: QueueItem,
+    thread: Thread,
+  ): { item: QueueItem; delivery: "none"; thread: ThreadView } {
+    this.#append(
+      draft(thread, {
+        ...(item.turnId ? { turnId: item.turnId } : {}),
+        type: "error.resolved",
+        requestId: item.requestId,
+        payload: { action: "retry" },
+      }),
+    );
+    const read = this.#checkConfig(thread);
+    const live = this.#live.get(thread.id);
+    if (live && read.problem === null) {
+      live.session.setModels(this.#modelsOf(thread, read)).catch((error: unknown) => {
+        this.#log(`couldn't switch the model of ${thread.id}: ${String(error)}`);
+      });
+    }
+    return {
+      item: getItem(this.store, item.id) ?? item,
+      delivery: "none",
+      thread: this.#changed(thread.id),
+    };
+  }
+
+  /**
+   * Reads the thread's project config, and puts what is wrong with it on the Pass: an error card
+   * when it is invalid (the thread runs on the defaults meanwhile), unless one says so already;
+   * the card goes once it is fine again. Never throws: a config can't stop a thread.
+   */
+  #checkConfig(thread: Thread): ConfigRead {
+    let read: ConfigRead;
+    try {
+      read = this.#configs.read(projectOf(this.store, thread).path);
+    } catch (error) {
+      read = { config: null, problem: `Couldn't read the project's config: ${String(error)}` };
+    }
+    const card = openItems(this.store, thread.id).find(
+      (i) => i.kind === "error" && i.error?.cause === "config",
+    );
+    const problem = read.problem;
+    const changed = problem === null ? card !== undefined : card?.error?.message !== problem.trim();
+    if (changed) {
+      try {
+        this.#append(draft(thread, { type: "config.checked", payload: { problem } }));
+      } catch (error) {
+        this.#log(`couldn't record ${thread.id}'s config check: ${String(error)}`);
+      }
+    }
+    return read;
+  }
+
+  /** What the thread's sessions run with: its own choice, its project's config, the default. */
+  #modelsOf(thread: Thread, read: ConfigRead) {
+    return resolveModels({ thread, config: read.config, defaultModel: this.#defaultModel });
   }
 
   /** Brings the item back when its snooze is up (now, if it is already). */
@@ -968,11 +1070,15 @@ export class Engine {
     const agent = thread.agent ?? "claude";
     const adapter = this.#adapters[agent];
     if (!adapter) throw new TenzoError(`No ${agent} adapter.`);
+    // Read as each session starts, so an edit applies without a restart.
+    const config = this.#checkConfig(thread);
+    const permissionMode = permissionsOf(config);
     const session = adapter.start({
       threadId: thread.id,
       cwd: thread.worktreePath,
       ...(thread.sessionId ? { resumeSessionId: thread.sessionId } : {}),
-      ...(thread.model ? { model: thread.model } : {}),
+      models: this.#modelsOf(thread, config),
+      ...(permissionMode ? { permissionMode } : {}),
       ...(() => {
         const runtime = loadFoldState(this.store, thread.id).runtime;
         // The attach cap counts what this thread already holds for its next report.
@@ -1183,17 +1289,20 @@ export class Engine {
       thread.status === "active" &&
       (queued > 0 || Boolean(live?.turnId) || (runtime.live && runtime.turnId !== null));
     const last = lastEvent(this.store, thread.id);
+    const project = projectOf(this.store, thread);
     return {
       id: thread.id,
       environmentId: thread.environmentId,
       projectId: thread.projectId,
-      projectName: projectOf(this.store, thread).name,
+      projectName: project.name,
       title: thread.title,
       branch: thread.branch,
       worktreePath: thread.worktreePath,
       status: thread.status,
       agent: runtime.agent ?? thread.agent,
       model: thread.model,
+      thinking: thread.thinking,
+      landing: this.#landingOf(project.path),
       createdAt: thread.createdAt,
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
@@ -1208,6 +1317,15 @@ export class Engine {
       lastSeq: last?.seq ?? 0,
       activeAt: last?.at ?? thread.createdAt,
     };
+  }
+
+  /** The project's landing rule; Merge when its config has none or can't be read. */
+  #landingOf(root: string) {
+    try {
+      return landingOf(this.#configs.read(root));
+    } catch {
+      return "merge" as const;
+    }
   }
 
   #emit(change: EngineChange): void {

@@ -10,6 +10,7 @@ import type {
   UserInputQuestion,
 } from "@tenzo/contracts";
 import { TenzoError } from "../errors.ts";
+import type { SessionModels } from "../project-config.ts";
 import { randomId } from "../ids.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import { boundedInput, summarizeTool } from "./claude-events.ts";
@@ -264,6 +265,13 @@ export class FakeSession implements AgentSession {
       requestId,
       payload: { decision, ...(note ? { note } : {}) },
     });
+  }
+
+  /** What `setModels` was told, in order. */
+  readonly modelChanges: SessionModels[] = [];
+
+  async setModels(models: SessionModels): Promise<void> {
+    this.modelChanges.push(models);
   }
 
   async interrupt(): Promise<void> {

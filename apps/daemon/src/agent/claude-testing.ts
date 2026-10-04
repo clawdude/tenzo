@@ -167,6 +167,7 @@ export type Script = (turn: Turn) => AsyncIterable<SDKMessage> | Iterable<SDKMes
 export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
   const calls: Options[] = [];
   const permissionModes: string[] = [];
+  const controls: Record<string, unknown>[] = [];
   let interrupts = 0;
   let closed = false;
   const query = ((params: { prompt: AsyncIterable<SDKUserMessage>; options: Options }) => {
@@ -221,6 +222,15 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
       setPermissionMode: async (mode: string) => {
         permissionModes.push(mode);
       },
+      setModel: async (model?: string) => {
+        controls.push({ setModel: model });
+      },
+      setMaxThinkingTokens: async (tokens: number | null) => {
+        controls.push({ setMaxThinkingTokens: tokens });
+      },
+      applyFlagSettings: async (settings: Record<string, unknown>) => {
+        controls.push({ applyFlagSettings: settings });
+      },
     }) as unknown as Query;
   }) as unknown as typeof sdkQuery;
   return {
@@ -228,6 +238,8 @@ export function fakeQuery(script: Script, fake: { exitError?: Error } = {}) {
     calls,
     /** Modes set with `setPermissionMode` while running, in order: Tenzo sets none. */
     permissionModes,
+    /** Model and thinking switches made while running (`setModel`, …), in order. */
+    controls,
     get interrupts() {
       return interrupts;
     },
