@@ -81,6 +81,13 @@ export const MAX_CHILD_THREADS = 10;
 export const MAX_AGENT_THREADS = 10;
 
 /**
+ * What a landed thread's stuck card adds: Retry gives it work, but it stays marked landed, so it
+ * archives anyway once a turn of its ends (or the daemon restarts). New work goes in a new thread.
+ */
+export const STILL_LANDED =
+  "It's already marked landed, so it archives at its next turn end or when Tenzo restarts: start a new thread for more work.";
+
+/**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
  * sends each thread's prompts one turn at a time from a queue, appends every event the agents
  * report to the log (folding it into items as it goes), and routes answers back to the agent.
@@ -703,7 +710,7 @@ export class Engine {
       this.#landingStuck(
         threadId,
         "unarchived",
-        "It landed, but you sent it a message meanwhile, so it isn't archived. Retry sends your message; Archive drops it.",
+        `It landed, but you sent it a message meanwhile, so it isn't archived. Retry sends your message; Archive drops it. ${STILL_LANDED}`,
         waiting,
       );
       return;
@@ -713,7 +720,7 @@ export class Engine {
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.#log(`couldn't archive ${threadId}, which landed: ${message}`);
-        this.#landingStuck(threadId, "unarchived", `It landed, but Tenzo couldn't archive it: ${message}`, [
+        this.#landingStuck(threadId, "unarchived", `It landed, but Tenzo couldn't archive it: ${message} ${STILL_LANDED}`, [
           `Tenzo couldn't archive this thread after \`landed\`: ${message}\n\nLeave the worktree clean (commit or delete stray files), then call \`landed\` again.`,
         ]);
       })
@@ -725,10 +732,11 @@ export class Engine {
 
   /**
    * A landing turn of ours ended with nothing to come: no wake, no card, no `landed`, nothing
-   * queued. The thread would sit in Landing forever, so it gets an error card instead.
+   * queued. The thread would sit in Landing forever, so it gets an error card instead. A turn
+   * already running (`#pump` just sent what was queued) is something to come.
    */
   #checkStalled(live: Live): void {
-    if (this.#closing || live.landed) return;
+    if (this.#closing || live.landed || live.turnId) return;
     const { runtime, open } = loadFoldState(this.store, live.threadId);
     if (runtime.phase !== "landing" || runtime.wake !== null || open.length > 0) return;
     if (queuedCount(this.store, live.threadId) > 0) return;

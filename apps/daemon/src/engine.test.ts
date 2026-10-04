@@ -12,7 +12,7 @@ import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vites
 import { FakeAdapter, type FakeSession } from "./agent/fake-agent.ts";
 import { carryOn, RESTART_PROMPT } from "./answers.ts";
 import { executeCommand } from "./commands.ts";
-import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS } from "./engine.ts";
+import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, STILL_LANDED } from "./engine.ts";
 import { STALLED_PROMPT } from "./prompts.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
@@ -1245,6 +1245,9 @@ describe("Engine: review actions and landing", () => {
         error: { cause: "unarchived", message: expect.stringMatching(/uncommitted changes/) },
       },
     ]);
+    // The card says it still archives once a turn ends, whatever Retry gives it to do.
+    expect(d.engine.snapshot().items[0]?.error?.message).toContain(STILL_LANDED);
+    expect(STILL_LANDED).toMatch(/already marked landed, so it archives at its next turn end or when Tenzo restarts/);
     expect(d.engine.view(thread.id)).toMatchObject({ status: "active", phase: "landing" });
     // Retry tells the agent what is in the way.
     const [card] = d.engine.snapshot().items;
@@ -1265,13 +1268,23 @@ describe("Engine: review actions and landing", () => {
     expect(() => d.engine.send(thread.id, "One more thing")).toThrow(/has landed/);
     session.complete();
     await expect.poll(() => d.engine.snapshot().items).toMatchObject([
-      { kind: "error", error: { cause: "unarchived", prompts: ["Also update the README"] } },
+      {
+        kind: "error",
+        error: {
+          cause: "unarchived",
+          prompts: ["Also update the README"],
+          message: expect.stringContaining(STILL_LANDED),
+        },
+      },
     ]);
     expect(d.engine.view(thread.id)).toMatchObject({ status: "active", queued: 0 });
     expect(existsSync(thread.worktreePath)).toBe(true);
     const [card] = d.engine.snapshot().items;
     await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
     expect(session.prompts.at(-1)).toBe("Also update the README");
+    // As the card said: once that turn ends, it archives.
+    session.complete();
+    await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
   });
 
   it("a landing turn that ends with nothing to come gets an error card; Retry reminds it", async () => {
@@ -1301,6 +1314,22 @@ describe("Engine: review actions and landing", () => {
     // A turn that leaves a wake (or a card, or `landed`) is no stall.
     expect(d.engine.snapshot().items).toEqual([]);
     expect(d.engine.view(thread.id).wakeAt).not.toBeNull();
+  });
+
+  it("a landing turn followed by a queued prompt is no stall: the next turn just starts", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    session.onPrompt = () => {};
+    await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    d.engine.send(thread.id, "Also check the README"); // queued behind the landing turn
+    session.say("Pushed; opening the PR next.");
+    session.complete();
+    await settle();
+    expect(session.prompts.at(-1)).toBe("Also check the README");
+    const types = d.engine.events(thread.id).events.map((e) => e.event.type);
+    expect(types).not.toContain("landing.stuck");
+    expect(types.slice(types.lastIndexOf("turn.completed"))).toEqual(["turn.completed", "turn.started"]);
+    expect(d.engine.snapshot().items).toEqual([]);
   });
 
   it("Merge answered while a turn runs waits for it; the thread is landing at once", async () => {

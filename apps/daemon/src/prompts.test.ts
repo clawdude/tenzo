@@ -49,6 +49,10 @@ describe("thread prompts", () => {
     ]) {
       expect(prompts.landing).toMatch(rule);
     }
+    // And no reading permission into a person's words (#31).
+    expect(prompts.landing).toContain(
+      "Never offer pushing or merging to the default branch as an option, and read \"however you can\" as within these rules: if I want it on the default branch without a PR, I'll do that myself.",
+    );
   });
 
   it("are read fresh from a directory, so an edit applies to the next session", () => {

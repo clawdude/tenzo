@@ -27,6 +27,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 - [x] #21 Review actions: Merge (agent opens PR, waits, fixes comments, merges when mergeable), Open PR (landing prompt + `wake_me`), Needs changes; `start_thread`
 - [ ] #22 Back of the card: why it's asking, the change, what happened so far
 - [x] #23 Snooze (swipe, 15 min, undo), all-clear screen with Meanwhile, quick vs. review lanes, error cards
+- [x] #31 Landing follow-ups from the PR #29 review: "however you can" stays within the landing rules, no false "stalled" when a queued prompt runs next, `landed`'s fetch times out and never prompts, the stuck card says a landed thread still archives
 - [ ] Threads list and New thread in the pile language
 
 ## M3 · Config and automations

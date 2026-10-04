@@ -1,4 +1,4 @@
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { existsSync, realpathSync, statSync } from "node:fs";
 import { isAbsolute, resolve } from "node:path";
 import { TenzoError } from "./errors.ts";
@@ -36,22 +36,86 @@ interface GitResult {
   stderr: string;
 }
 
+export interface RunGitOptions {
+  /** Kill git (and its helpers) if it hasn't finished by then, and reject with a GitTimeoutError. */
+  timeoutMs?: number;
+  /** Added to git's environment. */
+  env?: Record<string, string>;
+}
+
+/** Git, run with a timeout, didn't finish in time and was killed. */
+export class GitTimeoutError extends TenzoError {
+  override name = "GitTimeoutError";
+}
+
+/**
+ * For git that talks to a remote while nobody watches: a credential prompt fails at once instead
+ * of waiting for an answer no one will type (git's own prompt, and Git Credential Manager's).
+ */
+export const NO_PROMPT_ENV = { GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never" };
+
 /** Runs git in `cwd` and resolves with its exit code and output; rejects only if git can't run. */
-export function runGit(cwd: string, args: readonly string[]): Promise<GitResult> {
-  const env = { ...process.env };
+export function runGit(
+  cwd: string,
+  args: readonly string[],
+  options: RunGitOptions = {},
+): Promise<GitResult> {
+  const env = { ...process.env, ...options.env };
   for (const key of REDIRECTING_ENV) delete env[key];
+  const { timeoutMs } = options;
   return new Promise((resolvePromise, reject) => {
-    execFile("git", args, { cwd, env, maxBuffer: 16 * 1024 * 1024 }, (error, stdout, stderr) => {
-      if (error && typeof error.code !== "number") {
-        const missing = error.code === "ENOENT";
-        if (missing && !existsSync(cwd)) reject(new TenzoError(`${cwd} does not exist`));
-        else reject(missing ? new TenzoError("git is not installed or not on PATH") : error);
-        return;
+    // Under a timeout git runs detached: in a process group of its own, with no terminal to
+    // prompt on, so the timeout kills its helpers (git-remote-https, ssh) along with it. Without
+    // that a helper keeps git's output open, and git never seems to end.
+    const child = spawn("git", args, {
+      cwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: timeoutMs !== undefined,
+    });
+    let stdout = "";
+    let stderr = "";
+    let failure: Error | null = null;
+    const kill = (why: Error) => {
+      failure ??= why;
+      try {
+        if (timeoutMs === undefined || child.pid === undefined) child.kill("SIGKILL");
+        else process.kill(-child.pid, "SIGKILL");
+      } catch {
+        child.kill("SIGKILL"); // the group has gone already
       }
-      resolvePromise({ code: typeof error?.code === "number" ? error.code : 0, stdout, stderr });
+    };
+    const collect = (append: (chunk: string) => void) => (chunk: Buffer) => {
+      append(chunk.toString("utf8"));
+      if (stdout.length + stderr.length > MAX_OUTPUT) {
+        kill(new TenzoError(`git ${args[0] ?? ""} wrote more than ${MAX_OUTPUT} characters`));
+      }
+    };
+    child.stdout.on("data", collect((chunk) => (stdout += chunk)));
+    child.stderr.on("data", collect((chunk) => (stderr += chunk)));
+    const timer =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => {
+            const seconds = Math.round(timeoutMs / 1000);
+            kill(new GitTimeoutError(`git ${args[0] ?? ""} gave no answer in ${seconds}s`));
+          }, timeoutMs);
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      clearTimeout(timer);
+      const missing = error.code === "ENOENT";
+      if (missing && !existsSync(cwd)) reject(new TenzoError(`${cwd} does not exist`));
+      else reject(missing ? new TenzoError("git is not installed or not on PATH") : error);
+    });
+    child.on("close", (code, signal) => {
+      clearTimeout(timer);
+      if (failure) reject(failure);
+      else if (code === null) reject(new TenzoError(`git ${args[0] ?? ""} was killed (${signal})`));
+      else resolvePromise({ code, stdout, stderr });
     });
   });
 }
+
+const MAX_OUTPUT = 16 * 1024 * 1024;
 
 /** Runs git in `cwd` and returns trimmed stdout; throws `GitError` on a non-zero exit. */
 export async function git(cwd: string, args: readonly string[]): Promise<string> {
@@ -130,16 +194,36 @@ export async function addWorktree(
   await git(root, ["worktree", "add", "--no-track", "-b", branch, "--", path, base]);
 }
 
+/** How long `landedOn` waits for origin to answer. */
+export const FETCH_TIMEOUT_MS = 30_000;
+
 /**
  * Whether everything the worktree's HEAD changes is already in `origin/<branch>`, by git alone:
  * after fetching it, merging HEAD into it would change nothing (its merge with HEAD has the same
  * tree as it has). Unlike asking whether HEAD is an ancestor, this holds after a squash or
  * rebase merge too. A conflict (the branch has since changed the same lines) counts as not
- * landed. Throws a TenzoError when there is no origin to fetch from.
+ * landed. Throws a TenzoError when there is no origin to fetch from, or it gives no answer in
+ * `fetchTimeoutMs` (a stuck remote, or one that wants a password: git never prompts here).
  */
-export async function landedOn(path: string, branch: string): Promise<boolean> {
+export async function landedOn(
+  path: string,
+  branch: string,
+  fetchTimeoutMs: number = FETCH_TIMEOUT_MS,
+): Promise<boolean> {
   const remote = `refs/remotes/origin/${branch}`;
-  const fetched = await runGit(path, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`]);
+  let fetched: GitResult;
+  try {
+    fetched = await runGit(path, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], {
+      timeoutMs: fetchTimeoutMs,
+      env: NO_PROMPT_ENV,
+    });
+  } catch (error) {
+    if (!(error instanceof GitTimeoutError)) throw error;
+    const seconds = Math.round(fetchTimeoutMs / 1000);
+    throw new TenzoError(
+      `Couldn't fetch ${branch} from origin: no answer in ${seconds}s. Is origin reachable, and can git reach it without a password prompt?`,
+    );
+  }
   if (fetched.code !== 0) {
     throw new TenzoError(`Couldn't fetch ${branch} from origin: ${fetched.stderr.trim() || "no output"}`);
   }
