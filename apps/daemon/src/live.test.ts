@@ -21,6 +21,8 @@ import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
 afterAll(removeTempDirs);
 
 const TS = "my-mac.tail0000.ts.net";
+/** The live listener behind a second Tailscale Serve route. */
+const LIVE_TS = `https://${TS}:8444`;
 let home: string;
 let daemon: RunningDaemon;
 let upstream: { port: number; server: Server; seen: IncomingMessage[]; close: () => Promise<void> };
@@ -100,6 +102,7 @@ beforeEach(async () => {
       webDir: join(home, "web"),
       allowedHosts: [TS],
       devOrigins: [],
+      liveOrigins: [LIVE_TS],
     },
     { adapters: { claude: adapter } },
   );
@@ -112,17 +115,27 @@ afterEach(async () => {
   await upstream.close();
 });
 
-const url = (path: string) => `http://127.0.0.1:${daemon.port}${path}`;
+/** On the live listener, where threads' apps are. */
+const url = (path: string) => `http://127.0.0.1:${daemon.livePort}${path}`;
+/** On the daemon's own listener: the Pass, the API, /ws. */
+const main = (path: string) => `http://127.0.0.1:${daemon.port}${path}`;
 
-/** A GET with any headers, Host included (fetch won't set Host). Resolves with the status. */
-function get(path: string, headers: Record<string, string>): Promise<number> {
+/**
+ * A request with any headers, Host included (fetch won't set Host), to the live listener or
+ * the daemon's (`port`). Resolves with the status.
+ */
+function get(
+  path: string,
+  headers: Record<string, string>,
+  { port = daemon.livePort, method = "GET", body = "" } = {},
+): Promise<number> {
   return new Promise((resolve, reject) => {
-    const req = request({ host: "127.0.0.1", port: daemon.port, path, headers }, (res) => {
+    const req = request({ host: "127.0.0.1", port, path, headers, method }, (res) => {
       res.resume();
       resolve(res.statusCode ?? 0);
     });
     req.on("error", reject);
-    req.end();
+    req.end(body);
   });
 }
 
@@ -130,7 +143,7 @@ describe("live: HTTP", () => {
   it("forwards the thread's base to its port, path, method and body unchanged", async () => {
     const res = await fetch(url(`${liveBase(thread.id)}src/main.js?v=1`), {
       method: "POST",
-      headers: { "content-type": "text/plain", origin: `http://127.0.0.1:${daemon.port}` },
+      headers: { "content-type": "text/plain", origin: `http://127.0.0.1:${daemon.livePort}` },
       body: "hi",
     });
     expect(res.status).toBe(200);
@@ -149,7 +162,7 @@ describe("live: HTTP", () => {
     expect(res.headers.getSetCookie()).toEqual(["a=1; Path=/", "b=2; Path=/"]);
   });
 
-  it("keeps redirects on the daemon's origin", async () => {
+  it("keeps redirects on the live origin", async () => {
     const res = await fetch(url(`${liveBase(thread.id)}away`), { redirect: "manual" });
     expect(res.status).toBe(302);
     expect(res.headers.get("location")).toBe(`${liveBase(thread.id)}here`);
@@ -162,7 +175,7 @@ describe("live: HTTP", () => {
   });
 
   it("works through Tailscale Serve's host and origin", async () => {
-    expect(await get(`${liveBase(thread.id)}x`, { host: `${TS}:8443`, origin: `https://${TS}:8443` })).toBe(200);
+    expect(await get(`${liveBase(thread.id)}x`, { host: `${TS}:8444`, origin: LIVE_TS })).toBe(200);
   });
 
   it("refuses a foreign host or origin, like every other route", async () => {
@@ -170,7 +183,10 @@ describe("live: HTTP", () => {
     expect(await get(path, { host: "evil.example" })).toBe(403);
     expect(await get(path, { origin: "https://evil.example" })).toBe(403);
     expect(await get(path, { origin: "http://localhost:3000" })).toBe(403);
-    expect(await get(path, { host: `${TS}:8443`, origin: `http://${TS}:8443` })).toBe(403);
+    expect(await get(path, { host: `${TS}:8444`, origin: `http://${TS}:8444` })).toBe(403);
+    // Not from Tenzo's own pages either: the live origin is the only one it takes.
+    expect(await get(path, { origin: `http://127.0.0.1:${daemon.port}` })).toBe(403);
+    expect(await get(path, { host: `${TS}:8444`, origin: `https://${TS}:8443` })).toBe(403);
     expect(upstream.seen).toHaveLength(0);
   });
 
@@ -214,9 +230,9 @@ describe("live: HTTP", () => {
 
 describe("live: WebSocket", () => {
   /** Opens a socket under the daemon and resolves with its first message, or the refusal. */
-  function open(path: string, headers: Record<string, string> = {}) {
+  function open(path: string, headers: Record<string, string> = {}, port = daemon.livePort) {
     return new Promise<{ status: number; first?: string; ws?: WebSocket }>((resolve, reject) => {
-      const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}${path}`, { headers });
+      const ws = new WebSocket(`ws://127.0.0.1:${port}${path}`, { headers });
       ws.once("message", (data) => resolve({ status: 101, first: String(data), ws }));
       ws.on("unexpected-response", (_req, res) => resolve({ status: res.statusCode ?? 0 }));
       ws.on("error", reject);
@@ -225,7 +241,7 @@ describe("live: WebSocket", () => {
 
   it("pipes an upgrade under the base to the dev server, both ways (Vite's HMR)", async () => {
     const { status, first, ws } = await open(`${liveBase(thread.id)}?token=abc`, {
-      origin: `http://127.0.0.1:${daemon.port}`,
+      origin: `http://127.0.0.1:${daemon.livePort}`,
     });
     expect(status).toBe(101);
     expect(first).toBe(
@@ -241,22 +257,112 @@ describe("live: WebSocket", () => {
     const path = liveBase(thread.id);
     expect((await open(path, { origin: "https://evil.example" })).status).toBe(403);
     expect((await open(path, { host: "evil.example" })).status).toBe(403);
+    expect((await open(path, { origin: `http://127.0.0.1:${daemon.port}` })).status).toBe(403);
     expect((await open(liveBase(other.id))).status).toBe(404);
     expect((await open("/live/thr_nopenopenopenopenope/")).status).toBe(404);
     expect(upstream.seen).toHaveLength(0);
   });
 
-  it("leaves /ws to the daemon, refusals included", async () => {
-    const hello = await open("/ws");
-    expect(hello.status).toBe(101);
-    expect(JSON.parse(hello.first ?? "{}").type).toBe("hello");
-    hello.ws?.close();
-    expect((await open("/ws", { origin: "https://evil.example" })).status).toBe(403);
-  });
 
   it("answers 502 when the dev server has stopped", async () => {
     await upstream.close();
     expect((await open(liveBase(thread.id))).status).toBe(502);
+  });
+});
+
+
+describe("live: an origin of its own", () => {
+  /** What a browser sends for a live page's fetch or socket: its own origin, the live one. */
+  const fromLive = () => ({ origin: `http://127.0.0.1:${daemon.livePort}` });
+
+  it("is on another port, published in the snapshot for Open live", () => {
+    expect(daemon.livePort).not.toBe(daemon.port);
+    expect(daemon.engine.snapshot().live).toEqual({ port: daemon.livePort, origins: [LIVE_TS] });
+  });
+
+  it("a live page can't call Tenzo's API: the daemon refuses its origin", async () => {
+    const snapshot = JSON.stringify({ type: "snapshot" });
+    const json = { "content-type": "application/json" };
+    // The Pass's own page may; a page from the live origin may not, nor over the tailnet.
+    expect(
+      await get("/api/commands", { ...json, origin: `http://127.0.0.1:${daemon.port}` }, {
+        port: daemon.port,
+        method: "POST",
+        body: snapshot,
+      }),
+    ).toBe(200);
+    expect(
+      await get("/api/commands", { ...json, ...fromLive() }, {
+        port: daemon.port,
+        method: "POST",
+        body: snapshot,
+      }),
+    ).toBe(403);
+    expect(
+      await get("/api/commands", { ...json, host: `${TS}:8443`, origin: LIVE_TS }, {
+        port: daemon.port,
+        method: "POST",
+        body: snapshot,
+      }),
+    ).toBe(403);
+    expect(await get("/api/attachments/x/y.png", fromLive(), { port: daemon.port })).toBe(403);
+  });
+
+  it("a live page can't open Tenzo's socket", async () => {
+    const status = (headers: Record<string, string>) =>
+      new Promise<number>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}/ws`, { headers });
+        ws.on("open", () => {
+          ws.close();
+          resolve(101);
+        });
+        ws.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+        ws.on("error", reject);
+      });
+    expect(await status(fromLive())).toBe(403);
+    expect(await status({ host: `${TS}:8443`, origin: LIVE_TS })).toBe(403);
+    expect(await status({ origin: `http://127.0.0.1:${daemon.port}` })).toBe(101);
+  });
+
+  it("the live listener serves nothing of Tenzo's: no API, no socket, no Pass", async () => {
+    for (const path of ["/", "/health", "/threads", "/api/commands", "/_app/x.js"]) {
+      expect(await get(path, {}), path).toBe(404);
+    }
+    expect(
+      await get("/api/commands", { "content-type": "application/json", ...fromLive() }, {
+        method: "POST",
+        body: JSON.stringify({ type: "snapshot" }),
+      }),
+    ).toBe(404);
+    const ws = await new Promise<number>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${daemon.livePort}/ws`, { headers: fromLive() });
+      socket.on("open", () => resolve(101));
+      socket.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+      socket.on("error", reject);
+    });
+    expect(ws).toBe(404);
+  });
+
+  it("the daemon's own listener doesn't serve live apps, over HTTP or WebSocket", async () => {
+    expect(await get(`${liveBase(thread.id)}x`, {}, { port: daemon.port })).toBe(404);
+    expect(await get(`/live/${thread.id}`, {}, { port: daemon.port })).toBe(404);
+    const ws = await new Promise<number>((resolve, reject) => {
+      const socket = new WebSocket(`ws://127.0.0.1:${daemon.port}${liveBase(thread.id)}`);
+      socket.on("open", () => resolve(101));
+      socket.on("unexpected-response", (_req, res) => resolve(res.statusCode ?? 0));
+      socket.on("error", reject);
+    });
+    expect(ws).toBe(404);
+    expect(upstream.seen).toHaveLength(0);
+  });
+
+  it("marks both listeners as Tenzo, so expose can refuse them", async () => {
+    for (const port of [daemon.port, daemon.livePort]) {
+      const res = await fetch(`http://127.0.0.1:${port}/live/${thread.id}/x`, {
+        headers: { "x-tenzo-live": "probe" },
+      });
+      expect(res.headers.get("x-tenzo-daemon"), String(port)).toBe("1");
+    }
   });
 });
 
@@ -266,7 +372,7 @@ describe("attachments", () => {
     mkdirSync(dir, { recursive: true });
     const file = "att_aaaaaaaaaaaaaaaaaaaa.png";
     writeFileSync(join(dir, file), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
-    const res = await fetch(url(attachmentUrl(thread.id, { file })));
+    const res = await fetch(main(attachmentUrl(thread.id, { file })));
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
@@ -283,9 +389,9 @@ describe("attachments", () => {
       `/api/attachments/..%2F..%2F/att_aaaaaaaaaaaaaaaaaaaa.png`,
       "/api/attachments/thr_x/tenzo.db",
     ]) {
-      expect((await fetch(url(path))).status, path).toBe(404);
+      expect((await fetch(main(path))).status, path).toBe(404);
     }
-    const cross = await fetch(url(attachmentUrl(thread.id, { file: "att_aaaaaaaaaaaaaaaaaaaa.png" })), {
+    const cross = await fetch(main(attachmentUrl(thread.id, { file: "att_aaaaaaaaaaaaaaaaaaaa.png" })), {
       headers: { origin: "https://evil.example" },
     });
     expect(cross.status).toBe(403);

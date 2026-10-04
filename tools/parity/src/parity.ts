@@ -263,7 +263,13 @@ async function check(root: string, model: string): Promise<boolean> {
   // Only Tenzo's state and port are redirected; Claude runs with your own config, as in a real
   // thread. The daemon gets a free port, never the default one a real daemon may be using.
   const port = await freePort();
-  const env = { ...process.env, TENZO_HOME: join(root, "home"), TENZO_PORT: String(port) };
+  const env = {
+    ...process.env,
+    TENZO_HOME: join(root, "home"),
+    TENZO_PORT: String(port),
+    // Its own free port too: the next one up may be taken.
+    TENZO_LIVE_PORT: String(await freePort()),
+  };
   const word = randomBytes(4).toString("hex");
 
   console.error(`Parity check in ${root} (model ${model}, daemon on port ${port})`);

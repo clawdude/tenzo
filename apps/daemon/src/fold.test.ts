@@ -518,6 +518,11 @@ describe("foldEvent: finished work", () => {
     });
   });
 
+  it("a report before Build it doesn't skip the proposal: the thread keeps discussing", () => {
+    const { state } = fold(started(), turnStarted(), reported());
+    expect(state.runtime.phase).toBe("discussing");
+  });
+
   it("without a headline, the ask says it's ready for review (the card shows the thread's title)", () => {
     const { items } = fold(started(), turnStarted(), reported());
     expect(items[0]?.ask).toBe("Ready for review");

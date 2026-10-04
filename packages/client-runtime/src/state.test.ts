@@ -4,9 +4,15 @@ import { item, project, snapshotFrame, thread } from "./testing.ts";
 
 describe("applyFrame", () => {
   it("replaces everything with a snapshot", () => {
-    const before = { threads: [thread("a")], items: [item("x", "a")], projects: [project("app")] };
-    const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")]));
-    expect(after).toEqual({ threads: [thread("b")], items: [], projects: [project("blog")] });
+    const before = {
+      threads: [thread("a")],
+      items: [item("x", "a")],
+      projects: [project("app")],
+      live: null,
+    };
+    const live = { port: 4781, origins: ["https://mac.ts.net:8444"] };
+    const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")], live));
+    expect(after).toEqual({ threads: [thread("b")], items: [], projects: [project("blog")], live });
   });
 
   it("adds a new thread at the end and updates a known one in place", () => {

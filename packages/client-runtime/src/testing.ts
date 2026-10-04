@@ -168,6 +168,10 @@ export function snapshotFrame(
   threads: ThreadView[],
   items: QueueItem[],
   projects: ProjectView[] = [],
+  live: { port: number; origins: string[] } | null = null,
 ) {
-  return { type: "snapshot", snapshot: { environmentId, threads, items, projects } } as const;
+  return {
+    type: "snapshot",
+    snapshot: { environmentId, threads, items, projects, live },
+  } as const;
 }

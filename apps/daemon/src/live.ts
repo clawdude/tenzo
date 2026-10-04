@@ -1,30 +1,50 @@
+import { execFile } from "node:child_process";
+import { realpath } from "node:fs/promises";
 import type { IncomingMessage } from "node:http";
 import { connect } from "node:net";
+import { isAbsolute, relative, sep } from "node:path";
 import type { Duplex } from "node:stream";
 import { liveBase, type Preview, ThreadId } from "@tenzo/contracts";
-import type { Context } from "hono";
-import { type AccessPolicy, hostAllowed, originAllowed } from "./access.ts";
+import { type Context, Hono, type MiddlewareHandler } from "hono";
+import { type AccessPolicy, accessGuard, hostAllowed, originAllowed } from "./access.ts";
 import { TenzoError } from "./errors.ts";
 
 /**
- * The live URL of a thread's dev server (Tenzo's `expose`), reachable from the phone through the
- * daemon's own origin: `/live/<thread>/…` is forwarded to `localhost:<port>/live/<thread>/…`,
- * the port the thread's agent exposed and no other, HTTP and WebSocket (Vite's HMR) alike, behind
- * the same access guard as everything else. One origin means one Tailscale Serve route: no new
- * port to publish, no tailnet config.
+ * The live URL of a thread's dev server (Tenzo's `expose`), reachable from the phone:
+ * `/live/<thread>/…` is forwarded to `localhost:<port>/live/<thread>/…`, the port the thread's
+ * agent exposed and no other, HTTP and WebSocket (Vite's HMR) alike.
+ *
+ * It is served by a listener of its own (`TENZO_LIVE_PORT`, default the daemon's port + 1), never
+ * by the daemon's: a page an agent serves runs whatever its dependencies, embeds and bugs put in
+ * it, and on Tenzo's origin that code could call the API (answer permission cards, start
+ * threads). On the live origin it can't: the daemon refuses its Origin, and the live listener
+ * serves nothing but `/live/`. Same Host allowlist; an Origin is accepted only if it is the live
+ * listener's own. Different threads' apps share the live origin with each other, never Tenzo's.
+ * Over the tailnet that means a second Tailscale Serve route (`TENZO_LIVE_ORIGIN`). Cookies
+ * don't keep ports apart, but Tenzo uses none.
  *
  * The path is forwarded unchanged, so the dev server must serve under the thread's base
  * (`vite --base /live/<thread>/`, Next's `basePath`, …). An app that only works at `/` loads its
  * page but not its absolute `/assets/…`; `expose` warns the agent when the page it fetched
  * points outside the base.
  *
- * The app runs on Tenzo's origin. That is fine while the daemon has no credentials of its own
- * (loopback, the tailnet): the agent that wrote the app can already reach the daemon. Remote
- * mode with device tokens (M4) must move it to an origin of its own.
+ * `expose` takes only a port whose listening process runs in the thread's worktree (`lsof`), and
+ * never Tenzo itself.
  */
 
 /** Set on every forwarded request; seen coming back in, it is a loop (the daemon's own port). */
 export const LIVE_HEADER = "x-tenzo-live";
+
+/** On every response of the daemon's listeners: a port that answers with it is Tenzo itself. */
+export const DAEMON_HEADER = "x-tenzo-daemon";
+
+/** Marks every response as Tenzo's (`DAEMON_HEADER`), refusals included. */
+export function markDaemon(): MiddlewareHandler {
+  return async (c, next) => {
+    await next();
+    c.res.headers.set(DAEMON_HEADER, "1");
+  };
+}
 
 /** The lowest port `expose` takes: dev servers don't run on privileged ports. */
 export const MIN_PORT = 1024;
@@ -80,6 +100,12 @@ export async function probeLive(threadId: string, preview: Preview): Promise<str
       `Nothing answers on localhost:${preview.port}. Start the dev server first, in the background so it keeps running, serving under ${base} (Vite: \`--base ${base}\`), then expose it again.`,
     );
   }
+  if (response.headers.has(DAEMON_HEADER)) {
+    await response.body?.cancel();
+    throw new TenzoError(
+      `localhost:${preview.port} is Tenzo itself, not a dev server. Expose the port your dev server listens on.`,
+    );
+  }
   if (response.status >= 400) {
     await response.body?.cancel();
     return `localhost:${preview.port} answered ${base}${preview.path} with ${response.status}. Serve the app under ${base} (Vite: \`--base ${base}\`) so the person's link works.`;
@@ -123,6 +149,54 @@ const HOP_BY_HOP = new Set([
  */
 const BLOCKED_RESPONSE = new Set(["service-worker-allowed", "clear-site-data"]);
 
+/** The working directories of the processes listening on `port`; null when that can't be asked. */
+export type ListenerDirs = (port: number) => Promise<string[] | null>;
+
+/** `ListenerDirs` from `lsof` (macOS, most Linux); null where it isn't installed. */
+export const lsofListenerDirs: ListenerDirs = async (port) => {
+  const pids = await lsof(["-nP", `-iTCP:${port}`, "-sTCP:LISTEN", "-Fp"]);
+  if (pids === null) return null;
+  const list = [...pids.matchAll(/^p(\d+)$/gm)].map((m) => m[1] ?? "");
+  if (list.length === 0) return [];
+  const cwds = await lsof(["-a", "-p", list.join(","), "-d", "cwd", "-Fn"]);
+  return [...(cwds ?? "").matchAll(/^n(.+)$/gm)].map((m) => m[1] ?? "");
+};
+
+/** Runs lsof; its output, "" when it found nothing (exit 1), null when there's no lsof. */
+function lsof(args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile("lsof", args, { timeout: 3000 }, (error, stdout) => {
+      if (error && (error as NodeJS.ErrnoException).code === "ENOENT") resolve(null);
+      else resolve(stdout ?? "");
+    });
+  });
+}
+
+/**
+ * `expose` takes a port only if a process running in the thread's worktree listens on it: the
+ * dev server the agent started there, not another local service (whose own Host and Origin
+ * checks the proxy would otherwise get around) nor another thread's. Without lsof, unchecked.
+ */
+export async function checkListener(
+  port: number,
+  worktree: string,
+  listenerDirs: ListenerDirs,
+): Promise<void> {
+  const dirs = await listenerDirs(port);
+  if (dirs === null) return;
+  const root = await realpath(worktree).catch(() => worktree);
+  for (const dir of dirs) {
+    const real = await realpath(dir).catch(() => dir);
+    const rel = relative(root, real);
+    if (rel === "" || (!isAbsolute(rel) && rel.split(sep)[0] !== "..")) return;
+  }
+  throw new TenzoError(
+    dirs.length === 0
+      ? `Can't tell which process listens on localhost:${port}. Expose a dev server you started in this worktree.`
+      : `localhost:${port} is served by a process running in ${dirs.join(", ")}, outside this worktree. Expose a dev server you started here.`,
+  );
+}
+
 /** `/live/<thread>/…` over HTTP: a Hono handler, behind the access guard. */
 export function liveHandler(portOf: LivePort) {
   return async (c: Context): Promise<Response> => {
@@ -160,6 +234,10 @@ export function liveHandler(portOf: LivePort) {
         502,
       );
     }
+    if (upstream.headers.has(DAEMON_HEADER)) {
+      await upstream.body?.cancel();
+      return c.text("A live URL can't point at Tenzo itself.\n", 508);
+    }
     const out = new Headers();
     const encoded = upstream.headers.has("content-encoding");
     upstream.headers.forEach((value, key) => {
@@ -176,6 +254,25 @@ export function liveHandler(portOf: LivePort) {
       headers: out,
     });
   };
+}
+
+/**
+ * The live listener's HTTP side: `/live/<thread>/…` and nothing else. Every request is checked
+ * like the daemon's (Host allowlist), and a request with an Origin must come from the live
+ * origin itself, never from Tenzo's pages or anyone else's.
+ */
+export function createLiveApp(options: { policy: AccessPolicy; portOf: LivePort }): Hono {
+  const app = new Hono();
+  app.use("*", markDaemon());
+  app.use("*", accessGuard({ allowedHosts: options.policy.allowedHosts }, () => true));
+  app.all("/live/:thread", (c) => {
+    const thread = c.req.param("thread");
+    if (!ThreadId.safeParse(thread).success) return c.text("This thread has no live app.\n", 404);
+    return c.redirect(liveBase(thread), 308);
+  });
+  app.all("/live/:thread/*", liveHandler(options.portOf));
+  app.all("*", (c) => c.text("Only threads' live apps are served here.\n", 404));
+  return app;
 }
 
 /** A redirect to the dev server's own address, made relative so it stays on Tenzo's origin. */
@@ -209,7 +306,9 @@ export function liveUpgrade(
   };
   const host = request.headers.host;
   const origin = request.headers.origin;
-  if (!hostAllowed(host, options.policy) || !originAllowed(origin, host, options.policy)) {
+  // Only the live origin itself: no dev origins, never Tenzo's own pages.
+  const policy = { allowedHosts: options.policy.allowedHosts };
+  if (!hostAllowed(host, policy) || !originAllowed(origin, host, policy)) {
     return refuse(403, "Forbidden");
   }
   if (request.headers[LIVE_HEADER]) return refuse(508, "Loop Detected");

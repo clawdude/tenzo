@@ -11,7 +11,7 @@ import type { DaemonConfig } from "./config.ts";
 import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
-import { isLivePath, liveUpgrade } from "./live.ts";
+import { createLiveApp, liveUpgrade } from "./live.ts";
 import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
 import { createClaudeTitler, type Titler } from "./titles.ts";
@@ -19,6 +19,8 @@ import { createClaudeTitler, type Titler } from "./titles.ts";
 export interface RunningDaemon {
   url: string;
   port: number;
+  /** The live listener's port: threads' live apps (live.ts). */
+  livePort: number;
   environmentId: EnvironmentId;
   engine: Engine;
   /** Stops every agent session (open items stay for next time), drops every WebSocket, stops listening. */
@@ -37,20 +39,32 @@ export interface DaemonDeps {
   titler?: Titler;
 }
 
-/**
- * Sends WebSocket upgrades under `/live/` to the thread's dev server (live.ts); every other
- * upgrade goes to Hono's `/ws` as before. One listener in front of Hono's: with two, Hono would
- * stop refusing the upgrades it doesn't take.
- */
-function routeLiveUpgrades(
-  server: ReturnType<typeof serve>,
-  options: Parameters<typeof liveUpgrade>[3],
-): void {
-  const hono = server.listeners("upgrade") as ((...args: unknown[]) => void)[];
-  server.removeAllListeners("upgrade");
-  server.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-    if (isLivePath(request.url)) return liveUpgrade(request, socket, head, options);
-    for (const listener of hono) listener.call(server, request, socket, head);
+/** Starts listening, with a plain message when the port is taken. */
+function listen(
+  options: Parameters<typeof serve>[0],
+  taken: string,
+  onError: () => void = () => {},
+): Promise<ReturnType<typeof serve>> {
+  return new Promise((resolve, reject) => {
+    const onListenError = (error: NodeJS.ErrnoException) => {
+      onError();
+      reject(error.code === "EADDRINUSE" ? new TenzoError(taken) : error);
+    };
+    const s = serve(options, () => {
+      s.off("error", onListenError);
+      // After listening, errors are per-connection trouble: log them, keep serving.
+      s.on("error", (error) => console.error("tenzo: server error:", error));
+      resolve(s);
+    });
+    s.once("error", onListenError);
+  });
+}
+
+/** Stops a server and drops its open connections. */
+function stopServer(server: ReturnType<typeof serve>): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+    if ("closeAllConnections" in server) server.closeAllConnections();
   });
 }
 
@@ -90,38 +104,39 @@ export async function startDaemon(
   const websocket = { server: wss as unknown as WebSocketServerLike };
 
   let server: ReturnType<typeof serve>;
+  let liveServer: ReturnType<typeof serve>;
   try {
-    server = await new Promise<ReturnType<typeof serve>>((resolve, reject) => {
-      const onListenError = (error: NodeJS.ErrnoException) => {
-        wss.close();
-        reject(
-          error.code === "EADDRINUSE"
-            ? new TenzoError(
-                `${config.host}:${config.port} is already in use; is tenzo already running? Set TENZO_PORT to use another port.`,
-              )
-            : error,
-        );
-      };
-      const s = serve(
-        { fetch: app.fetch, hostname: config.host, port: config.port, websocket },
-        () => {
-          s.off("error", onListenError);
-          // After listening, errors are per-connection trouble: log them, keep serving.
-          s.on("error", (error) => console.error("tenzo: server error:", error));
-          resolve(s);
-        },
+    server = await listen(
+      { fetch: app.fetch, hostname: config.host, port: config.port, websocket },
+      `${config.host}:${config.port} is already in use; is tenzo already running? Set TENZO_PORT to use another port.`,
+      () => wss.close(),
+    );
+    // Threads' live apps, on an origin of their own (live.ts).
+    const livePort = config.livePort ?? (config.port === 0 ? 0 : config.port + 1);
+    const liveOrigins = config.liveOrigins ?? [];
+    const policy = {
+      allowedHosts: [...config.allowedHosts, ...liveOrigins.map((o) => new URL(o).hostname)],
+    };
+    const portOf = (threadId: string) => engine.livePort(threadId);
+    try {
+      liveServer = await listen(
+        { fetch: createLiveApp({ policy, portOf }).fetch, hostname: config.host, port: livePort },
+        `${config.host}:${livePort} (threads' live apps) is already in use. Set TENZO_LIVE_PORT to use another port.`,
       );
-      s.once("error", onListenError);
-    });
+    } catch (error) {
+      wss.close();
+      await stopServer(server);
+      throw error;
+    }
+    liveServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) =>
+      liveUpgrade(request, socket, head, { policy, portOf }),
+    );
+    engine.setLive({ port: (liveServer.address() as AddressInfo).port, origins: liveOrigins });
   } catch (error) {
     store.close();
     unlock();
     throw error;
   }
-  routeLiveUpgrades(server, {
-    policy: { allowedHosts: config.allowedHosts, devOrigins: config.devOrigins },
-    portOf: (threadId) => engine.livePort(threadId),
-  });
   engine.start();
   const stopHeartbeat = heartbeat(wss, deps.heartbeatMs);
   const { port } = server.address() as AddressInfo;
@@ -130,17 +145,15 @@ export async function startDaemon(
   return {
     url: `http://${config.host}:${port}`,
     port,
+    livePort: (liveServer.address() as AddressInfo).port,
     environmentId,
     engine,
     close: () => {
       closing ??= (async () => {
         stopHeartbeat();
         await engine.close();
-        await new Promise<void>((resolve, reject) => {
-          for (const client of wss.clients) client.terminate();
-          server.close((error) => (error ? reject(error) : resolve()));
-          if ("closeAllConnections" in server) server.closeAllConnections();
-        });
+        for (const client of wss.clients) client.terminate();
+        await Promise.all([stopServer(server), stopServer(liveServer)]);
         store.close();
         unlock();
       })();

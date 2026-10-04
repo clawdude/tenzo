@@ -25,9 +25,8 @@ export default defineConfig({
 		proxy: {
 			'/health': `http://${daemon}`,
 			'/ws': { target: `ws://${daemon}`, ws: true },
-			// Screenshots, and threads' live dev servers (HMR sockets included).
-			'/api/attachments': `http://${daemon}`,
-			'/live': { target: `http://${daemon}`, ws: true }
+			// Screenshots. Threads' live apps are on the daemon's live port, linked directly.
+			'/api/attachments': `http://${daemon}`
 		}
 	},
 	test: {

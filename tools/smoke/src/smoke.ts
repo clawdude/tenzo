@@ -224,7 +224,13 @@ async function main(): Promise<number> {
   }
   const root = mkdtempSync(join(tmpdir(), "tenzo-smoke-"));
   const port = await freePort();
-  const env = { ...process.env, TENZO_HOME: join(root, "home"), TENZO_PORT: String(port) };
+  const env = {
+    ...process.env,
+    TENZO_HOME: join(root, "home"),
+    TENZO_PORT: String(port),
+    // Its own free port too: the next one up may be taken.
+    TENZO_LIVE_PORT: String(await freePort()),
+  };
   let daemon: { stop: () => Promise<void> } | undefined;
   let browser: Browser | undefined;
   try {

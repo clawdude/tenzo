@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { LiveInfo } from "./finished.ts";
 import { EnvironmentId } from "./ids.ts";
 import { ItemAnswer, ProjectView, QueueItem, StoredEvent, ThreadView } from "./queue.ts";
 
@@ -66,6 +67,8 @@ export const Snapshot = z.object({
   items: z.array(QueueItem),
   /** Registered projects, by name. Projects added later come with `project.list`. */
   projects: z.array(ProjectView).default([]),
+  /** Where threads' live apps are served (Open live); null when this daemon serves none. */
+  live: LiveInfo.nullable().default(null),
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 

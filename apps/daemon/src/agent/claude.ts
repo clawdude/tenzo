@@ -20,7 +20,14 @@ import { liveBase } from "@tenzo/contracts";
 import { MAX_ATTACHMENTS, takeAttachment } from "../attachments.ts";
 import { TenzoError } from "../errors.ts";
 import { randomId } from "../ids.ts";
-import { checkPort, livePath, probeLive } from "../live.ts";
+import {
+  checkListener,
+  checkPort,
+  type ListenerDirs,
+  livePath,
+  lsofListenerDirs,
+  probeLive,
+} from "../live.ts";
 import { promptFor, proposalReply } from "../prompts.ts";
 import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
 import {
@@ -72,6 +79,11 @@ export interface ClaudeAdapterOptions {
   query?: typeof sdkQuery;
   /** Path to `claude`. Default: the first `claude` on PATH, looked up when a session starts. */
   claudePath?: string;
+  /**
+   * The working directories of the processes listening on a port, for `expose` (live.ts).
+   * Default: asked of `lsof`. Tests pass a stand-in.
+   */
+  listenerDirs?: ListenerDirs;
 }
 
 /** Every filesystem setting source, as the `claude` CLI itself loads them. */
@@ -84,7 +96,8 @@ export function createClaudeAdapter(options: ClaudeAdapterOptions = {}): AgentAd
   const query = options.query ?? sdkQuery;
   return {
     agent: "claude",
-    start: (input) => startSession(query, options.claudePath ?? findClaude(), input),
+    start: (input) =>
+      startSession(query, options.claudePath ?? findClaude(), input, options.listenerDirs ?? lsofListenerDirs),
   };
 }
 
@@ -120,6 +133,7 @@ function startSession(
   query: typeof sdkQuery,
   claudePath: string,
   input: StartSessionInput,
+  listenerDirs: ListenerDirs,
 ): AgentSession {
   const resumed = input.resumeSessionId !== undefined;
   const sessionId = input.resumeSessionId ?? randomUUID();
@@ -222,16 +236,25 @@ function startSession(
       return { text: proposalReply({ decision, note: note ?? "" }, input.prompts) };
     }
     // The approval carries the build prompt; the permission mode stays the user's own.
+    phase = "building";
     return { text: proposalReply({ decision }, input.prompts) };
   };
+  /** Where this session's thread is: discussing until a proposal is approved. */
+  let phase = input.phase;
 
   /**
    * `report`: finished work becomes a review item at once, with what was attached and exposed
    * before it. Nothing waits for you: a review can take hours, and your answer comes back to the
    * thread as a message (#21), as any follow-up does.
    */
-  let attached = 0;
+  let attached = input.pendingAttachments ?? 0;
   const report = async (raw: ReportInput): Promise<ToolReply> => {
+    if (phase === "discussing") {
+      return {
+        text: "Nothing to report yet: propose first, and report once the approved work is built.",
+        isError: true,
+      };
+    }
     emit({ type: "report.submitted", requestId: randomId("req"), ...inTurn(), payload: reportOf(raw) });
     attached = 0;
     return {
@@ -263,9 +286,10 @@ function startSession(
     toolCall(async () => {
       const preview = { port: checkPort(raw.port), path: livePath(raw.path) };
       const warning = await probeLive(input.threadId, preview);
+      await checkListener(preview.port, input.cwd, listenerDirs);
       emit({ type: "preview.exposed", ...inTurn(), payload: preview });
       const url = `${liveBase(input.threadId)}${preview.path}`;
-      return `Exposed: the card's "Open live" opens ${url} on Tenzo's address, forwarded to localhost:${preview.port}. Keep the server running.${warning ? `\nWarning: ${warning}` : ""}`;
+      return `Exposed: the card's "Open live" opens ${url} on Tenzo's live address, forwarded to localhost:${preview.port}. Keep the server running.${warning ? `\nWarning: ${warning}` : ""}`;
     });
 
   const host: TenzoToolHost = { propose, report, attach, expose };

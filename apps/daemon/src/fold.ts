@@ -218,7 +218,13 @@ export function foldEvent(
       const item = finishedItem(event, runtime, environmentId);
       return {
         state: {
-          runtime: { ...runtime, phase: "review", attachments: [] },
+          // Only built work goes to review: a report before Build it (the adapter refuses one)
+          // must not skip the proposal, so the thread keeps discussing.
+          runtime: {
+            ...runtime,
+            phase: runtime.phase === "discussing" ? "discussing" : "review",
+            attachments: [],
+          },
           open: [...state.open.filter((open) => open.kind !== "finished"), item],
           known: new Set([...state.known, event.requestId]),
         },

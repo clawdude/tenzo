@@ -1,5 +1,5 @@
 <script lang="ts">
-	import type { ItemAnswer, QueueItem } from '@tenzo/client-runtime';
+	import { type ItemAnswer, liveOriginFor, type QueueItem } from '@tenzo/client-runtime';
 	import { onMount } from 'svelte';
 	import AllClear from '#lib/AllClear.svelte';
 	import Card from '#lib/Card.svelte';
@@ -23,6 +23,8 @@
 	const current = $derived(pile[0]);
 	const edges = $derived(pileEdges(pile.length));
 	const titles = $derived(new Map(live.threads.map((t) => [t.id, t.title])));
+	/** Threads' live apps: Tenzo's live origin as this browser reaches it (live.ts). */
+	const liveOrigin = $derived(liveOriginFor(location, live.live));
 	const working = $derived(live.threads.filter((t) => t.working && t.openItems === 0));
 	/** Darker the further back, from the mock-up. */
 	const SHADES = ['#19191B', '#151517', '#121214', '#0F0F11'];
@@ -144,6 +146,7 @@
 						{now}
 						failure={failure?.itemId === item.id ? failure : null}
 						compact={fit?.compact ?? false}
+						{liveOrigin}
 						onanswer={(a) => answer(item, a)}
 					/>
 				</div>

@@ -54,6 +54,25 @@ describe("readConfig", () => {
     expect(config.webDir).toBe(join(process.cwd(), "web"));
   });
 
+  it("puts live apps on the next port unless TENZO_LIVE_PORT says otherwise", () => {
+    expect(readConfig({}).livePort).toBe(DEFAULT_PORT + 1);
+    expect(readConfig({ TENZO_PORT: "4809" }).livePort).toBe(4810);
+    expect(readConfig({ TENZO_LIVE_PORT: "5000" }).livePort).toBe(5000);
+    expect(() => readConfig({ TENZO_LIVE_PORT: "x" })).toThrow(/TENZO_LIVE_PORT/);
+    expect(() => readConfig({ TENZO_PORT: "5000", TENZO_LIVE_PORT: "5000" })).toThrow(
+      /other than TENZO_PORT/,
+    );
+    expect(() => readConfig({ TENZO_PORT: "65535" })).toThrow(/TENZO_LIVE_PORT/);
+  });
+
+  it("takes the live listener's public origins from TENZO_LIVE_ORIGIN", () => {
+    expect(readConfig({}).liveOrigins).toEqual([]);
+    expect(
+      readConfig({ TENZO_LIVE_ORIGIN: "https://mac.tail6259b4.ts.net:8444/" }).liveOrigins,
+    ).toEqual(["https://mac.tail6259b4.ts.net:8444"]);
+    expect(() => readConfig({ TENZO_LIVE_ORIGIN: "mac.ts.net:8444" })).toThrow(/TENZO_LIVE_ORIGIN/);
+  });
+
   it("takes a default model for threads from TENZO_DEFAULT_MODEL", () => {
     expect(readConfig({}).defaultModel).toBeUndefined();
     expect(readConfig({ TENZO_DEFAULT_MODEL: " " }).defaultModel).toBeUndefined();

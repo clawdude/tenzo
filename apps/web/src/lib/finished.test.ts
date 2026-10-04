@@ -5,7 +5,7 @@ import { finishedView } from './finished.ts';
 describe('finishedView', () => {
 	it('has the headline, the rendered note, a badge per check, the screenshots and the live link', () => {
 		const card = finished('f');
-		expect(finishedView(card, 'Add a counter')).toEqual({
+		expect(finishedView(card, 'Add a counter', 'https://mac.ts.net:8444')).toEqual({
 			headline: 'Counter works',
 			summaryHtml: '<p>Added a <strong>counter</strong> page.</p>',
 			howToTestHtml: '<p>Open it and tap <code>+</code>.</p>',
@@ -21,8 +21,12 @@ describe('finishedView', () => {
 					caption: 'The counter'
 				}
 			],
-			live: `/live/${card.threadId}/counter`
+			live: `https://mac.ts.net:8444/live/${card.threadId}/counter`
 		});
+	});
+
+	it('has no live link when the daemon publishes no live origin', () => {
+		expect(finishedView(finished('f'), 'T', null)?.live).toBeNull();
 	});
 
 	it("falls back to the thread's title, and leaves out what the agent didn't give", () => {
@@ -33,7 +37,7 @@ describe('finishedView', () => {
 			live: null,
 			checks: []
 		});
-		expect(finishedView(card, 'Add a counter')).toMatchObject({
+		expect(finishedView(card, 'Add a counter', 'http://127.0.0.1:4781')).toMatchObject({
 			headline: 'Add a counter',
 			howToTestHtml: '',
 			badges: [],
@@ -43,7 +47,7 @@ describe('finishedView', () => {
 	});
 
 	it('is nothing for other cards', () => {
-		expect(finishedView(item('q'), 'T')).toBeNull();
+		expect(finishedView(item('q'), 'T', null)).toBeNull();
 	});
 
 	it('renders what the agent wrote as text, never as markup', () => {
@@ -51,7 +55,7 @@ describe('finishedView', () => {
 			summary: '<img src=x onerror=alert(1)>',
 			howToTest: '[x](javascript:alert(1))'
 		});
-		const view = finishedView(card, 'T');
+		const view = finishedView(card, 'T', null);
 		expect(view?.summaryHtml).toBe('<p>&lt;img src=x onerror=alert(1)&gt;</p>');
 		expect(view?.howToTestHtml).toBe('<p>x</p>');
 	});
