@@ -1,3 +1,4 @@
+import { type AnimationConfig, flip } from 'svelte/animate';
 import { cubicOut } from 'svelte/easing';
 import type { TransitionConfig } from 'svelte/transition';
 
@@ -78,4 +79,31 @@ export function arrive(node: Element, from: -1 | 1 | null): TransitionConfig {
 		css: (t, u) =>
 			`transform: translateX(${from * AWAY * u}px) rotate(${from * TURN * u}deg); opacity: ${t};`
 	};
+}
+
+/**
+ * A Threads row moving to where it is now: into another group (working → needs you) or along its
+ * own. It slides there, so you see where it went.
+ */
+export function move(node: Element, rects: { from: DOMRect; to: DOMRect }): AnimationConfig {
+	return flip(node, rects, { duration: still() ? 0 : PACE, easing: ease });
+}
+
+/**
+ * A row or heading coming into the list: it fades up into place. Not while the list first draws
+ * (`live` false): only what arrives while you look moves.
+ */
+export function appear(_node: Element, live: boolean): TransitionConfig {
+	if (!live || still()) return { duration: 0 };
+	return {
+		duration: PACE,
+		easing: ease,
+		css: (t, u) => `opacity: ${t}; transform: translateY(${8 * u}px) scale(${1 - 0.02 * u});`
+	};
+}
+
+/** A row or heading leaving the list (archived, or its group emptied): it fades where it was. */
+export function vanish(_node: Element): TransitionConfig {
+	if (still()) return { duration: 0 };
+	return { duration: 200, easing: ease, css: (t) => `opacity: ${t};` };
 }
