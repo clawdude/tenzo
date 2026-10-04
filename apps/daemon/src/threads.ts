@@ -210,6 +210,20 @@ export function finishNaming(store: Store, threadId: ThreadId, title: string | n
     .run(title, new Date().toISOString(), threadId);
 }
 
+/** How many threads `parentId`'s agent has started, archived ones included. */
+export function countChildren(store: Store, parentId: ThreadId): number {
+  const row = store.db.prepare("SELECT COUNT(*) AS n FROM threads WHERE parent_id = ?").get(parentId);
+  return Number(row?.n ?? 0);
+}
+
+/** How many threads started by an agent are active. */
+export function activeAgentThreads(store: Store): number {
+  const row = store.db
+    .prepare("SELECT COUNT(*) AS n FROM threads WHERE origin = 'agent' AND status = 'active'")
+    .get();
+  return Number(row?.n ?? 0);
+}
+
 /** Active threads still under a stand-in title, with the prompt to name each from. */
 export function threadsToName(store: Store): { id: ThreadId; prompt: string }[] {
   return store.db

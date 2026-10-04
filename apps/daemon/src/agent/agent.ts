@@ -54,7 +54,16 @@ export interface SessionHost {
    * the finished card makes it landing), so the session asks instead of keeping its own.
    */
   phase(): ThreadPhase;
-  /** Starts a thread on this one's behalf (origin `agent`, this thread its parent). */
+  /**
+   * Checks, with git alone, that the thread's work has landed before `landed` is believed:
+   * nothing uncommitted, and everything its branch changes is in the default branch on origin.
+   * Throws a TenzoError saying what isn't so.
+   */
+  checkLanded(): Promise<void>;
+  /**
+   * Starts a thread on this one's behalf (origin `agent`, this thread its parent). Refused for
+   * a thread an agent started, and past a few per thread: no fan-out.
+   */
   startThread(input: {
     prompt: string;
     project?: string;

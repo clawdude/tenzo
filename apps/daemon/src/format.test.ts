@@ -74,6 +74,7 @@ describe("formatItem", () => {
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
 
   it("shows the context, the question and numbered options with the suggestion", () => {
@@ -147,22 +148,26 @@ describe("formatItem", () => {
         "    Checks: Tests pass, Lint fail",
         "    Screenshots: 1",
         "    Live: port 5173",
-        "    1. Merge (suggested)",
-        "    2. Open PR",
-        "    3. Done (nothing to land)",
+        "    merge: open the PR, see it through, merge it",
+        "    pr: open the PR, ask me before merging",
+        "    done: nothing to land",
         "    Or say what needs changing.",
       ].join("\n"),
     );
-    expect(answerFromWords(finished, ["1"])).toEqual({ kind: "finished", decision: "merge" });
     expect(answerFromWords(finished, ["merge"])).toEqual({ kind: "finished", decision: "merge" });
     expect(answerFromWords(finished, ["open", "pr"])).toEqual({ kind: "finished", decision: "pr" });
-    expect(answerFromWords(finished, ["done"])).toEqual({ kind: "finished", decision: "done" });
+    // Only the word merges: y, yes and 1 still mean Done, as before finished work could land.
+    for (const done of ["done", "y", "yes", "1", "ok"]) {
+      expect(answerFromWords(finished, [done])).toEqual({ kind: "finished", decision: "done" });
+    }
     expect(answerFromWords(finished, ["Bigger", "button"])).toEqual({
       kind: "finished",
       decision: "changes",
       note: "Bigger button",
     });
-    expect(() => answerFromWords(finished, [])).toThrow(/merge, pr or done/);
+    for (const unclear of [[], ["2"], ["n"]]) {
+      expect(() => answerFromWords(finished, unclear)).toThrow(/merge, pr or done/);
+    }
   });
 
   it("shows a PR ready to merge: its link and state, Merge or what first", () => {
@@ -180,11 +185,14 @@ describe("formatItem", () => {
         "  ✓ PR #12 can merge",
         "    https://github.com/o/r/pull/12",
         "    Checks green, one approval.",
-        "    1. Merge (suggested)",
+        "    merge: merge it now",
         "    Or say what to do first.",
       ].join("\n"),
     );
     expect(answerFromWords(ready, ["merge"])).toEqual({ kind: "ready", decision: "merge" });
+    for (const unclear of [["y"], ["1"], ["yes"]]) {
+      expect(() => answerFromWords(ready, unclear)).toThrow(/merge, or say what to do first/);
+    }
     expect(answerFromWords(ready, ["wait", "for", "Ana"])).toEqual({
       kind: "ready",
       decision: "changes",

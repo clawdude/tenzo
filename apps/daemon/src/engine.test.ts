@@ -1,9 +1,19 @@
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { QueueItem, StoredEvent, ThreadView, type UserInputQuestion } from "@tenzo/contracts";
+import {
+  Command,
+  CommandResults,
+  QueueItem,
+  StoredEvent,
+  ThreadView,
+  type UserInputQuestion,
+} from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeAdapter, type FakeSession } from "./agent/fake-agent.ts";
-import { Engine, type EngineChange, type EngineOptions } from "./engine.ts";
+import { carryOn, RESTART_PROMPT } from "./answers.ts";
+import { executeCommand } from "./commands.ts";
+import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS } from "./engine.ts";
+import { STALLED_PROMPT } from "./prompts.ts";
 import { addProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
 import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
@@ -43,7 +53,7 @@ afterEach(async () => {
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
 function daemon(
   adapter = new FakeAdapter(),
-  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts"> = {},
+  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs"> = {},
 ) {
   const store = openStore(home);
   stores.push(store);
@@ -168,7 +178,7 @@ describe("Engine: running threads", () => {
     expect(second.prompts).toEqual(["again"]);
   });
 
-  it("records a failure to start the agent and drops the prompts it couldn't send", async () => {
+  it("records a failure to start the agent as an error item that keeps the prompts it couldn't send", async () => {
     const adapter = new FakeAdapter();
     adapter.failWith = new Error("claude not found");
     const d = daemon(adapter);
@@ -176,7 +186,21 @@ describe("Engine: running threads", () => {
     const { events } = d.engine.events(thread.id);
     expect(events.map((e) => e.event.type)).toEqual(["runtime.error"]);
     expect(JSON.stringify(events[0]?.event)).toMatch(/Couldn't start claude: claude not found/);
-    expect(d.engine.view(thread.id)).toMatchObject({ queued: 0, activity: "idle" });
+    expect(d.engine.view(thread.id)).toMatchObject({ queued: 0, activity: "needs-you" });
+    const [item] = d.engine.snapshot().items;
+    expect(item).toMatchObject({
+      kind: "error",
+      lane: "quick",
+      ask: "Claude couldn't start",
+      error: { cause: "start", prompts: ["hi"] },
+    });
+
+    // Fixed (claude installed): Retry sends the prompt that never went.
+    adapter.failWith = undefined;
+    await d.engine.answer(item?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(adapter.last.prompts).toEqual(["hi"]);
+    expect(d.engine.snapshot().items).toEqual([]);
   });
 
   it("runs threads started without a model on the default model, if there is one", async () => {
@@ -782,8 +806,12 @@ describe("Engine: restarts", () => {
     first.engine.send(thread.id, "second");
     kill(first);
     const second = daemon();
-    expect(second.adapter.last.prompts).toEqual(["second"]);
+    // The cut-short turn picks up first, then what was waiting.
+    expect(second.adapter.last.prompts).toEqual([RESTART_PROMPT]);
     expect(second.adapter.last.input.resumeSessionId).toBe(first.adapter.last.sessionId);
+    second.adapter.last.complete();
+    await settle();
+    expect(second.adapter.last.prompts).toEqual([RESTART_PROMPT, "second"]);
   });
 });
 
@@ -996,7 +1024,7 @@ describe("Engine: review actions and landing", () => {
       item: { status: "resolved", resolution: { kind: "merge" } },
       thread: { phase: "landing", activity: "working" },
     });
-    expect(session.prompts.at(-1)).toMatch(/^Merge: land this work\./);
+    expect(session.prompts.at(-1)).toMatch(/^Merge: land this work through a PR\./);
     expect(session.prompts.at(-1)).toMatch(/Land it\.$/);
     // The running session sees the new phase: its landing tools now work.
     expect(session.input.host?.phase()).toBe("landing");
@@ -1060,7 +1088,7 @@ describe("Engine: review actions and landing", () => {
     };
     const merged = await d.engine.answer(ready?.id ?? "", { kind: "ready", decision: "merge" });
     expect(merged).toMatchObject({ delivery: "message", item: { resolution: { kind: "merge" } } });
-    expect(session.prompts.at(-1)).toBe("Merge: merge the PR now, then call `landed` with its URL.");
+    expect(session.prompts.at(-1)).toMatch(/^Merge: merge the PR now with `gh pr merge`/);
     await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
   });
 
@@ -1202,17 +1230,103 @@ describe("Engine: review actions and landing", () => {
     expect(second.adapter.sessions).toHaveLength(0); // nothing resumed for it
   });
 
-  it("a landed thread that can't be archived (work left over) stays, and says why", async () => {
+  it("a landed thread that can't be archived (work left over) stays, with an error card", async () => {
     const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
     const { thread, item, session } = await threadFinished(d);
     await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
     writeFileSync(join(thread.worktreePath, "stray.txt"), "left over");
     session.landed(PR);
     session.complete();
-    await expect
-      .poll(() => d.engine.events(thread.id).events.at(-1)?.event)
-      .toMatchObject({ type: "runtime.error", payload: { message: /Landed, but couldn't archive/ } });
+    await expect.poll(() => d.engine.snapshot().items).toMatchObject([
+      {
+        kind: "error",
+        lane: "quick",
+        ask: "Landed, but not archived",
+        error: { cause: "unarchived", message: expect.stringMatching(/uncommitted changes/) },
+      },
+    ]);
     expect(d.engine.view(thread.id)).toMatchObject({ status: "active", phase: "landing" });
+    // Retry tells the agent what is in the way.
+    const [card] = d.engine.snapshot().items;
+    session.onPrompt = () => {};
+    await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    expect(session.prompts.at(-1)).toMatch(/couldn't archive this thread after `landed`.*call `landed` again/s);
+  });
+
+  it("a message sent while it landed isn't dropped: it stays, with your message on a card", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    session.onPrompt = () => {};
+    await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    d.engine.send(thread.id, "Also update the README"); // waits for the landing turn
+    session.landed(PR);
+    await settle();
+    // Once it has said it landed, Tenzo says so instead of taking more.
+    expect(() => d.engine.send(thread.id, "One more thing")).toThrow(/has landed/);
+    session.complete();
+    await expect.poll(() => d.engine.snapshot().items).toMatchObject([
+      { kind: "error", error: { cause: "unarchived", prompts: ["Also update the README"] } },
+    ]);
+    expect(d.engine.view(thread.id)).toMatchObject({ status: "active", queued: 0 });
+    expect(existsSync(thread.worktreePath)).toBe(true);
+    const [card] = d.engine.snapshot().items;
+    await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    expect(session.prompts.at(-1)).toBe("Also update the README");
+  });
+
+  it("a landing turn that ends with nothing to come gets an error card; Retry reminds it", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    session.onPrompt = () => {
+      session.say("Can I merge this to main directly?");
+      session.complete();
+    };
+    await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    await settle();
+    const [card] = d.engine.snapshot().items;
+    expect(card).toMatchObject({
+      kind: "error",
+      ask: "Landing stalled",
+      context: "Can I merge this to main directly?",
+      error: { cause: "stalled", prompts: [STALLED_PROMPT] },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({ phase: "landing", activity: "needs-you" });
+    session.onPrompt = () => {
+      session.wakeMe(10 * 60_000, "Check CI");
+      session.complete();
+    };
+    await d.engine.answer(card?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(session.prompts.at(-1)).toBe(STALLED_PROMPT);
+    // A turn that leaves a wake (or a card, or `landed`) is no stall.
+    expect(d.engine.snapshot().items).toEqual([]);
+    expect(d.engine.view(thread.id).wakeAt).not.toBeNull();
+  });
+
+  it("Merge answered while a turn runs waits for it; the thread is landing at once", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    const { thread, item, session } = await threadFinished(d);
+    session.onPrompt = () => {};
+    d.engine.send(thread.id, "Tidy the commit message");
+    const result = await d.engine.answer(item.id, { kind: "finished", decision: "merge" });
+    expect(result).toMatchObject({ delivery: "message", thread: { phase: "landing", queued: 1 } });
+    expect(session.prompts.at(-1)).toBe("Tidy the commit message");
+    session.complete();
+    await settle();
+    expect(session.prompts.at(-1)).toMatch(/^Merge: /);
+  });
+
+  it("landed is believed only when git agrees: clean worktree, changes on origin", async () => {
+    const d = daemon();
+    await d.engine.createThread({ project: "app", prompt: "Land it" });
+    const thread = d.engine.threads()[0];
+    const host = d.adapter.last.input.host;
+    if (!thread || !host) throw new Error("no thread");
+    writeFileSync(join(thread.worktreePath, "stray.txt"), "left over");
+    await expect(host.checkLanded()).rejects.toThrow(/uncommitted changes/);
+    rmSync(join(thread.worktreePath, "stray.txt"));
+    // This repo has no origin: nothing can be shown to have landed.
+    await expect(host.checkLanded()).rejects.toThrow(/Couldn't fetch main from origin/);
   });
 
   it("start_thread: a new thread through the normal create, origin agent, its parent recorded", async () => {
@@ -1227,8 +1341,546 @@ describe("Engine: review actions and landing", () => {
     expect(view).toMatchObject({ origin: "agent", parentId: parent.id, phase: "discussing" });
     expect(d.engine.view(parent.id)).toMatchObject({ origin: "user", parentId: null });
     // Its own agent starts on the prompt, discussing like any thread.
-    expect(d.adapter.last.input).toMatchObject({ threadId: child.id, phase: "discussing" });
-    expect(d.adapter.last.prompts).toEqual(["Fix the flaky test"]);
+    const childSession = d.adapter.last;
+    expect(childSession.input).toMatchObject({ threadId: child.id, phase: "discussing" });
+    expect(childSession.prompts).toEqual(["Fix the flaky test"]);
     await expect(host.startThread({ prompt: "x", project: "nope" })).rejects.toThrow(/No project "nope"/);
+    // No fan-out: a thread an agent started can't start threads.
+    await expect(childSession.input.host?.startThread({ prompt: "Fan out" })).rejects.toThrow(
+      /started by another thread/,
+    );
+  });
+
+  it("start_thread: a few children per thread, counted across sessions, and a few agent threads in all", async () => {
+    const d = daemon();
+    const a = await d.engine.createThread({ project: "app", prompt: "Spawn" });
+    const first = d.adapter.last;
+    const b = await d.engine.createThread({ project: "app", prompt: "Spawn too" });
+    const other = d.adapter.last;
+    const children = [];
+    for (let i = 0; i < MAX_CHILD_THREADS; i++) {
+      children.push(await first.input.host?.startThread({ prompt: `Job ${i}`, title: `Job ${i}` }));
+    }
+    // A new session of the same thread (a wake, a restart) doesn't start the count again.
+    first.crash();
+    await settle();
+    d.engine.send(a.id, "Go on");
+    const again = d.adapter.last;
+    expect(again.input.threadId).toBe(a.id);
+    await expect(again.input.host?.startThread({ prompt: "One more" })).rejects.toThrow(
+      `A thread starts at most ${MAX_CHILD_THREADS} threads.`,
+    );
+    // Across every thread, at most MAX_AGENT_THREADS active at once.
+    await expect(other.input.host?.startThread({ prompt: "Mine" })).rejects.toThrow(
+      /threads started by agents are active already/,
+    );
+    await d.engine.archive(children[0]?.id ?? "");
+    await expect(other.input.host?.startThread({ prompt: "Mine" })).resolves.toMatchObject({
+      projectName: "app",
+    });
+    expect(d.engine.view(b.id).origin).toBe("user");
+  });
+
+  it("a wake that comes due mid-turn waits for the turn, like any message", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+    try {
+      const d = daemon();
+      d.adapter.onStart = (session) => {
+        session.onPrompt = () => {
+          session.wakeMe(60_000, "Check CI");
+          session.complete();
+        };
+      };
+      const thread = await d.engine.createThread({ project: "app", prompt: "Watch" });
+      await settle();
+      const session = d.adapter.last;
+      session.onPrompt = () => {};
+      d.engine.send(thread.id, "Meanwhile, a question");
+      vi.advanceTimersByTime(60_000);
+      await settle();
+      expect(session.prompts.at(-1)).toBe("Meanwhile, a question");
+      expect(d.engine.view(thread.id).queued).toBe(1);
+      session.complete();
+      await settle();
+      expect(session.prompts.at(-1)).toBe("You asked to be woken: Check CI");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("Engine: snooze", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+  /** Timers and Date on a fake clock; setImmediate stays real, for `settle`. */
+  const fakeClock = () =>
+    vi.useFakeTimers({
+      toFake: ["setTimeout", "clearTimeout", "Date"],
+      now: Date.parse("2026-10-04T10:00:00Z"),
+    });
+
+  it("snoozes an item for 15 minutes: it stays open, its thread stops needing you, clients hear", async () => {
+    fakeClock();
+    const d = daemon();
+    const thread = await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    const { item: snoozed, thread: view } = d.engine.snooze(item?.id ?? "");
+    expect(snoozed).toMatchObject({ status: "open", snoozedUntil: "2026-10-04T10:15:00.000Z" });
+    expect(view).toMatchObject({ activity: "snoozed", openItems: 1 });
+    expect(d.engine.snapshot().items).toEqual([snoozed]); // still sent: clients hide it themselves
+    expect(d.changes.filter((c) => c.type === "item").map((c) => c.change.type)).toEqual([
+      "opened",
+      "snoozed",
+    ]);
+    expect(d.changes.at(-1)).toMatchObject({ type: "thread", thread: { activity: "snoozed" } });
+    expect(d.engine.events(thread.id).events.at(-1)?.event).toMatchObject({
+      type: "item.snoozed",
+      requestId: item?.requestId,
+      payload: { until: "2026-10-04T10:15:00.000Z" },
+    });
+  });
+
+  it("wakes the item by itself when its time comes", async () => {
+    fakeClock();
+    const d = daemon();
+    const thread = await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    d.engine.snooze(item?.id ?? "");
+    vi.advanceTimersByTime(15 * 60_000 - 1);
+    expect(d.engine.snapshot().items[0]?.snoozedUntil).not.toBeNull();
+    vi.advanceTimersByTime(1);
+    expect(d.engine.snapshot().items[0]?.snoozedUntil).toBeNull();
+    expect(d.engine.view(thread.id).activity).toBe("needs-you");
+    expect(d.changes.filter((c) => c.type === "item").at(-1)).toMatchObject({
+      change: { type: "unsnoozed", item: { id: item?.id, snoozedUntil: null } },
+    });
+    expect(d.engine.events(thread.id).events.at(-1)?.event).toMatchObject({
+      type: "item.unsnoozed",
+      payload: { reason: "returned" },
+    });
+  });
+
+  it("Undo brings it back at once; the timer then does nothing; undoing again is harmless", async () => {
+    fakeClock();
+    const d = daemon();
+    const thread = await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    d.engine.snooze(item?.id ?? "");
+    const { item: back } = d.engine.unsnooze(item?.id ?? "");
+    expect(back.snoozedUntil).toBeNull();
+    const seq = d.engine.view(thread.id).lastSeq;
+    expect(d.engine.unsnooze(item?.id ?? "").item.snoozedUntil).toBeNull();
+    vi.advanceTimersByTime(20 * 60_000);
+    expect(d.engine.view(thread.id).lastSeq).toBe(seq); // nothing more logged
+  });
+
+  it("survives a restart: still snoozed, and woken on time by the next daemon", async () => {
+    fakeClock();
+    const first = daemon();
+    await threadAsking(first);
+    const [item] = first.engine.snapshot().items;
+    first.engine.snooze(item?.id ?? "");
+    kill(first);
+
+    const second = daemon();
+    expect(second.engine.snapshot().items[0]?.snoozedUntil).toBe("2026-10-04T10:15:00.000Z");
+    vi.advanceTimersByTime(15 * 60_000);
+    expect(second.engine.snapshot().items[0]?.snoozedUntil).toBeNull();
+  });
+
+  it("an item whose time came while no daemon ran wakes as the next one starts", async () => {
+    fakeClock();
+    const first = daemon();
+    await threadAsking(first);
+    const [item] = first.engine.snapshot().items;
+    first.engine.snooze(item?.id ?? "");
+    await first.engine.close();
+    vi.setSystemTime(Date.parse("2026-10-04T11:00:00Z"));
+    const second = daemon();
+    vi.advanceTimersByTime(0);
+    expect(second.engine.snapshot().items[0]?.snoozedUntil).toBeNull();
+  });
+
+  it("takes its length from the options (TENZO_SNOOZE_MS)", async () => {
+    fakeClock();
+    const d = daemon(new FakeAdapter(), { snoozeMs: 5_000 });
+    await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    expect(d.engine.snooze(item?.id ?? "").item.snoozedUntil).toBe("2026-10-04T10:00:05.000Z");
+    vi.advanceTimersByTime(5_000);
+    expect(d.engine.snapshot().items[0]?.snoozedUntil).toBeNull();
+  });
+
+  it("an item answered while snoozed resolves, and its timer goes with it", async () => {
+    fakeClock();
+    const d = daemon();
+    const thread = await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    d.engine.snooze(item?.id ?? "");
+    await d.engine.answer(item?.id ?? "", blue);
+    const seq = d.engine.view(thread.id).lastSeq;
+    vi.advanceTimersByTime(15 * 60_000);
+    expect(d.engine.view(thread.id).lastSeq).toBe(seq);
+  });
+
+  it("refuses unknown and resolved items, through the command layer too", async () => {
+    const d = daemon();
+    await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    expect(() => d.engine.snooze("itm_nope")).toThrow(/No item "itm_nope"/);
+    await d.engine.answer(item?.id ?? "", blue);
+    expect(() => d.engine.snooze(item?.id ?? "")).toThrow(/no longer open \(answered\)/);
+    expect(() => d.engine.unsnooze(item?.id ?? "")).toThrow(/no longer open/);
+    const outcome = await executeCommand(d.engine, { type: "item.snooze", itemId: "itm_nope" });
+    expect(outcome).toMatchObject({ ok: false, fault: "client" });
+    expect(Command.safeParse({ type: "item.snooze" }).success).toBe(false);
+    expect(Command.safeParse({ type: "item.unsnooze", itemId: "" }).success).toBe(false);
+  });
+
+  it("answers the snooze commands with the item and its thread, as the contract says", async () => {
+    const d = daemon();
+    await threadAsking(d);
+    const [item] = d.engine.snapshot().items;
+    for (const type of ["item.snooze", "item.unsnooze"] as const) {
+      const outcome = await executeCommand(d.engine, { type, itemId: item?.id ?? "" });
+      if (!outcome.ok) throw new Error(outcome.error);
+      expect(CommandResults[type].parse(outcome.result)).toEqual(outcome.result);
+    }
+  });
+});
+
+describe("Engine: error items", () => {
+  /** A thread whose first turn fails, the way Claude reports an API error. */
+  async function failing(d: ReturnType<typeof daemon>, prompt = "Fix the flaky test") {
+    d.adapter.onStart = (session) => {
+      session.onPrompt = (_prompt, turnId) => {
+        session.say("Running the tests.");
+        session.emit({
+          type: "runtime.error",
+          turnId,
+          payload: { message: "API Error: 529 Overloaded" },
+        });
+        session.complete("failed");
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt });
+    await settle();
+    return thread;
+  }
+
+  it("a failed turn becomes an error card, not done: the thread needs you", async () => {
+    const d = daemon();
+    const thread = await failing(d);
+    const [item] = d.engine.snapshot().items;
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      threadId: thread.id,
+      kind: "error",
+      lane: "quick",
+      ask: "Claude's turn failed",
+      error: {
+        cause: "turn",
+        message: "API Error: 529 Overloaded",
+        prompts: ["Fix the flaky test"],
+      },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({ activity: "needs-you", working: false });
+  });
+
+  it("Retry tells the same session to check what's done and carry on, not the prompt again", async () => {
+    const d = daemon();
+    const thread = await failing(d);
+    const [item] = d.engine.snapshot().items;
+    d.adapter.last.onPrompt = undefined;
+    const result = await d.engine.answer(item?.id ?? "", { kind: "error", action: "retry" });
+    expect(result).toMatchObject({ delivery: "message", item: { resolution: { kind: "retried" } } });
+    expect(d.adapter.sessions).toHaveLength(1);
+    expect(d.adapter.last.prompts).toEqual(["Fix the flaky test", carryOn(item?.error)]);
+    expect(d.adapter.last.prompts[1]).toContain("API Error: 529 Overloaded");
+    expect(d.engine.snapshot().items).toEqual([]);
+    expect(d.engine.view(thread.id).activity).toBe("working");
+  });
+
+  it("failing to start again and again keeps one card, which Retry empties in order", async () => {
+    const adapter = new FakeAdapter();
+    adapter.failWith = new Error("claude not found");
+    const d = daemon(adapter);
+    const thread = await d.engine.createThread({ project: "app", prompt: "one" });
+    d.engine.send(thread.id, "two");
+    const items = d.engine.snapshot().items;
+    expect(items).toMatchObject([{ kind: "error", error: { cause: "start", prompts: ["one", "two"] } }]);
+    expect(d.changes.filter((c) => c.type === "item").map((c) => c.change.type)).toEqual([
+      "opened",
+      "updated",
+    ]);
+    adapter.failWith = undefined;
+    await d.engine.answer(items[0]?.id ?? "", { kind: "error", action: "retry" });
+    expect(adapter.last.prompts).toEqual(["one"]);
+    adapter.last.complete();
+    await settle();
+    expect(adapter.last.prompts).toEqual(["one", "two"]);
+  });
+
+  it("Tell it something sends your words instead; empty words are refused", async () => {
+    const d = daemon();
+    await failing(d);
+    const [item] = d.engine.snapshot().items;
+    d.adapter.last.onPrompt = undefined;
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "error", action: "tell", text: "  " }),
+    ).rejects.toThrow(/Say what to tell it/);
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "question", answers: {} }),
+    ).rejects.toThrow(/is an error; answer it with retry/);
+    const result = await d.engine.answer(item?.id ?? "", {
+      kind: "error",
+      action: "tell",
+      text: "Use the fake clock",
+    });
+    expect(result.item.resolution).toEqual({ kind: "told", text: "Use the fake clock" });
+    expect(d.adapter.last.prompts.at(-1)).toBe("Use the fake clock");
+  });
+
+  it("Archive archives the thread, which dismisses the card; a refusal leaves both", async () => {
+    const d = daemon();
+    const thread = await failing(d);
+    const [item] = d.engine.snapshot().items;
+    writeFileSync(join(thread.worktreePath, "work.txt"), "unsaved");
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "error", action: "archive" }),
+    ).rejects.toThrow(/uncommitted changes/);
+    expect(d.engine.snapshot().items).toHaveLength(1);
+
+    rmSync(join(thread.worktreePath, "work.txt"));
+    const result = await d.engine.answer(item?.id ?? "", { kind: "error", action: "archive" });
+    expect(result).toMatchObject({
+      delivery: "archived",
+      thread: { status: "archived" },
+      item: { resolution: { kind: "dismissed" } },
+    });
+    expect(d.engine.snapshot()).toMatchObject({ items: [], threads: [] });
+  });
+
+  it("an agent that crashes mid-turn with nothing asked: Retry resumes its session, to carry on", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      if (d.adapter.sessions.length === 1) {
+        session.onPrompt = () => session.crash("exited with code 1");
+      }
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Build it" });
+    await settle();
+    const [item] = d.engine.snapshot().items;
+    expect(item).toMatchObject({
+      kind: "error",
+      ask: "Claude stopped mid-turn",
+      error: { cause: "crash", message: "exited with code 1", prompts: ["Build it"] },
+    });
+    expect(d.engine.view(thread.id).activity).toBe("needs-you");
+    const first = d.adapter.last;
+    await d.engine.answer(item?.id ?? "", { kind: "error", action: "retry" });
+    expect(d.adapter.last).not.toBe(first);
+    expect(d.adapter.last.input.resumeSessionId).toBe(first.sessionId);
+    expect(d.adapter.last.prompts).toEqual([carryOn(item?.error)]);
+    expect(d.adapter.last.prompts[0]).toContain('It began with my message: "Build it"');
+  });
+
+  it("clears by itself when the thread's next turn starts (a prompt from the CLI)", async () => {
+    const d = daemon();
+    const thread = await failing(d);
+    d.adapter.last.onPrompt = undefined;
+    d.engine.send(thread.id, "Try a different approach");
+    await settle();
+    expect(d.engine.snapshot().items).toEqual([]);
+    const resolved = d.changes.filter((c) => c.type === "item" && c.change.type === "resolved");
+    expect(resolved.at(-1)).toMatchObject({
+      change: { item: { resolution: { kind: "recovered" } } },
+    });
+  });
+
+  it("archiving mid-turn shows no error card, not even for a moment", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Working on it.");
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Long job" });
+    await settle();
+    await d.engine.archive(thread.id);
+    expect(d.changes.filter((c) => c.type === "item")).toEqual([]);
+    expect(d.engine.snapshot().items).toEqual([]);
+  });
+
+  it("a refused archive after the stop picks the cut-short turn up again", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Working on it.");
+      // It writes a file as it stops: the archive's second look finds uncommitted work.
+      const stop = session.stop.bind(session);
+      session.stop = async () => {
+        writeFileSync(join(session.input.cwd, "late.txt"), "written while stopping");
+        await stop();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Long job" });
+    await settle();
+    const stopped = d.adapter.last;
+    await expect(d.engine.archive(thread.id)).rejects.toThrow(/uncommitted changes/);
+    expect(stopped.stopped).toBe(true);
+    expect(d.engine.view(thread.id).status).toBe("active");
+    expect(d.engine.snapshot().items).toEqual([]);
+    expect(d.adapter.last).not.toBe(stopped);
+    expect(d.adapter.last.prompts).toEqual([RESTART_PROMPT]);
+  });
+
+  it("a graceful daemon stop mid-turn: no card; the next daemon resumes the turn, once", async () => {
+    const first = daemon();
+    first.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Working on it.");
+    };
+    const thread = await first.engine.createThread({ project: "app", prompt: "Long job" });
+    await settle();
+    await first.engine.close();
+    expect(first.changes.filter((c) => c.type === "item")).toEqual([]);
+
+    const second = daemon();
+    expect(second.engine.snapshot().items).toEqual([]);
+    const resumed = second.adapter.last;
+    expect(resumed.input.resumeSessionId).toBe(first.adapter.last.sessionId);
+    expect(resumed.prompts).toEqual([RESTART_PROMPT]);
+    expect(second.engine.view(thread.id).activity).toBe("working");
+    // Restarted again, gracefully, mid-resume: that resumes again (a deliberate restart).
+    await second.engine.close();
+    const third = daemon();
+    expect(third.adapter.last.prompts).toEqual([RESTART_PROMPT]);
+    expect(third.engine.snapshot().items).toEqual([]);
+  });
+
+  it("a graceful stop with a question open resumes nothing: answering it does", async () => {
+    const first = daemon();
+    await threadAsking(first);
+    await first.engine.close();
+    const second = daemon();
+    expect(second.adapter.sessions).toEqual([]);
+    expect(second.engine.snapshot().items).toMatchObject([{ kind: "question", detached: true }]);
+  });
+
+  it("the resumed turn crashing is an error card", async () => {
+    const first = daemon();
+    first.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Working on it.");
+    };
+    await first.engine.createThread({ project: "app", prompt: "Long job" });
+    await settle();
+    await first.engine.close();
+    const adapter = new FakeAdapter();
+    adapter.onStart = (session) => {
+      session.onPrompt = () => session.crash("Claude Code process exited with code 1");
+    };
+    const second = daemon(adapter);
+    await settle();
+    expect(second.engine.snapshot().items).toMatchObject([
+      {
+        kind: "error",
+        ask: "Claude stopped mid-turn",
+        error: { cause: "crash", message: "Claude Code process exited with code 1" },
+      },
+    ]);
+  });
+
+  it("a kill mid-turn resumes too, but a second kill mid-resume leaves an error card", async () => {
+    const first = daemon();
+    first.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Working on it.");
+    };
+    await first.engine.createThread({ project: "app", prompt: "Long job" });
+    await settle();
+    kill(first);
+    const second = daemon();
+    expect(second.engine.snapshot().items).toEqual([]);
+    expect(second.adapter.last.prompts).toEqual([RESTART_PROMPT]);
+    await settle(); // its turn.started is in the log when the kill comes
+    kill(second);
+    const third = daemon();
+    expect(third.adapter.sessions).toEqual([]);
+    expect(third.engine.snapshot().items).toMatchObject([
+      {
+        kind: "error",
+        ask: "Claude stopped mid-turn",
+        error: {
+          message: "Tenzo stopped twice while this turn ran, so it wasn't resumed again.",
+          prompts: [RESTART_PROMPT],
+        },
+      },
+    ]);
+  });
+
+  it("a graceful stop resumes nothing for a turn that finished while it stopped", async () => {
+    const first = daemon();
+    first.adapter.onStart = (session) => {
+      session.onPrompt = () => session.say("Almost done.");
+      // The turn ends within the stop's grace, as Claude's does when its input closes.
+      const stop = session.stop.bind(session);
+      session.stop = async () => {
+        session.complete();
+        await stop();
+      };
+    };
+    await first.engine.createThread({ project: "app", prompt: "Short job" });
+    await settle();
+    await first.engine.close();
+    const second = daemon();
+    expect(second.adapter.sessions).toEqual([]);
+    expect(second.engine.snapshot().items).toEqual([]);
+  });
+
+  it("only an ask of the live session is waiting: open finished work, or an old detached ask, doesn't stop a resume", async () => {
+    const first = daemon();
+    first.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        session.respondToProposal(session.propose("Add a counter page."), "build");
+        session.report("Added a counter page.");
+        session.complete();
+      };
+    };
+    const thread = await first.engine.createThread({ project: "app", prompt: "Add a counter" });
+    await settle();
+    first.adapter.onStart = undefined;
+    first.adapter.last.onPrompt = () => first.adapter.last.say("Following up.");
+    first.engine.send(thread.id, "One more thing");
+    await settle();
+    await first.engine.close();
+    const second = daemon();
+    expect(second.adapter.last.prompts).toEqual([RESTART_PROMPT]);
+    expect(second.engine.snapshot().items).toMatchObject([{ kind: "finished" }]);
+  });
+
+  it("a crash mid-turn with finished work open still gets its error card", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        session.respondToProposal(session.propose("Add a counter page."), "build");
+        session.report("Added a counter page.");
+        session.complete();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "Add a counter" });
+    await settle();
+    d.adapter.onStart = undefined;
+    const session = d.adapter.last;
+    session.onPrompt = () => session.crash("boom");
+    d.engine.send(thread.id, "One more thing");
+    await settle();
+    expect(d.engine.snapshot().items.map((i) => i.kind)).toEqual(["finished", "error"]);
+  });
+
+  it("a retry of a retry quotes the prompt the work began with, not the last carry-on", () => {
+    const first = carryOn({ cause: "turn", message: "Overloaded", prompts: ["Fix the flaky test"] });
+    const second = carryOn({ cause: "turn", message: "Overloaded again", prompts: [first] });
+    expect(second).toMatch(/^Your last turn didn't finish: Overloaded again\n/);
+    expect(second).toContain('It began with my message: "Fix the flaky test"');
+    expect(carryOn({ cause: "crash", message: "x", prompts: [RESTART_PROMPT] })).not.toContain(
+      "It began with",
+    );
   });
 });

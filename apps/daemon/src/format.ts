@@ -17,6 +17,10 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
         lines.push(`    ${i + 1}. ${o.label}${suggested}${description}`);
       });
     }
+  } else if (item.kind === "error") {
+    lines.push(`  ! ${item.ask}`);
+    if (item.error?.message) lines.push(`    ${oneLine(item.error.message, 300)}`);
+    lines.push("    1. Retry (suggested)", "    2. Archive", "    Or tell it something.");
   } else if (item.kind === "proposal") {
     lines.push(`  ! ${item.ask}`);
     for (const line of (item.proposal?.summary ?? "").split("\n")) {
@@ -34,10 +38,11 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
     }
     if (f.attachments.length > 0) lines.push(`    Screenshots: ${f.attachments.length}`);
     if (f.live) lines.push(`    Live: port ${f.live.port}`);
+    // Words, not numbers: landing is never one keystroke away.
     lines.push(
-      "    1. Merge (suggested)",
-      "    2. Open PR",
-      "    3. Done (nothing to land)",
+      "    merge: open the PR, see it through, merge it",
+      "    pr: open the PR, ask me before merging",
+      "    done: nothing to land",
       "    Or say what needs changing.",
     );
   } else if (item.kind === "ready" && item.ready) {
@@ -45,11 +50,14 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
     for (const line of item.ready.summary.split("\n")) {
       if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
     }
-    lines.push("    1. Merge (suggested)", "    Or say what to do first.");
+    lines.push("    merge: merge it now", "    Or say what to do first.");
   } else {
     lines.push(`  ? ${item.ask}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
     lines.push("    1. Allow (suggested)", "    2. Deny");
+  }
+  if (item.snoozedUntil) {
+    lines.push(`  Snoozed until ${new Date(item.snoozedUntil).toLocaleTimeString()}.`);
   }
   if (item.detached) {
     lines.push("  The agent that asked has stopped; answering resumes it with your answer.");
@@ -151,11 +159,19 @@ function describe(event: RuntimeEvent): string {
     case "wake.fired":
       return event.payload.why;
     case "thread.landed":
-      return [event.payload.url, event.payload.summary].filter(Boolean).join(" · ") || "landed";
+      return [event.payload.url, event.payload.summary].filter(Boolean).join(" · ");
+    case "landing.stuck":
+      return `${event.payload.cause}: ${event.payload.message}`;
     case "runtime.error":
       return event.payload.message;
     case "thread.archived":
       return "worktree removed, open items dismissed";
+    case "item.snoozed":
+      return `until ${event.payload.until}`;
+    case "item.unsnoozed":
+      return event.payload.reason;
+    case "error.resolved":
+      return event.payload.action + (event.payload.text ? `: ${quote(event.payload.text)}` : "");
   }
 }
 

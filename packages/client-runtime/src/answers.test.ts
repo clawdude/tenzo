@@ -51,11 +51,16 @@ describe("suggestedAnswer", () => {
     expect(suggestedAnswer(proposal)).toEqual({ kind: "proposal", decision: "build" });
   });
 
-  it("merges finished work, and a ready PR", () => {
+  it("never merges in one tap: finished work is Done, a ready PR has no one-tap answer", () => {
     const finished = item("x", "a", { kind: "finished", lane: "review", suggested: "merge", questions: [] });
-    expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "merge" });
+    expect(suggestedAnswer(finished)).toEqual({ kind: "finished", decision: "done" });
     const ready = item("x", "a", { kind: "ready", suggested: "merge", questions: [] });
-    expect(suggestedAnswer(ready)).toEqual({ kind: "ready", decision: "merge" });
+    expect(suggestedAnswer(ready)).toBeNull();
+  });
+
+  it("retries an error", () => {
+    const error = item("x", "a", { kind: "error", suggested: "retry", questions: [] });
+    expect(suggestedAnswer(error)).toEqual({ kind: "error", action: "retry" });
   });
 
   it("sends the suggested decision on a permission request, Allow when there is none", () => {

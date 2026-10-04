@@ -28,7 +28,6 @@ import {
   claudeEnv,
   createClaudeAdapter,
   findClaude,
-  MAX_STARTED_THREADS,
   parseQuestions,
 } from "./claude.ts";
 import { parseWait } from "./tenzo-mcp.ts";
@@ -1041,12 +1040,21 @@ describe("Claude adapter: wake_me, ready_to_merge, landed, start_thread", () => 
   type Reply = { text: string; isError: boolean };
   const PR = "https://github.com/o/r/pull/12";
 
-  /** A host whose thread is in `phase`, recording the threads it is asked to start. */
-  function host(phase: ThreadPhase = "landing") {
+  /**
+   * A host whose thread is in `phase`, recording the threads it is asked to start. `notLanded`:
+   * what its merge check refuses with (none: it passes).
+   */
+  function host(phase: ThreadPhase = "landing", notLanded?: string) {
     const started: { prompt: string; project?: string; title?: string }[] = [];
-    const daemon: SessionHost & { phase: () => ThreadPhase; started: typeof started } = {
+    let checks = 0;
+    const daemon: SessionHost & { started: typeof started; checks: () => number } = {
       phase: () => phase,
       started,
+      checks: () => checks,
+      checkLanded: async () => {
+        checks++;
+        if (notLanded) throw new TenzoError(notLanded);
+      },
       startThread: async (input) => {
         if (input.project === "nope") throw new TenzoError('No project "nope".');
         started.push(input);
@@ -1145,42 +1153,39 @@ describe("Claude adapter: wake_me, ready_to_merge, landed, start_thread", () => 
     }
   });
 
-  it("landed says the PR merged, from a clean worktree, while landing", async () => {
-    const cwd = initRepo("landing");
-    const clean = await calls([["landed", { url: PR, summary: " Counter page " }]], {
-      cwd,
-      host: host("landing"),
-    });
-    expect(clean.replies[0]).toMatchObject({ isError: false, text: expect.stringMatching(/^Landed/) });
-    expect(clean.events.filter((e) => e.type === "thread.landed").map((e) => e.payload)).toEqual([
+  it("landed needs the PR's URL and the daemon's merge check, while landing", async () => {
+    const daemon = host("landing");
+    const ok = await calls([["landed", { url: PR, summary: " Counter page " }]], { host: daemon });
+    expect(ok.replies[0]).toMatchObject({ isError: false, text: expect.stringMatching(/^Landed/) });
+    expect(daemon.checks()).toBe(1);
+    expect(ok.events.filter((e) => e.type === "thread.landed").map((e) => e.payload)).toEqual([
       { url: PR, summary: "Counter page" },
     ]);
 
-    writeFileSync(join(cwd, "shot.png"), "stray");
-    const dirty = await calls([["landed", { url: PR }]], { cwd, host: host("landing") });
-    expect(dirty.replies[0]).toMatchObject({
-      isError: true,
-      text: expect.stringMatching(/uncommitted changes/),
+    const unmerged = await calls([["landed", { url: PR }]], {
+      host: host("landing", "Can't see this branch's changes in origin/main"),
     });
-    const early = await calls([["landed", {}]], { cwd, host: host("building") });
+    expect(unmerged.replies[0]).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(/Can't see this branch's changes/),
+    });
+    const noUrl = await calls([["landed", {}]], { host: host("landing") });
+    const early = await calls([["landed", { url: PR }]], { host: host("building") });
     expect(early.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/Nothing has landed/) });
-    const badUrl = await calls([["landed", { url: "file:///etc" }]], { cwd, host: host("landing") });
-    expect(badUrl.replies[0]?.isError).toBe(true);
-    for (const run of [dirty, early, badUrl]) {
+    const badUrl = await calls([["landed", { url: "file:///etc" }]], { host: host("landing") });
+    const alone = await calls([["landed", { url: PR }]], { phase: "landing" });
+    for (const run of [unmerged, noUrl, early, badUrl, alone]) {
+      expect(run.replies[0]?.isError).toBe(true);
       expect(run.events.some((e) => e.type === "thread.landed")).toBe(false);
     }
   });
 
-  it("start_thread starts a thread through the daemon, a few per session at most", async () => {
+  it("start_thread starts a thread through the daemon, and says why not when it can't", async () => {
     const daemon = host("building");
     const { replies } = await calls(
       [
         ["start_thread", { prompt: " Fix the flaky test ", title: " Flaky test " }],
         ["start_thread", { prompt: "Elsewhere", project: "nope" }],
-        ...Array.from(
-          { length: MAX_STARTED_THREADS },
-          (_, i): [string, Record<string, unknown>] => ["start_thread", { prompt: `Job ${i}` }],
-        ),
       ],
       { host: daemon },
     );
@@ -1188,26 +1193,28 @@ describe("Claude adapter: wake_me, ready_to_merge, landed, start_thread", () => 
       isError: false,
       text: expect.stringMatching(/^Started thr_1{20} \("Flaky test"\) in app/),
     });
-    expect(daemon.started[0]).toEqual({ prompt: "Fix the flaky test", title: "Flaky test" });
+    expect(daemon.started).toEqual([{ prompt: "Fix the flaky test", title: "Flaky test" }]);
     expect(replies[1]).toMatchObject({ isError: true, text: 'No project "nope".' });
-    expect(daemon.started).toHaveLength(MAX_STARTED_THREADS);
-    expect(replies.at(-1)).toMatchObject({ isError: true, text: expect.stringMatching(/at most/) });
 
     const alone = await calls([["start_thread", { prompt: "x" }]]);
     expect(alone.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/can't start/) });
   });
 
-  it("report asks the daemon where the thread is: refused while discussing, taken once building", async () => {
-    const { replies } = await calls(
-      [["report", { summary: "x", how_to_test: "", checks: [] }]],
-      { phase: "discussing", host: host("discussing") },
-    );
-    expect(replies[0]?.isError).toBe(true);
-    const later = await calls(
-      [["report", { summary: "x", how_to_test: "", checks: [] }]],
-      { phase: "discussing", host: host("building") },
-    );
-    expect(later.replies[0]?.isError).toBe(false);
+  it("report asks the daemon where the thread is: refused while discussing and landing", async () => {
+    const report: [string, Record<string, unknown>] = [
+      "report",
+      { summary: "x", how_to_test: "", checks: [] },
+    ];
+    const discussing = await calls([report], { phase: "discussing", host: host("discussing") });
+    expect(discussing.replies[0]?.isError).toBe(true);
+    const building = await calls([report], { phase: "discussing", host: host("building") });
+    expect(building.replies[0]?.isError).toBe(false);
+    const landing = await calls([report], { phase: "building", host: host("landing") });
+    expect(landing.replies[0]).toMatchObject({
+      isError: true,
+      text: expect.stringMatching(/Don't report while landing/),
+    });
+    expect(landing.events.some((e) => e.type === "report.submitted")).toBe(false);
   });
 });
 

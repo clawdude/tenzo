@@ -148,6 +148,16 @@ export const MIGRATIONS: readonly Migration[] = [
     `,
   },
   {
+    name: "error items",
+    sql: `
+      -- Projection of the thread's events (fold.ts), for error items: the current turn's prompt
+      -- (what Retry sends again) and the agent's last error in it. Items may now be of kind
+      -- 'error', and carry snoozedUntil in their body; neither needs a column.
+      ALTER TABLE threads ADD COLUMN turn_prompt TEXT;
+      ALTER TABLE threads ADD COLUMN turn_error TEXT;
+    `,
+  },
+  {
     name: "landing and agent threads",
     sql: `
       -- More projection (fold.ts); 'landing' joins the phases as plain text. When the agent asked
@@ -157,6 +167,9 @@ export const MIGRATIONS: readonly Migration[] = [
       -- Who started the thread: 'user', or 'agent' (start_thread) with the thread that did.
       ALTER TABLE threads ADD COLUMN origin TEXT NOT NULL DEFAULT 'user';
       ALTER TABLE threads ADD COLUMN parent_id TEXT REFERENCES threads(id);
+      CREATE INDEX threads_by_parent ON threads (parent_id);
+      -- Landed threads are found by their event type on every start (engine.ts).
+      CREATE INDEX events_by_type ON events (type);
     `,
   },
 ];

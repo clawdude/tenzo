@@ -3,6 +3,8 @@ import type {
   Attachment,
   EnvironmentId,
   Preview,
+  EventId,
+  ItemError,
   QueueItem,
   QueueItemId,
   QueueItemResolution,
@@ -42,6 +44,10 @@ export interface ThreadRuntime {
   readonly preview: Preview | null;
   /** When the agent asked to be woken next, and why (`wake_me`); null when it didn't. */
   readonly wake: Wake | null;
+  /** The current (or last) turn's prompt, when Tenzo sent it: what Retry sends again. */
+  readonly prompt: string | null;
+  /** The agent's last `runtime.error` in the current turn: why it failed, if it does. */
+  readonly error: string | null;
 }
 
 export interface Wake {
@@ -59,7 +65,7 @@ export interface FoldState {
 
 /** Something that happened to an item; `item` is how it is now. */
 export interface ItemChange {
-  type: "opened" | "detached" | "resolved";
+  type: "opened" | "updated" | "detached" | "snoozed" | "unsnoozed" | "resolved";
   item: QueueItem;
 }
 
@@ -78,11 +84,24 @@ export const INITIAL_RUNTIME: ThreadRuntime = {
   attachments: [],
   preview: null,
   wake: null,
+  prompt: null,
+  error: null,
 };
 export const INITIAL_STATE: FoldState = { runtime: INITIAL_RUNTIME, open: [], known: new Set() };
 
 /** Context kept on an item: about two lines on a phone. */
 export const CONTEXT_LIMIT = 280;
+
+/** An error's message kept on its item: the start says what, a stderr tail may follow. */
+export const ERROR_LIMIT = 1_000;
+
+/** An error's buttons: Retry is the suggestion; telling it something is the free text. */
+export const ERROR_OPTIONS: readonly UserInputOption[] = [
+  { label: "Retry", value: "retry", description: "", recommended: true },
+  { label: "Archive", value: "archive", description: "", recommended: false },
+];
+
+const AGENT_NAMES: Record<AgentKind, string> = { claude: "Claude", codex: "Codex" };
 
 /** A permission request's buttons: allowing is the suggestion, as in Claude Code's own prompt. */
 export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
@@ -116,6 +135,20 @@ export const FINISHED_ASK = "Ready for review";
 /** What a ready item asks when the agent gave no headline. */
 export const READY_ASK = "Ready to merge";
 
+/**
+ * The kinds of item an agent asks and then waits on, in its turn. Finished work, ready PRs and
+ * errors wait on you, not on the agent.
+ */
+const ASKS: ReadonlySet<QueueItem["kind"]> = new Set(["question", "permission", "proposal"]);
+
+/**
+ * The agent's turn is waiting on you: an open ask from its live session. A detached ask (from
+ * a session that has ended), finished work, a ready PR or an error card doesn't count.
+ */
+export function waitsOnYou(open: readonly QueueItem[]): boolean {
+  return open.some((item) => ASKS.has(item.kind) && !item.detached);
+}
+
 type Asking =
   | RuntimeEventOf<"user-input.requested">
   | RuntimeEventOf<"request.opened">
@@ -139,23 +172,127 @@ export function foldEvent(
       // Finished work and ready PRs wait on you, not on the agent: they never detach.
       const changes: ItemChange[] = [];
       const open = state.open.map((item) => {
-        if (item.detached || item.kind === "finished" || item.kind === "ready") return item;
+        if (item.detached || !ASKS.has(item.kind)) return item;
         const detached = { ...item, detached: true };
         changes.push({ type: "detached", item: detached });
         return detached;
       });
+      const ended: FoldState = {
+        ...state,
+        runtime: { ...runtime, live: false, turnId: null },
+        open,
+      };
+      // The agent crashed mid-turn with nothing to ask you: without a card the thread would just
+      // look done, its work half finished. A graceful exit is one Tenzo asked for (an archive, the
+      // daemon stopping, which resumes the turn when it starts again: engine.ts), so no card.
+      if (
+        event.payload.exitKind !== "error" ||
+        runtime.turnId === null ||
+        waitsOnYou(state.open)
+      ) {
+        return { state: ended, changes };
+      }
+      const name = AGENT_NAMES[event.agent];
+      return withError(ended, changes, event, runtime, environmentId, {
+        cause: "crash",
+        message:
+          event.payload.reason ?? runtime.error ?? `${name} exited before its turn finished.`,
+        prompts: runtime.prompt === null ? [] : [runtime.prompt],
+      });
+    }
+    case "turn.started": {
+      // A prompt of ours went: whatever failed before is behind it, so its error card goes. A
+      // turn the agent starts by itself (a background task reporting) changes nothing about it.
+      const ours = event.payload.prompt !== undefined;
+      const changes: ItemChange[] = [];
+      const open = state.open.filter((item) => {
+        if (item.kind !== "error" || !ours) return true;
+        changes.push({
+          type: "resolved",
+          item: {
+            ...item,
+            status: "resolved",
+            resolvedAt: event.createdAt,
+            resolution: { kind: "recovered" },
+          },
+        });
+        return false;
+      });
       return {
-        state: { ...state, runtime: { ...runtime, live: false, turnId: null }, open },
+        state: {
+          ...state,
+          runtime: {
+            ...runtime,
+            turnId: event.turnId,
+            context: "",
+            prompt: event.payload.prompt ?? null,
+            error: null,
+          },
+          open,
+        },
         changes,
       };
     }
-    case "turn.started":
-      return same({ ...state, runtime: { ...runtime, turnId: event.turnId, context: "" } });
-    case "turn.completed":
-      return same({
+    case "turn.completed": {
+      const next: FoldState = {
         ...state,
         runtime: { ...runtime, turnId: runtime.turnId === event.turnId ? null : runtime.turnId },
+      };
+      if (event.payload.state !== "failed") return same(next);
+      return withError(next, [], event, runtime, environmentId, {
+        cause: "turn",
+        message: event.payload.errorMessage ?? runtime.error ?? "The turn failed.",
+        prompts: runtime.prompt === null ? [] : [runtime.prompt],
       });
+    }
+    case "runtime.error": {
+      // No session and no turn: the agent couldn't even start (engine.ts drops the prompts that
+      // were waiting, and says which). Otherwise it is why the turn or the session will end.
+      if (runtime.live || runtime.turnId !== null) {
+        return same({ ...state, runtime: { ...runtime, error: event.payload.message } });
+      }
+      // Still can't start: the card it already has says so, now with these prompts too.
+      const unsent = event.payload.unsent ?? [];
+      const card = state.open.find((i) => i.kind === "error" && i.error?.cause === "start");
+      if (card?.error) {
+        const item: QueueItem = {
+          ...card,
+          error: {
+            ...card.error,
+            message: cutMessage(event.payload.message.trim()),
+            prompts: [...card.error.prompts, ...unsent],
+          },
+        };
+        return {
+          state: { ...state, open: state.open.map((i) => (i === card ? item : i)) },
+          changes: [{ type: "updated", item }],
+        };
+      }
+      return withError(state, [], event, runtime, environmentId, {
+        cause: "start",
+        message: event.payload.message,
+        prompts: unsent,
+      });
+    }
+    case "error.resolved": {
+      const { action, text } = event.payload;
+      return resolve(
+        state,
+        event,
+        action === "retry" ? { kind: "retried" } : { kind: "told", text: text ?? "" },
+      );
+    }
+    case "item.snoozed":
+    case "item.unsnoozed": {
+      const found = state.open.find((item) => item.requestId === event.requestId);
+      const until = event.type === "item.snoozed" ? event.payload.until : null;
+      if (!found || found.snoozedUntil === until) return same(state);
+      const item: QueueItem = { ...found, snoozedUntil: until };
+      return {
+        state: { ...state, open: state.open.map((i) => (i === found ? item : i)) },
+        changes: [{ type: event.type === "item.snoozed" ? "snoozed" : "unsnoozed", item }],
+      };
+    }
     case "item.completed": {
       const p = event.payload;
       if (p.itemType !== "assistant_message" || p.parentItemId || !p.text?.trim()) {
@@ -231,10 +368,11 @@ export function foldEvent(
       return {
         state: {
           // Only built work goes to review: a report before Build it (the adapter refuses one)
-          // must not skip the proposal, so the thread keeps discussing.
+          // must not skip the proposal, so the thread keeps discussing; nor does a report while
+          // landing (refused too) undo Merge or Open PR.
           runtime: {
             ...runtime,
-            phase: runtime.phase === "discussing" ? "discussing" : "review",
+            phase: runtime.phase === "building" || runtime.phase === "review" ? "review" : runtime.phase,
             attachments: [],
           },
           open: [...state.open.filter((open) => open.kind !== "finished"), item],
@@ -287,6 +425,28 @@ export function foldEvent(
       });
     case "wake.fired":
       return same({ ...state, runtime: { ...runtime, wake: null } });
+    case "landing.stuck": {
+      // One landing card at a time: a newer one says what is wrong now.
+      const superseded = state.open
+        .filter((open) => open.kind === "error" && isLandingCause(open.error?.cause))
+        .map(
+          (open): ItemChange => ({
+            type: "resolved",
+            item: {
+              ...open,
+              status: "resolved",
+              resolvedAt: event.createdAt,
+              resolution: { kind: "superseded" },
+            },
+          }),
+        );
+      const rest: FoldState = {
+        ...state,
+        open: state.open.filter((open) => !superseded.some((s) => s.item.id === open.id)),
+      };
+      const { cause, message, prompts } = event.payload;
+      return withError(rest, superseded, event, runtime, environmentId, { cause, message, prompts });
+    }
     case "thread.archived": {
       const changes = state.open.map(
         (open): ItemChange => ({
@@ -310,7 +470,6 @@ export function foldEvent(
     }
     case "session.configured":
     case "item.started":
-    case "runtime.error":
     // The engine archives the thread once the turn that landed it ends; the log says so then.
     case "thread.landed":
       return same(state);
@@ -336,6 +495,36 @@ export function foldEvents(
 /** An item's id follows from its request's: replaying the log gives the same ids. */
 export function itemIdFor(requestId: RequestId): QueueItemId {
   return `itm_${requestId.slice("req_".length)}`;
+}
+
+/**
+ * An error item answers no agent request: its request id is made from the event that opened it,
+ * so replaying the log gives the same item again.
+ */
+export function errorRequestId(eventId: EventId): RequestId {
+  return `req_${eventId.slice("evt_".length)}`;
+}
+
+/** What an error item's card says in a few words. */
+export function errorHeadline(cause: ItemError["cause"], agent: AgentKind): string {
+  const name = AGENT_NAMES[agent];
+  switch (cause) {
+    case "turn":
+      return `${name}'s turn failed`;
+    case "crash":
+      return `${name} stopped mid-turn`;
+    case "start":
+      return `${name} couldn't start`;
+    case "stalled":
+      return "Landing stalled";
+    case "unarchived":
+      return "Landed, but not archived";
+  }
+}
+
+/** The error causes of landing cards (`landing.stuck`): Retry sends what they say. */
+export function isLandingCause(cause: ItemError["cause"] | undefined): boolean {
+  return cause === "stalled" || cause === "unarchived";
 }
 
 /** The last paragraphs of an assistant message that fit in `CONTEXT_LIMIT`, whitespace folded. */
@@ -384,6 +573,7 @@ function openItem(
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
   if (event.type === "proposal.requested") {
     const { headline, summary } = event.payload;
@@ -461,6 +651,7 @@ function finishedItem(
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
 }
 
@@ -490,6 +681,7 @@ function readyItem(
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
 }
 
@@ -505,6 +697,49 @@ function supersede(state: FoldState, kind: QueueItem["kind"], at: string): ItemC
     );
 }
 
+/** `state` with an error item opened by `event`, added to `changes`. */
+function withError(
+  state: FoldState,
+  changes: ItemChange[],
+  event: RuntimeEvent,
+  runtime: ThreadRuntime,
+  environmentId: EnvironmentId,
+  error: ItemError,
+): Folded {
+  const requestId = errorRequestId(event.eventId);
+  if (state.known.has(requestId)) return { state, changes };
+  const turnId = event.turnId ?? runtime.turnId;
+  const item: QueueItem = {
+    id: itemIdFor(requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "quick",
+    kind: "error",
+    requestId,
+    ...(turnId ? { turnId } : {}),
+    context: runtime.context,
+    ask: errorHeadline(error.cause, event.agent),
+    options: [...ERROR_OPTIONS],
+    suggested: "retry",
+    questions: [],
+    error: { ...error, message: cutMessage(error.message.trim()) },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  };
+  return {
+    state: { ...state, open: [...state.open, item], known: new Set([...state.known, requestId]) },
+    changes: [...changes, { type: "opened", item }],
+  };
+}
+
+function cutMessage(text: string, limit = ERROR_LIMIT): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
 function resolve(
   state: FoldState,
   event:
@@ -512,7 +747,8 @@ function resolve(
     | RuntimeEventOf<"request.resolved">
     | RuntimeEventOf<"proposal.resolved">
     | RuntimeEventOf<"report.resolved">
-    | RuntimeEventOf<"merge.resolved">,
+    | RuntimeEventOf<"merge.resolved">
+    | RuntimeEventOf<"error.resolved">,
   resolution: QueueItemResolution,
 ): Folded {
   const found = state.open.find((item) => item.requestId === event.requestId);

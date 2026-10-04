@@ -214,8 +214,8 @@ export class FakeSession implements AgentSession {
   }
 
   /** Like Claude calling Tenzo's `landed`: the PR is merged. */
-  landed(url?: string): void {
-    this.emit({ type: "thread.landed", ...this.#inTurn(), payload: url ? { url } : {} });
+  landed(url = "https://example.invalid/pr/1"): void {
+    this.emit({ type: "thread.landed", ...this.#inTurn(), payload: { url } });
   }
 
   complete(state: "completed" | "failed" | "interrupted" = "completed"): void {

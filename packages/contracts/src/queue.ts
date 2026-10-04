@@ -25,12 +25,27 @@ import {
 export const QueueItemId = z.string().regex(/^itm_[a-z0-9]{20}$/);
 export type QueueItemId = z.infer<typeof QueueItemId>;
 
-/** Quick: the agent is stuck waiting on you. Review: finished work waiting for a look. */
+/**
+ * Quick: the agent is stuck waiting on you (a question, a permission, a proposal, an error).
+ * Review: finished work waiting for a look. The quick lane always comes first on the Pass.
+ */
 export const Lane = z.enum(["quick", "review"]);
 export type Lane = z.infer<typeof Lane>;
 
-/** `ready`: a PR the agent opened can merge (after Open PR); Merge, or say what first. */
-export const QueueItemKind = z.enum(["question", "permission", "proposal", "finished", "ready"]);
+/**
+ * `finished`: work the agent reported (review lane). `error`: a turn failed, or the agent
+ * crashed mid-turn; the daemon makes these from the log, no agent asked. Retry, tell it
+ * something, or archive the thread. `ready`: a PR the agent opened can merge (after Open PR);
+ * Merge, or say what first.
+ */
+export const QueueItemKind = z.enum([
+  "question",
+  "permission",
+  "proposal",
+  "finished",
+  "error",
+  "ready",
+]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
 /** How an item left the queue. */
@@ -56,8 +71,32 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("changes"), note: z.string() }),
   /** Finished work the agent reported again: the newer report replaces it. */
   z.object({ kind: z.literal("superseded") }),
+  /** An error you said to retry: what failed went again. */
+  z.object({ kind: z.literal("retried") }),
+  /** An error you answered with words: they went to the agent as a prompt. */
+  z.object({ kind: z.literal("told"), text: z.string() }),
+  /** An error that cleared by itself: the thread's next turn started. */
+  z.object({ kind: z.literal("recovered") }),
 ]);
 export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
+
+/** What an error item knows about what went wrong. */
+export const ItemError = z.object({
+  /**
+   * `turn`: the turn ended failed. `crash`: the agent stopped mid-turn. `start`: it never started.
+   * `stalled`: a landing turn ended with nothing on the Pass and no wake. `unarchived`: the agent
+   * said it landed, but the thread couldn't be archived (`landing.stuck`, engine.ts).
+   */
+  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived"]),
+  /** The agent's or the daemon's own words for it, cut to size. */
+  message: z.string(),
+  /**
+   * What Retry sends, in order: the failed turn's prompt, the prompts never sent, or for a
+   * landing card what to tell the agent.
+   */
+  prompts: z.array(z.string()),
+});
+export type ItemError = z.infer<typeof ItemError>;
 
 export const QueueItem = z.object({
   id: QueueItemId,
@@ -94,6 +133,8 @@ export const QueueItem = z.object({
   finished: Finished.optional(),
   /** A ready item (quick lane): the PR and its state. `ask` is the headline. */
   ready: z.object({ url: WebUrl, summary: z.string() }).optional(),
+  /** An error item: what went wrong (`ask` says it in a few words), and what Retry sends. */
+  error: ItemError.optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
   fingerprint: Fingerprint.optional(),
   createdAt: z.iso.datetime(),
@@ -107,8 +148,23 @@ export const QueueItem = z.object({
   detached: z.boolean(),
   resolvedAt: z.iso.datetime().nullable(),
   resolution: QueueItemResolution.nullable(),
+  /**
+   * Swiped away until then (the daemon's clock): it is off the Pass, and its thread doesn't need
+   * you meanwhile. The daemon wakes it at that time (`item.unsnoozed`, which sets this back to
+   * null), so set means snoozed, whatever a client's clock says. Null: awake.
+   */
+  snoozedUntil: z.iso.datetime().nullable().default(null),
 });
 export type QueueItem = z.infer<typeof QueueItem>;
+
+/**
+ * True while `item` is snoozed. The daemon decides: it wakes items on time, and a client that
+ * missed that frame gets a fresh snapshot when it reconnects. A client's own clock may be minutes
+ * off, so it only ever counts down to `snoozedUntil`, never decides by it.
+ */
+export function isSnoozed(item: Pick<QueueItem, "snoozedUntil">): boolean {
+  return item.snoozedUntil !== null;
+}
 
 /** An answer to an item: one per question, a permission decision, or a proposal's. */
 export const ItemAnswer = z.discriminatedUnion("kind", [
@@ -141,6 +197,12 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     decision: MergeDecision,
     note: z.string().optional(),
   }),
+  z.object({
+    kind: z.literal("error"),
+    /** Send what failed again; send `text` instead (tell it something); archive the thread. */
+    action: z.enum(["retry", "tell", "archive"]),
+    text: z.string().optional(),
+  }),
 ]);
 export type ItemAnswer = z.infer<typeof ItemAnswer>;
 
@@ -159,7 +221,7 @@ export const ThreadOrigin = z.enum(["user", "agent"]);
 export type ThreadOrigin = z.infer<typeof ThreadOrigin>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */
-export const ThreadActivity = z.enum(["idle", "working", "needs-you"]);
+export const ThreadActivity = z.enum(["idle", "working", "needs-you", "snoozed"]);
 export type ThreadActivity = z.infer<typeof ThreadActivity>;
 
 export const ThreadView = z.object({
@@ -182,12 +244,16 @@ export const ThreadView = z.object({
   parentId: ThreadId.nullable().default(null),
   /** When the agent asked to be woken next (`wake_me`); null when it didn't. */
   wakeAt: z.iso.datetime().nullable().default(null),
-  /** `needs-you` when it has an open item, else `working` while a turn runs or prompts wait. */
+  /**
+   * `needs-you` when it has an open item that isn't snoozed; `snoozed` when it has open items and
+   * all of them are (it waits on you, later); else `working` while a turn runs or prompts wait.
+   */
   activity: ThreadActivity,
   /** A turn is running or a prompt is waiting to be sent. */
   working: z.boolean(),
   /** Prompts waiting for the running turn to end. */
   queued: z.number().int().nonnegative(),
+  /** Open items, snoozed ones included. */
   openItems: z.number().int().nonnegative(),
   /** The sequence number of the thread's latest event, 0 before the first. */
   lastSeq: z.number().int().nonnegative(),

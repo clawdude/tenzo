@@ -195,6 +195,14 @@ describe("openDatabase", () => {
     expect(db.prepare("SELECT wake, origin, parent_id FROM threads").all()).toEqual([
       { wake: null, origin: "user", parent_id: null },
     ]);
+    // Children are counted by parent, landed threads found by event type.
+    expect(
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND name IN ('threads_by_parent', 'events_by_type') ORDER BY name",
+        )
+        .all(),
+    ).toEqual([{ name: "events_by_type" }, { name: "threads_by_parent" }]);
     db.close();
   });
 

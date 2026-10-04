@@ -20,15 +20,17 @@ export function suggestedDecision(item: QueueItem): "allow" | "deny" {
 
 /**
  * The answer that taking every suggestion sends: each question's `suggestedOption`, the
- * `suggestedDecision` on a permission request, Build it on a proposal, Merge on finished work
- * and on a ready PR. Null when some question has no options, so there is nothing to send with
- * one tap.
+ * `suggestedDecision` on a permission request, Build it on a proposal, Done on finished work,
+ * Retry on an error. Null when some question has no options, so there is nothing to send with
+ * one tap, and on a ready PR. Merge is the filled button on finished work and a ready PR, but
+ * never what one tap on everything sends: landing is a decision of its own.
  */
 export function suggestedAnswer(item: QueueItem): ItemAnswer | null {
   if (item.kind === "permission") return { kind: "permission", decision: suggestedDecision(item) };
   if (item.kind === "proposal") return { kind: "proposal", decision: "build" };
-  if (item.kind === "finished") return { kind: "finished", decision: "merge" };
-  if (item.kind === "ready") return { kind: "ready", decision: "merge" };
+  if (item.kind === "finished") return { kind: "finished", decision: "done" };
+  if (item.kind === "error") return { kind: "error", action: "retry" };
+  if (item.kind === "ready") return null;
   const answers: Record<string, string> = {};
   for (const question of item.questions) {
     const option = suggestedOption(question.options);

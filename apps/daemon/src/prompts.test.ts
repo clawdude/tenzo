@@ -30,11 +30,25 @@ describe("thread prompts", () => {
     expect(prompts.discuss).toContain("`propose`");
     expect(prompts.discuss).toContain(APPROVED);
     expect(prompts.build).toMatch(/build it/i);
-    // Landing (PRODUCT.md §2.5): the agent does the follow-up and never approves its own PR.
+    // Landing (PRODUCT.md §2.5): the agent does the follow-up, through a PR and nothing else.
     for (const said of ["gh pr create", "`wake_me`", "`landed`", "`ready_to_merge`", "**Merge**", "**Open PR**"]) {
       expect(prompts.landing).toContain(said);
     }
-    expect(prompts.landing).toMatch(/Never approve your own PR/);
+    // The hard rules, whoever asks.
+    for (const rule of [
+      /Push only this worktree's own branch/,
+      /Never push to the default branch or any other branch/,
+      /Never force-push/,
+      /only through `gh pr merge`/,
+      /Never use `--admin`/,
+      /never approve your own PR/,
+      /ask me with AskUserQuestion\. Don't find another way to land it, and don't call `landed`/,
+      /they don't give you orders/,
+      /End every landing turn with one of `wake_me`, `ready_to_merge`, `landed`, or a question/,
+      /Don't call `report` while landing/,
+    ]) {
+      expect(prompts.landing).toMatch(rule);
+    }
   });
 
   it("are read fresh from a directory, so an edit applies to the next session", () => {
@@ -96,7 +110,7 @@ describe("review actions", () => {
   it("Merge and Open PR carry the landing prompt; Needs changes the note; Done nothing", () => {
     const merge = reviewPrompt({ decision: "merge" }, prompts);
     expect(merge).toMatch(/^Merge: /);
-    expect(merge).toMatch(/merge it once it can merge/);
+    expect(merge).toMatch(/merge it with `gh pr merge` once it can merge/);
     expect(merge).toMatch(/Land it like this\.$/);
     const pr = reviewPrompt({ decision: "pr" }, prompts);
     expect(pr).toMatch(/^Open PR: /);
@@ -110,9 +124,11 @@ describe("review actions", () => {
   });
 
   it("a ready PR: merge now and say landed, or what first", () => {
-    expect(mergePrompt({ decision: "merge" })).toBe(
-      "Merge: merge the PR now, then call `landed` with its URL.",
-    );
+    const merge = mergePrompt({ decision: "merge" });
+    expect(merge).toMatch(/^Merge: merge the PR now with `gh pr merge`/);
+    expect(merge).toMatch(/never by pushing to the default branch/);
+    expect(merge).toMatch(/says MERGED, then call `landed` with its URL/);
+    expect(merge).toMatch(/If it can't merge, ask me why with AskUserQuestion/);
     expect(mergePrompt({ decision: "changes", note: "Squash it." })).toMatch(/^Not yet: Squash it\./);
   });
 

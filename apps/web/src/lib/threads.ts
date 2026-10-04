@@ -1,4 +1,4 @@
-import type { QueueItem, ThreadView } from '@tenzo/client-runtime';
+import { isSnoozed, type QueueItem, type ThreadView } from '@tenzo/client-runtime';
 
 /**
  * The Threads list's logic: which group each thread is in and the one word that says how it is.
@@ -52,7 +52,7 @@ export function groupThreads(
 	};
 	for (const thread of threads) {
 		const row = rowOf(thread, items, now);
-		rows[groupOf(thread, now)].push(row);
+		rows[groupOf(thread, now, items)].push(row);
 	}
 	for (const key of ['today', 'earlier'] as const) {
 		rows[key].sort((a, b) => Date.parse(b.thread.activeAt) - Date.parse(a.thread.activeAt));
@@ -64,11 +64,28 @@ export function groupThreads(
 	}));
 }
 
-export function groupOf(thread: ThreadView, now: number): GroupKey {
-	if (thread.activity === 'needs-you') return 'needs-you';
+export function groupOf(
+	thread: ThreadView,
+	now: number,
+	items: readonly QueueItem[] = []
+): GroupKey {
+	if (waitsOn(thread, items) === 'now') return 'needs-you';
 	if (thread.phase === 'landing') return 'landing';
 	if (thread.activity === 'working') return 'working';
 	return sameDay(Date.parse(thread.activeAt), now) ? 'today' : 'earlier';
+}
+
+/**
+ * Whether the thread waits on you: `now` (an open item that isn't snoozed), `later` (only
+ * snoozed ones), or not at all. By its items as the daemon has them; by the thread's own word
+ * when its items aren't here.
+ */
+function waitsOn(thread: ThreadView, items: readonly QueueItem[]): 'now' | 'later' | null {
+	const mine = items.filter((i) => i.threadId === thread.id);
+	if (mine.length === 0) {
+		return thread.activity === 'needs-you' ? 'now' : thread.activity === 'snoozed' ? 'later' : null;
+	}
+	return mine.some((i) => !isSnoozed(i)) ? 'now' : 'later';
 }
 
 /** What a thread needing you is waiting for, in a word. */
@@ -77,19 +94,23 @@ const ASKS: Record<QueueItem['kind'], string> = {
 	permission: 'allow?',
 	proposal: 'build?',
 	finished: 'review',
+	error: 'failed',
 	ready: 'merge?'
 };
 
 /**
- * The thread's dot and word: what it waits for (asking, allow?, build?, review, merge?), what
- * it is doing (discussing, building, landing), when a landing thread looks again (in 12m), done,
- * or new (never started).
+ * The thread's dot and word: what it waits for (asking, allow?, build?, review, failed,
+ * merge?), snoozed, what it is doing (discussing, building, landing), when a landing thread
+ * looks again (in 12m), done, or new (never started). A failed turn is an error item, so a
+ * thread whose last turn failed never reads "done".
  */
 export function rowOf(thread: ThreadView, items: readonly QueueItem[], now = Date.now()): Row {
-	if (thread.activity === 'needs-you') {
-		const first = items.find((i) => i.threadId === thread.id);
+	const waits = waitsOn(thread, items);
+	if (waits === 'now') {
+		const first = items.find((i) => i.threadId === thread.id && !isSnoozed(i));
 		return { thread, tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
 	}
+	if (waits === 'later') return { thread, tone: 'quiet', word: 'snoozed' };
 	if (thread.activity === 'working') return { thread, tone: 'working', word: thread.phase };
 	if (thread.phase === 'landing') {
 		// Waiting on CI and reviewers: grey, with when it looks again if it said.
@@ -97,7 +118,6 @@ export function rowOf(thread: ThreadView, items: readonly QueueItem[], now = Dat
 		return { thread, tone: 'quiet', word };
 	}
 	if (thread.lastSeq === 0) return { thread, tone: 'quiet', word: 'new' };
-	// Idle after a failed turn reads "done" too, until failures become items of their own (M2).
 	return { thread, tone: 'done', word: 'done' };
 }
 

@@ -84,18 +84,25 @@ export function reviewPrompt(
     case "changes":
       return `Needs changes: ${answer.note ?? ""}\n\nMake the change, run the checks, commit, and \`report\` again.`;
     case "merge":
-      return `Merge: land this work. Open the PR, see it through CI and review, and merge it once it can merge.\n\n${prompts.landing}`;
+      return `Merge: land this work through a PR. Open it, see it through CI and review, and merge it with \`gh pr merge\` once it can merge.\n\n${prompts.landing}`;
     case "pr":
       return `Open PR: open the PR and see it through CI and review, but don't merge it. Tell me with \`ready_to_merge\` once it can merge.\n\n${prompts.landing}`;
   }
 }
 
-/** The message your answer to a ready PR sends the agent. */
+/**
+ * The message your answer to a ready PR sends the agent. Merge restates how: it is the turn
+ * where an agent with no PR at hand is likeliest to find another way.
+ */
 export function mergePrompt(answer: { decision: MergeDecision; note?: string | undefined }): string {
   return answer.decision === "merge"
-    ? "Merge: merge the PR now, then call `landed` with its URL."
+    ? "Merge: merge the PR now with `gh pr merge` (never by pushing to the default branch), check that `gh pr view` says MERGED, then call `landed` with its URL. If it can't merge, ask me why with AskUserQuestion."
     : `Not yet: ${answer.note ?? ""}\n\nSee to it, and call \`ready_to_merge\` again once it can merge.`;
 }
+
+/** What Retry on a stalled landing card sends: the turn ended with nothing to come. */
+export const STALLED_PROMPT =
+  "You're landing, and your last turn ended without `wake_me`, `ready_to_merge`, `landed` or a question to me, so nothing reaches my phone and nothing happens next. Look at where the PR stands, keep to the landing rules, and end this turn with one of those.";
 
 /** The turn a wake sends (`wake_me`). */
 export function wakePrompt(why: string): string {

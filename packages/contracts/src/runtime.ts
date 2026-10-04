@@ -352,7 +352,22 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
   z.object({
     ...base,
     type: z.literal("thread.landed"),
-    payload: z.object({ url: WebUrl.optional(), summary: z.string().optional() }),
+    payload: z.object({ url: WebUrl, summary: z.string().optional() }),
+  }),
+  /**
+   * Recorded by the daemon: landing needs you. `stalled`: a landing turn ended with no wake,
+   * no card and no `landed`, so nothing would ever happen. `unarchived`: the agent landed, but
+   * the thread couldn't be archived (work left over, or a message you sent meanwhile). It
+   * opens an error card whose Retry sends `prompts`.
+   */
+  z.object({
+    ...base,
+    type: z.literal("landing.stuck"),
+    payload: z.object({
+      cause: z.enum(["stalled", "unarchived"]),
+      message: z.string(),
+      prompts: z.array(z.string()),
+    }),
   }),
   /**
    * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.
@@ -369,6 +384,38 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     payload: z.object({
       message: z.string(),
       detail: z.unknown().optional(),
+      /** The agent couldn't be started: the prompts that were waiting for it, now dropped. */
+      unsent: z.array(z.string()).optional(),
+    }),
+  }),
+  /**
+   * Recorded by the daemon: you swiped the item away until `until`. The item is the one opened
+   * for `requestId`. Its thread doesn't need you meanwhile.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("item.snoozed"),
+    payload: z.object({ until: z.iso.datetime() }),
+  }),
+  /** Recorded by the daemon: the snoozed item is back, because its time came or you undid it. */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("item.unsnoozed"),
+    payload: z.object({ reason: z.enum(["returned", "undo"]) }),
+  }),
+  /**
+   * Recorded by the daemon: you answered an error item. `retry` sends what failed again, `tell`
+   * sends `text`; either is queued as the thread's next prompt.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("error.resolved"),
+    payload: z.object({
+      action: z.enum(["retry", "tell"]),
+      text: z.string().optional(),
     }),
   }),
 ]);

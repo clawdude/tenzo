@@ -20,7 +20,6 @@ import type {
 import { liveBase, WebUrl } from "@tenzo/contracts";
 import { MAX_ATTACHMENTS, takeAttachment } from "../attachments.ts";
 import { TenzoError } from "../errors.ts";
-import { hasChanges } from "../git.ts";
 import { randomId } from "../ids.ts";
 import {
   checkListener,
@@ -95,9 +94,6 @@ export interface ClaudeAdapterOptions {
 
 /** Every filesystem setting source, as the `claude` CLI itself loads them. */
 export const SETTING_SOURCES = ["user", "project", "local"] as const;
-
-/** Threads one session may start with `start_thread`: enough for real work, not a runaway loop. */
-export const MAX_STARTED_THREADS = 10;
 
 /** How long `stop` waits for Claude to exit by itself before closing it. */
 const STOP_GRACE_MS = 5000;
@@ -267,9 +263,16 @@ function startSession(
    */
   let attached = input.pendingAttachments ?? 0;
   const report = async (raw: ReportInput): Promise<ToolReply> => {
-    if (phaseNow() === "discussing") {
+    const now = phaseNow();
+    if (now === "discussing") {
       return {
         text: "Nothing to report yet: propose first, and report once the approved work is built.",
+        isError: true,
+      };
+    }
+    if (now === "landing") {
+      return {
+        text: "Don't report while landing: the work was reviewed already. End the turn with wake_me, ready_to_merge, landed, or a question.",
         isError: true,
       };
     }
@@ -344,7 +347,11 @@ function startSession(
     };
   };
 
-  /** `landed`: the PR is merged; the daemon archives the thread once the turn ends. */
+  /**
+   * `landed`: the PR is merged, and the daemon archives the thread once the turn ends. Believed
+   * only when git agrees (`SessionHost.checkLanded`): an archived thread drops off the list, so
+   * unmerged work must never get there on the agent's word.
+   */
   const landed = (raw: LandedInput): Promise<ToolReply> =>
     toolCall(async () => {
       if (phaseNow() !== "landing") {
@@ -352,32 +359,24 @@ function startSession(
           "Nothing has landed yet: call landed once the PR is merged, after the person chose Merge or Open PR.",
         );
       }
-      const given = raw.url?.trim();
-      const url = given ? WebUrl.safeParse(given) : undefined;
-      if (url && !url.success) throw new TenzoError("The PR's URL must be an http(s) link.");
-      if (await hasChanges(input.cwd)) {
-        throw new TenzoError(
-          "The worktree has uncommitted changes, and archiving removes it. Commit them or delete them, then call landed again.",
-        );
-      }
+      const url = WebUrl.safeParse(raw.url.trim());
+      if (!url.success) throw new TenzoError("The merged PR's URL must be an http(s) link.");
+      if (!input.host) throw new TenzoError("Tenzo can't check this thread's merge.");
+      await input.host.checkLanded();
       const summary = raw.summary?.trim();
       emit({
         type: "thread.landed",
         ...inTurn(),
-        payload: { ...(url ? { url: url.data } : {}), ...(summary ? { summary } : {}) },
+        payload: { url: url.data, ...(summary ? { summary } : {}) },
       });
       return "Landed. Tenzo archives this thread when your turn ends: end it now with one line.";
     });
 
-  /** `start_thread`: a new thread through the daemon's ordinary create, a few per session. */
-  let started = 0;
+  /** `start_thread`: a new thread through the daemon's ordinary create (limits: engine.ts). */
   const startThread = (raw: StartThreadInput): Promise<ToolReply> =>
     toolCall(async () => {
       const daemon = input.host;
       if (!daemon) throw new TenzoError("This thread can't start threads.");
-      if (started >= MAX_STARTED_THREADS) {
-        throw new TenzoError(`A session starts at most ${MAX_STARTED_THREADS} threads.`);
-      }
       const project = raw.project?.trim();
       const title = raw.title?.trim();
       const thread = await daemon.startThread({
@@ -385,7 +384,6 @@ function startSession(
         ...(project ? { project } : {}),
         ...(title ? { title } : {}),
       });
-      started++;
       return `Started ${thread.id} ("${thread.title}") in ${thread.projectName}, on ${thread.branch}. It talks to the person on its own; you won't hear from it.`;
     });
 

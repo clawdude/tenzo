@@ -1,4 +1,5 @@
 import {
+	isSnoozed,
 	type ItemAnswer,
 	type QueueItem,
 	suggestedDecision,
@@ -19,17 +20,61 @@ export function pileEdges(waiting: number): number {
 }
 
 /**
- * The pile, top card first: the quick lane (the agent is stuck waiting) before the review lane
- * (finished work), oldest first within each, so the card in front stays put while new ones
- * arrive behind it. The one place lane order is decided. Items being answered here
- * (`leaving`) are already off the pile: their card is lifting away.
+ * The lanes in the order the Pass serves them: the agent stuck waiting on you (quick) before
+ * finished work waiting for a look (review). A lane not listed here goes last. With
+ * `byLaneThenAge`, the one place lane order is decided.
  */
-export function pileOf(items: readonly QueueItem[], leaving: ReadonlySet<string>): QueueItem[] {
-	const waiting = items.filter((item) => !leaving.has(item.id));
-	return [
-		...waiting.filter((item) => item.lane === 'quick'),
-		...waiting.filter((item) => item.lane !== 'quick')
-	];
+export const LANES: readonly QueueItem['lane'][] = ['quick', 'review'];
+
+/** The pile's order: by lane (`LANES`), then oldest first. Equal ones keep their order. */
+export function byLaneThenAge(a: QueueItem, b: QueueItem): number {
+	return laneRank(a.lane) - laneRank(b.lane) || Date.parse(a.createdAt) - Date.parse(b.createdAt);
+}
+
+function laneRank(lane: QueueItem['lane']): number {
+	const rank = LANES.indexOf(lane);
+	return rank === -1 ? LANES.length : rank;
+}
+
+export interface PileOptions {
+	/** Cards already off the pile: answered or swiped here, lifting or flying away. */
+	leaving?: ReadonlySet<string>;
+	/**
+	 * The card to keep in front while it is still waiting, whatever comes in: the one being read
+	 * stays put while new ones (even quick-lane ones) and returning snoozed ones go behind it.
+	 * Also how Undo brings a card back to the front.
+	 */
+	front?: string | null;
+}
+
+/**
+ * The pile, top card first: `front` if it is waiting, then by lane and age (`byLaneThenAge`).
+ * Snoozed items are off it until the daemon wakes them, whatever this device's clock says.
+ */
+export function pileOf(
+	items: readonly QueueItem[],
+	{ leaving = new Set(), front = null }: PileOptions = {}
+): QueueItem[] {
+	const pile = items
+		.filter((item) => !leaving.has(item.id) && !isSnoozed(item))
+		.sort(byLaneThenAge);
+	const kept = front === null ? -1 : pile.findIndex((item) => item.id === front);
+	if (kept > 0) pile.unshift(...pile.splice(kept, 1));
+	return pile;
+}
+
+/**
+ * Whole minutes until `iso`, at least 1: a snooze is never "back in 0 min". `daemonNow` is the
+ * daemon's clock (this device's plus `clockOffset`): `iso` is a time the daemon set.
+ */
+export function minutesUntil(iso: string, daemonNow: number): number {
+	return Math.max(1, Math.ceil((Date.parse(iso) - daemonNow) / 60_000));
+}
+
+/** The snooze toast's words: "Refresh tokens · back in 15 min". */
+export function snoozedLabel(title: string, until: string, daemonNow: number): string {
+	const back = `back in ${minutesUntil(until, daemonNow)} min`;
+	return title ? `${title} · ${back}` : `Snoozed · ${back}`;
 }
 
 /** One button's worth of answer: what it says, and the value it sends. */
@@ -97,6 +142,20 @@ export function stepsOf(item: QueueItem): Step[] {
 			}
 		];
 	}
+	if (item.kind === 'error') {
+		return [
+			{
+				key: 'error',
+				ask: item.ask,
+				// Trying again is what an error card is for, as Build it is a proposal's.
+				suggested: { label: 'Retry', value: 'retry', description: '' },
+				recommended: false,
+				others: [{ label: 'Archive', value: 'archive', description: '' }],
+				row: [],
+				placeholder: 'Tell it something'
+			}
+		];
+	}
 	if (item.kind === 'proposal') {
 		return [
 			{
@@ -146,8 +205,8 @@ export function stepsOf(item: QueueItem): Step[] {
 /**
  * The answer to send once every step has a pick, one pick per step in order. A button sends its
  * own `value` (so what it says is what goes); words go as they are. On a permission request,
- * words are a Deny with the reason; on a proposal, what to change; on finished work, what needs
- * changing; on a ready PR, what to do before merging.
+ * words are a Deny with the reason; on a proposal, what to change; on an error, what to tell
+ * it; on finished work, what needs changing; on a ready PR, what to do before merging.
  */
 export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 	if (item.kind === 'finished') {
@@ -162,6 +221,12 @@ export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 		if (!pick) throw new Error('A ready PR needs a decision.');
 		if ('text' in pick) return { kind: 'ready', decision: 'changes', note: pick.text.trim() };
 		return { kind: 'ready', decision: 'merge' };
+	}
+	if (item.kind === 'error') {
+		const pick = picks[0];
+		if (!pick) throw new Error('An error needs a decision.');
+		if ('text' in pick) return { kind: 'error', action: 'tell', text: pick.text.trim() };
+		return { kind: 'error', action: pick.choice.value === 'archive' ? 'archive' : 'retry' };
 	}
 	if (item.kind === 'proposal') {
 		const pick = picks[0];
