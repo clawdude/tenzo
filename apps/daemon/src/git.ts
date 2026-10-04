@@ -130,6 +130,25 @@ export async function addWorktree(
   await git(root, ["worktree", "add", "--no-track", "-b", branch, "--", path, base]);
 }
 
+/**
+ * Whether everything the worktree's HEAD changes is already in `origin/<branch>`, by git alone:
+ * after fetching it, merging HEAD into it would change nothing (its merge with HEAD has the same
+ * tree as it has). Unlike asking whether HEAD is an ancestor, this holds after a squash or
+ * rebase merge too. A conflict (the branch has since changed the same lines) counts as not
+ * landed. Throws a TenzoError when there is no origin to fetch from.
+ */
+export async function landedOn(path: string, branch: string): Promise<boolean> {
+  const remote = `refs/remotes/origin/${branch}`;
+  const fetched = await runGit(path, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`]);
+  if (fetched.code !== 0) {
+    throw new TenzoError(`Couldn't fetch ${branch} from origin: ${fetched.stderr.trim() || "no output"}`);
+  }
+  const merged = await runGit(path, ["merge-tree", "--write-tree", remote, "HEAD"]);
+  if (merged.code !== 0) return false; // 1: conflicts; anything else: can't tell, so not landed
+  const tree = merged.stdout.split("\n")[0]?.trim();
+  return tree !== undefined && tree === (await git(path, ["rev-parse", `${remote}^{tree}`]));
+}
+
 /** True when the worktree at `path` has uncommitted or untracked changes. */
 export async function hasChanges(path: string): Promise<boolean> {
   return (await git(path, ["status", "--porcelain"])) !== "";

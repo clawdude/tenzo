@@ -711,8 +711,12 @@ describe("foldEvent: finished work", () => {
       lane: "review",
       ask: "Counter works",
       context: "All done.",
-      options: [{ label: "Done", value: "done", recommended: true }],
-      suggested: "done",
+      options: [
+        { label: "Merge", value: "merge", recommended: true },
+        { label: "Open PR", value: "pr", recommended: false },
+        { label: "Done", value: "done", recommended: false },
+      ],
+      suggested: "merge",
       finished: {
         headline: "Counter works",
         summary: "Added the counter.",
@@ -745,7 +749,7 @@ describe("foldEvent: finished work", () => {
     const exitedAfter = fold(started(), turnStarted(), reported(), completed(), exited("graceful"));
     expect(exitedAfter.state.open).toMatchObject([{ kind: "finished", detached: false }]);
     expect(exitedAfter.items).toHaveLength(1);
-    const { items, state } = fold(started(), turnStarted(), reported(), exited(), done());
+    const { items, state } = fold(started(), turnStarted(), reported(), completed(), exited(), done());
     expect(state.open).toEqual([]);
     expect(items[0]?.resolution).toEqual({ kind: "done" });
   });
@@ -789,5 +793,188 @@ describe("foldEvent: finished work", () => {
     for (const event of log) state = foldEvent(state, event, ENV).state;
     expect(state).toEqual(whole.state);
     expect(state.runtime.attachments.map((a) => a.name)).toEqual(["shot2.png"]);
+  });
+});
+
+describe("foldEvent: review actions and landing", () => {
+  const PR = "https://github.com/o/r/pull/12";
+  const built = () => [
+    started(),
+    turnStarted(),
+    proposed(REQ3),
+    proposalAnswered("build", undefined, REQ3),
+    ev({
+      type: "report.submitted",
+      turnId: TURN,
+      requestId: REQ1,
+      payload: { summary: "Added it.", howToTest: "", checks: [] },
+    }),
+    completed(),
+  ];
+  const reviewed = (decision: string, note?: string) =>
+    ev({
+      type: "report.resolved",
+      requestId: REQ1,
+      payload: { decision, ...(note ? { note } : {}) },
+    });
+  const ready = (requestId = REQ2, headline?: string) =>
+    ev({
+      type: "merge.ready",
+      turnId: TURN2,
+      requestId,
+      payload: { url: PR, summary: "Checks green.", ...(headline ? { headline } : {}) },
+    });
+  const merged = (decision: string, note?: string, requestId = REQ2) =>
+    ev({
+      type: "merge.resolved",
+      requestId,
+      payload: { decision, ...(note ? { note } : {}) },
+    });
+
+  it("Merge and Open PR send the thread landing; Needs changes back to building; Done leaves it", () => {
+    const after = (decision: string, note?: string) => {
+      const { state, items } = fold(...built(), reviewed(decision, note));
+      const finished = items.find((i) => i.kind === "finished");
+      return { phase: state.runtime.phase, resolution: finished?.resolution, open: state.open };
+    };
+    expect(after("merge")).toEqual({ phase: "landing", resolution: { kind: "merge" }, open: [] });
+    expect(after("pr")).toEqual({ phase: "landing", resolution: { kind: "pr" }, open: [] });
+    expect(after("changes", "Bigger")).toEqual({
+      phase: "building",
+      resolution: { kind: "changes", note: "Bigger" },
+      open: [],
+    });
+    expect(after("done")).toMatchObject({ phase: "review", resolution: { kind: "done" } });
+  });
+
+  it("Needs changes round-trips: the next report is a new finished card, in review again", () => {
+    const REQ4 = "req_dddddddddddddddddddd" as RequestId;
+    const { state, items } = fold(
+      ...built(),
+      reviewed("changes", "Bigger"),
+      turnStarted(TURN2),
+      ev({
+        type: "report.submitted",
+        turnId: TURN2,
+        requestId: REQ4,
+        payload: { summary: "Bigger now.", howToTest: "", checks: [] },
+      }),
+    );
+    expect(state.runtime.phase).toBe("review");
+    expect(state.open).toMatchObject([{ kind: "finished", requestId: REQ4, suggested: "merge" }]);
+    expect(items.filter((i) => i.kind === "finished").map((i) => i.status)).toEqual([
+      "resolved",
+      "open",
+    ]);
+  });
+
+  it("a ready PR is a quick-lane card with Merge that never detaches; a newer one replaces it", () => {
+    const { state, items } = fold(
+      ...built(),
+      reviewed("pr"),
+      turnStarted(TURN2),
+      said("CI is green."),
+      ready(REQ2, "PR #12 can merge"),
+      exited(),
+    );
+    const item = items.find((i) => i.kind === "ready");
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      lane: "quick",
+      kind: "ready",
+      ask: "PR #12 can merge",
+      context: "CI is green.",
+      options: [{ label: "Merge", value: "merge", recommended: true }],
+      suggested: "merge",
+      ready: { url: PR, summary: "Checks green." },
+      detached: false,
+    });
+    expect(state.runtime.phase).toBe("landing");
+
+    const REQ5 = "req_eeeeeeeeeeeeeeeeeeee" as RequestId;
+    const again = fold(...built(), reviewed("pr"), ready(REQ2), ready(REQ5));
+    expect(
+      again.items.filter((i) => i.kind === "ready").map((i) => i.resolution?.kind ?? null),
+    ).toEqual(["superseded", null]);
+    expect(fold(...built(), reviewed("pr"), ready(REQ2)).items.at(-1)?.ask).toBe("Ready to merge");
+  });
+
+  it("Merge or what first resolves the ready card; the thread stays landing", () => {
+    const merge = fold(...built(), reviewed("pr"), ready(), merged("merge"));
+    expect(merge.state.open).toEqual([]);
+    expect(merge.items.at(-1)?.resolution).toEqual({ kind: "merge" });
+    expect(merge.state.runtime.phase).toBe("landing");
+    const first = fold(...built(), reviewed("pr"), ready(), merged("changes", "Squash it"));
+    expect(first.items.at(-1)?.resolution).toEqual({ kind: "changes", note: "Squash it" });
+  });
+
+  it("keeps the wake asked for until it fires, the last one asked winning; archiving drops it", () => {
+    const at = "2026-10-02T13:00:00.000Z";
+    const later = "2026-10-02T14:00:00.000Z";
+    const wake = (when: string, why: string) =>
+      ev({ type: "wake.scheduled", turnId: TURN, payload: { at: when, why } });
+    const twice = fold(started(), wake(at, "Check CI"), wake(later, "Check reviews"));
+    expect(twice.state.runtime.wake).toEqual({ at: later, why: "Check reviews" });
+    const fired = fold(
+      started(),
+      wake(at, "Check CI"),
+      ev({ type: "wake.fired", payload: { why: "Check CI" } }),
+    );
+    expect(fired.state.runtime.wake).toBeNull();
+    const archived = fold(
+      started(),
+      wake(at, "Check CI"),
+      ev({ type: "thread.archived", payload: {} }),
+    );
+    expect(archived.state.runtime.wake).toBeNull();
+  });
+
+  it("a report while landing doesn't undo Merge: the thread stays landing", () => {
+    const REQ4 = "req_dddddddddddddddddddd" as RequestId;
+    const { state } = fold(
+      ...built(),
+      reviewed("merge"),
+      turnStarted(TURN2),
+      ev({
+        type: "report.submitted",
+        turnId: TURN2,
+        requestId: REQ4,
+        payload: { summary: "Again.", howToTest: "", checks: [] },
+      }),
+    );
+    expect(state.runtime.phase).toBe("landing");
+  });
+
+  it("landing.stuck opens one landing error card; a newer one replaces it; our next turn clears it", () => {
+    const stuck = (cause: string, message: string) =>
+      ev({ type: "landing.stuck", payload: { cause, message, prompts: [`Do: ${message}`] } });
+    const { state, items } = fold(
+      ...built(),
+      reviewed("merge"),
+      stuck("stalled", "nothing to come"),
+      stuck("unarchived", "work left over"),
+    );
+    expect(state.open).toMatchObject([
+      {
+        kind: "error",
+        lane: "quick",
+        ask: "Landed, but not archived",
+        suggested: "retry",
+        error: { cause: "unarchived", message: "work left over", prompts: ["Do: work left over"] },
+      },
+    ]);
+    expect(items.find((i) => i.error?.cause === "stalled")?.resolution).toEqual({ kind: "superseded" });
+    const next = fold(...built(), reviewed("merge"), stuck("stalled", "x"), turnStarted(TURN2));
+    expect(next.state.open).toEqual([]);
+  });
+
+  it("landed changes nothing by itself: the daemon archives the thread", () => {
+    const before = fold(...built(), reviewed("merge"));
+    const after = fold(
+      ...built(),
+      reviewed("merge"),
+      ev({ type: "thread.landed", payload: { url: PR } }),
+    );
+    expect(after.state).toEqual(before.state);
   });
 });

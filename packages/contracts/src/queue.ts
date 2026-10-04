@@ -4,6 +4,7 @@ import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
   AgentKind,
   Fingerprint,
+  MergeDecision,
   RequestId,
   ReviewDecision,
   RuntimeEvent,
@@ -12,6 +13,7 @@ import {
   UserInputAnswers,
   UserInputOption,
   UserInputQuestion,
+  WebUrl,
 } from "./runtime.ts";
 
 /**
@@ -33,9 +35,17 @@ export type Lane = z.infer<typeof Lane>;
 /**
  * `finished`: work the agent reported (review lane). `error`: a turn failed, or the agent
  * crashed mid-turn; the daemon makes these from the log, no agent asked. Retry, tell it
- * something, or archive the thread.
+ * something, or archive the thread. `ready`: a PR the agent opened can merge (after Open PR);
+ * Merge, or say what first.
  */
-export const QueueItemKind = z.enum(["question", "permission", "proposal", "finished", "error"]);
+export const QueueItemKind = z.enum([
+  "question",
+  "permission",
+  "proposal",
+  "finished",
+  "error",
+  "ready",
+]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
 /** How an item left the queue. */
@@ -53,6 +63,12 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("dismissed") }),
   /** Finished work you marked done. */
   z.object({ kind: z.literal("done") }),
+  /** Finished work, or a ready PR, you said to merge: the agent lands it. */
+  z.object({ kind: z.literal("merge") }),
+  /** Finished work you said to open a PR for: the thread is landing. */
+  z.object({ kind: z.literal("pr") }),
+  /** Finished work, or a ready PR, sent back with a note: what needs changing first. */
+  z.object({ kind: z.literal("changes"), note: z.string() }),
   /** Finished work the agent reported again: the newer report replaces it. */
   z.object({ kind: z.literal("superseded") }),
   /** An error you said to retry: what failed went again. */
@@ -66,11 +82,18 @@ export type QueueItemResolution = z.infer<typeof QueueItemResolution>;
 
 /** What an error item knows about what went wrong. */
 export const ItemError = z.object({
-  /** `turn`: the turn ended failed. `crash`: the agent stopped mid-turn. `start`: it never started. */
-  cause: z.enum(["turn", "crash", "start"]),
+  /**
+   * `turn`: the turn ended failed. `crash`: the agent stopped mid-turn. `start`: it never started.
+   * `stalled`: a landing turn ended with nothing on the Pass and no wake. `unarchived`: the agent
+   * said it landed, but the thread couldn't be archived (`landing.stuck`, engine.ts).
+   */
+  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived"]),
   /** The agent's or the daemon's own words for it, cut to size. */
   message: z.string(),
-  /** What Retry sends again, in order: the failed turn's prompt, or the prompts never sent. */
+  /**
+   * What Retry sends, in order: the failed turn's prompt, the prompts never sent, or for a
+   * landing card what to tell the agent.
+   */
   prompts: z.array(z.string()),
 });
 export type ItemError = z.infer<typeof ItemError>;
@@ -108,6 +131,8 @@ export const QueueItem = z.object({
   proposal: z.object({ headline: z.string(), summary: z.string() }).optional(),
   /** A finished item (review lane): the handoff note, checks, screenshots and live URL. */
   finished: Finished.optional(),
+  /** A ready item (quick lane): the PR and its state. `ask` is the headline. */
+  ready: z.object({ url: WebUrl, summary: z.string() }).optional(),
   /** An error item: what went wrong (`ask` says it in a few words), and what Retry sends. */
   error: ItemError.optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
@@ -160,7 +185,18 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     decision: z.enum(["build", "change"]),
     note: z.string().optional(),
   }),
-  z.object({ kind: z.literal("finished"), decision: ReviewDecision }),
+  z.object({
+    kind: z.literal("finished"),
+    decision: ReviewDecision,
+    /** Needs changes: what to change. */
+    note: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("ready"),
+    /** Merge it, or not yet: then `note` says what first. */
+    decision: MergeDecision,
+    note: z.string().optional(),
+  }),
   z.object({
     kind: z.literal("error"),
     /** Send what failed again; send `text` instead (tell it something); archive the thread. */
@@ -173,10 +209,16 @@ export type ItemAnswer = z.infer<typeof ItemAnswer>;
 /**
  * Where a thread is in its flow (PRODUCT.md §4). It starts `discussing`: the agent reads, asks
  * and proposes, and changes nothing. *Build it* on its proposal makes it `building`. The agent's
- * `report` makes it `review`: finished work waits for you. Landing comes with #21.
+ * `report` makes it `review`: finished work waits for you. Merge or Open PR makes it `landing`:
+ * pushed and waiting on the outside world (CI, reviewers); Needs changes, `building` again. A
+ * landed thread is archived.
  */
-export const ThreadPhase = z.enum(["discussing", "building", "review"]);
+export const ThreadPhase = z.enum(["discussing", "building", "review", "landing"]);
 export type ThreadPhase = z.infer<typeof ThreadPhase>;
+
+/** Who started a thread: you, or another thread's agent (`start_thread`). */
+export const ThreadOrigin = z.enum(["user", "agent"]);
+export type ThreadOrigin = z.infer<typeof ThreadOrigin>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */
 export const ThreadActivity = z.enum(["idle", "working", "needs-you", "snoozed"]);
@@ -197,6 +239,11 @@ export const ThreadView = z.object({
   updatedAt: z.iso.datetime(),
   archivedAt: z.iso.datetime().nullable(),
   phase: ThreadPhase,
+  origin: ThreadOrigin.default("user"),
+  /** The thread whose agent started this one (origin `agent`). */
+  parentId: ThreadId.nullable().default(null),
+  /** When the agent asked to be woken next (`wake_me`); null when it didn't. */
+  wakeAt: z.iso.datetime().nullable().default(null),
   /**
    * `needs-you` when it has an open item that isn't snoozed; `snoozed` when it has open items and
    * all of them are (it waits on you, later); else `working` while a turn runs or prompts wait.

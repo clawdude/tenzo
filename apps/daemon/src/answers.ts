@@ -32,7 +32,8 @@ const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
   question: { name: "a question", answer: "an answer to each question" },
   permission: { name: "a permission request", answer: "allow or deny" },
   proposal: { name: "a proposal", answer: "build, or what to change" },
-  finished: { name: "finished work", answer: "done" },
+  finished: { name: "finished work", answer: "merge, pr, done, or what needs changing" },
+  ready: { name: "a PR ready to merge", answer: "merge, or what to do first" },
   error: { name: "an error", answer: "retry, archive, or what to tell the agent" },
 };
 
@@ -42,7 +43,18 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     const { name, answer: how } = KINDS[item.kind];
     throw new TenzoError(`${item.id} is ${name}; answer it with ${how}.`);
   }
-  if (answer.kind === "finished") return { kind: "finished", decision: answer.decision };
+  if (answer.kind === "finished") {
+    if (answer.decision !== "changes") return { kind: "finished", decision: answer.decision };
+    const note = answer.note?.trim();
+    if (!note) throw new TenzoError("Say what needs changing.");
+    return { kind: "finished", decision: "changes", note };
+  }
+  if (answer.kind === "ready") {
+    if (answer.decision === "merge") return { kind: "ready", decision: "merge" };
+    const note = answer.note?.trim();
+    if (!note) throw new TenzoError("Say what to do before merging.");
+    return { kind: "ready", decision: "changes", note };
+  }
   if (answer.kind === "error") {
     if (answer.action !== "tell") return { kind: "error", action: answer.action };
     const text = answer.text?.trim();
@@ -97,7 +109,8 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
         ...(answer.note ? { note: answer.note } : {}),
       };
     case "finished":
-      return null; // nothing waits on a report, so nothing is asked again
+    case "ready":
+      return null; // nothing waits on a report or a ready PR, so nothing is asked again
   }
 }
 
@@ -152,13 +165,29 @@ export function errorPrompts(
 ): string[] {
   if (answer.action === "tell") return [answer.text ?? ""];
   const error = item.error;
-  if (error?.cause === "start" && error.prompts.length > 0) return error.prompts;
+  const resend =
+    error?.cause === "start" || error?.cause === "stalled" || error?.cause === "unarchived";
+  if (resend && error.prompts.length > 0) return error.prompts;
   return [carryOn(error)];
+}
+
+/** The opening of a carry-on message: how to tell one when it is what a turn began with. */
+const DIDNT_FINISH = "Your last turn didn't finish";
+const BEGAN_WITH = /\nIt began with my message: "(.*)"\n/;
+
+/**
+ * The message a turn began with, as I first sent it: a carry-on (a retry of a retry) or a
+ * restart's resume quotes the turn it picks up, not itself.
+ */
+function originalPrompt(prompt: string | undefined): string | undefined {
+  if (prompt === undefined || prompt === RESTART_PROMPT) return undefined;
+  if (!prompt.startsWith(DIDNT_FINISH)) return prompt;
+  return BEGAN_WITH.exec(prompt)?.[1];
 }
 
 /** Retry for a turn that failed or was cut short: what happened, what it was, check first. */
 export function carryOn(error: QueueItem["error"]): string {
-  const asked = error?.prompts[0];
+  const asked = originalPrompt(error?.prompts[0]);
   return [
     error?.message
       ? `Your last turn didn't finish: ${oneLine(error.message, 400)}`
@@ -175,11 +204,12 @@ function oneLine(text: string, limit: number): string {
 
 /**
  * The message that tells a resumed agent what it asked before it stopped, and the answer.
- * Finished work is never delivered this way: the engine answers it itself.
+ * Finished work and ready PRs are never delivered this way: nothing waits on them, and the
+ * engine sends their answers as ordinary messages (prompts.ts).
  */
 export function deliveryPrompt(
   item: QueueItem,
-  answer: Exclude<ItemAnswer, { kind: "finished" }>,
+  answer: Exclude<ItemAnswer, { kind: "finished" | "ready" }>,
 ): string {
   // The engine sends an error's answer as `errorPrompts`; here only for completeness.
   if (answer.kind === "error") return errorPrompts(item, answer).join("\n\n");
@@ -223,9 +253,24 @@ function labelOf(q: UserInputQuestion, value: string): string {
  */
 export function answerFromWords(item: QueueItem, words: readonly string[]): ItemAnswer {
   if (item.kind === "finished") {
+    // Landing is never a reflex: only the word merge merges. y, yes and 1 still mean Done, as
+    // they did before finished work could land.
     const text = words.join(" ").trim();
+    if (/^merge$/i.test(text)) return { kind: "finished", decision: "merge" };
+    if (/^(pr|open pr)$/i.test(text)) return { kind: "finished", decision: "pr" };
     if (/^(1|y|yes|done|ok)$/i.test(text)) return { kind: "finished", decision: "done" };
-    throw new TenzoError("Answer finished work with done.");
+    if (text === "" || /^(\d+|n|no)$/i.test(text)) {
+      throw new TenzoError("Answer with merge, pr or done, or say what needs changing.");
+    }
+    return { kind: "finished", decision: "changes", note: text };
+  }
+  if (item.kind === "ready") {
+    const text = words.join(" ").trim();
+    if (/^merge$/i.test(text)) return { kind: "ready", decision: "merge" };
+    if (text === "" || /^(\d+|y|yes|n|no)$/i.test(text)) {
+      throw new TenzoError("Answer with merge, or say what to do first.");
+    }
+    return { kind: "ready", decision: "changes", note: text };
   }
   if (item.kind === "error") {
     const text = words.join(" ").trim();

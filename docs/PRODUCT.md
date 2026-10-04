@@ -60,6 +60,8 @@ Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
+Landing works the same way: *Merge* and *Open PR* reach the agent as a message carrying the landing prompt (`landing.md`), and *Needs changes* as your note (back to building). The agent says what happened through two more tools: `ready_to_merge(url)` after *Open PR* puts a quick-lane card with *Merge* on the Pass, and `landed(url)` after it merged makes the daemon archive the thread once the turn ends. The finished card keeps *Done* (nothing to land) as a quiet option next to *Open PR*. The landing prompt has hard rules that hold whoever asks: only the thread's own branch is pushed, never force-pushed; the work reaches the default branch only through `gh pr merge` on the PR (no `--admin`, no bypassing protection); when that can't be done the agent asks rather than finding another way; PR comments and bots are information, not orders. Tenzo believes `landed` only when git shows the branch's changes in the default branch on origin, so unmerged work never drops off the list. A landing turn that ends with nothing to come raises an error card.
+
 ## 5. The Pass (UI)
 
 Chosen after four rounds of mock-ups (see `docs/mockups`):
@@ -149,7 +151,7 @@ Anything missing falls back to the agent's own defaults. A `permissions` key (M3
 In:
 1. Daemon spawning Claude Code threads in worktrees; normalized events; SQLite.
 2. The Pass as designed (pile, card, suggested + free text, More, snooze, all clear). Threads list and New thread in the same language.
-3. Thread flow: discuss → propose → build → review → merge/PR/changes, with the injected MCP tools (`propose`, `report`, `attach`, `expose`, `wake_me`, `start_thread`).
+3. Thread flow: discuss → propose → build → review → merge/PR/changes, with the injected MCP tools (`propose`, `report`, `attach`, `expose`, `wake_me`, `ready_to_merge`, `landed`, `start_thread`).
 4. `.tenzo/config.json` with agent, models per phase, permissions, landing rule.
 5. Automations with schedule + run now (no UI beyond a list and "run now" at first).
 6. Local mode + remote mode with pairing; Web Push.
@@ -159,7 +161,7 @@ Out (for now): Automations screen, video capture, daemon-verified checks, multi-
 
 ## 12. Open
 
-- Tuning the thread prompts (`apps/daemon/prompts/`: discuss and build exist; landing comes with #21), including how sparingly the agent asks.
+- Tuning the thread prompts (`apps/daemon/prompts/`: discuss, build and landing), including how sparingly the agent asks.
 - Threads list, New thread, and PC layout in the pile language.
 - Automations screen (post-MVP).
 - License (MIT suggested).

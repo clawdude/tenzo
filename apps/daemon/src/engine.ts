@@ -32,6 +32,7 @@ import {
   clearPrompts,
   enqueuePrompt,
   getItem,
+  landedThreads,
   lastEvent,
   liveThreads,
   loadFoldState,
@@ -41,16 +42,27 @@ import {
   queuedPrompts,
   removePrompt,
   threadEvents,
+  threadsToWake,
   threadsWithPrompts,
 } from "./event-store.ts";
-import { type ItemChange, itemIdFor } from "./fold.ts";
+import { type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
+import { hasChanges, landedOn } from "./git.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
-import { loadThreadPrompts, type ThreadPrompts } from "./prompts.ts";
+import {
+  loadThreadPrompts,
+  mergePrompt,
+  reviewPrompt,
+  STALLED_PROMPT,
+  type ThreadPrompts,
+  wakePrompt,
+} from "./prompts.ts";
 import { type Store, transaction } from "./store.ts";
 import {
+  activeAgentThreads,
   archiveThread,
   checkArchivable,
+  countChildren,
   createThread,
   finishNaming,
   getThread,
@@ -60,7 +72,13 @@ import {
   threadByClientKey,
   threadsToName,
 } from "./threads.ts";
+import { Timers } from "./timers.ts";
 import { quickTitle, type Titler } from "./titles.ts";
+
+/** Threads one thread may start with `start_thread`, ever: enough for real work, no runaway loop. */
+export const MAX_CHILD_THREADS = 10;
+/** Threads started by agents that may be active at once, across every thread. */
+export const MAX_AGENT_THREADS = 10;
 
 /**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
@@ -103,6 +121,8 @@ export interface NewThread {
   prompt?: string;
   model?: string;
   clientKey?: string;
+  /** The thread whose agent starts this one (`start_thread`): its origin is then `agent`. */
+  parent?: ThreadId;
 }
 
 /** What a `thread.create` asked for, to tell a retry (the same) from a reused key (not). */
@@ -130,6 +150,8 @@ interface Live {
   standing: StandingReply[];
   /** Ends when the session's events do. */
   reading: Promise<void>;
+  /** The agent said its work landed (`landed`): the thread archives when the turn ends. */
+  landed: boolean;
 }
 
 export class Engine {
@@ -152,9 +174,15 @@ export class Engine {
   readonly #stopNaming = new AbortController();
   /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
   readonly #creating = new Map<string, { request: string; thread: Promise<ThreadView> }>();
+  /** Landed threads being archived: nothing new is sent to them meanwhile. */
+  readonly #landing = new Set<ThreadId>();
+  /** `start_thread` calls under way, by parent: they count against the limits already. */
+  readonly #startingChildren = new Map<ThreadId, number>();
   readonly #snoozeMs: number;
-  /** A timer per snoozed item, to wake it when its time comes. */
-  readonly #wakers = new Map<QueueItemId, NodeJS.Timeout>();
+  /** A timer per snoozed item, to bring it back when its time comes. */
+  readonly #snoozes = new Timers<QueueItemId>();
+  /** A timer per thread whose agent asked to be woken (`wake_me`). */
+  readonly #wakes = new Timers<ThreadId>();
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -183,26 +211,39 @@ export class Engine {
       const thread = getThread(this.store, threadId);
       const again = loadFoldState(this.store, threadId).runtime.prompt === RESTART_PROMPT;
       const resume = this.#cutShort(threadId) && !again;
-      if (resume) this.#resumeLater(threadId);
-      this.#append(
-        draft(thread, {
-          type: "session.exited",
-          payload: resume
-            ? { exitKind: "graceful", reason: "Tenzo stopped while this session was running." }
-            : {
-                exitKind: "error",
-                reason: again
-                  ? "Tenzo stopped twice while this turn ran, so it wasn't resumed again."
-                  : "Tenzo stopped while this session was running.",
-              },
-        }),
+      const exited = draft(thread, {
+        type: "session.exited",
+        payload: resume
+          ? { exitKind: "graceful", reason: "Tenzo stopped while this session was running." }
+          : {
+              exitKind: "error",
+              reason: again
+                ? "Tenzo stopped twice while this turn ran, so it wasn't resumed again."
+                : "Tenzo stopped while this session was running.",
+            },
+      });
+      // Both or neither: a kill in between must not queue the resume twice.
+      const appended = transaction(this.store, () => {
+        if (resume) this.#resumeLater(threadId);
+        return appendEvent(this.store, exited);
+      });
+      this.#publish(exited, appended);
+    }
+    // Threads that landed while the last daemon ran go first, so nothing queued for them starts
+    // a session. One with a landing card already waits for you instead.
+    for (const threadId of landedThreads(this.store)) {
+      const stuck = openItems(this.store, threadId).some(
+        (item) => item.kind === "error" && isLandingCause(item.error?.cause),
       );
+      if (!stuck) this.#archiveLanded(threadId);
     }
     for (const threadId of threadsWithPrompts(this.store)) this.#pump(threadId);
     // Names the last daemon stopped thinking of before it had one.
     for (const { id, prompt } of threadsToName(this.store)) this.#name(id, prompt);
-    // Snoozed items wake on time across restarts; any whose time came meanwhile wake now.
-    for (const item of openItems(this.store)) if (item.snoozedUntil) this.#scheduleWake(item);
+    // Wakes the agents asked for come on time across restarts; any whose time passed, now.
+    for (const threadId of threadsToWake(this.store)) this.#armWake(threadId);
+    // Snoozed items come back on time across restarts; any whose time came meanwhile, now.
+    for (const item of openItems(this.store)) if (item.snoozedUntil) this.#armSnooze(item);
   }
 
   subscribe(listener: (change: EngineChange) => void): () => void {
@@ -245,6 +286,7 @@ export class Engine {
       ...(model ? { model } : {}),
       ...(prompt && !given ? { naming: prompt } : {}),
       ...(client ? { client } : {}),
+      ...(input.parent ? { parent: input.parent } : {}),
     });
     if (prompt) enqueuePrompt(this.store, thread.id, prompt);
     this.#pump(thread.id);
@@ -268,6 +310,12 @@ export class Engine {
     const thread = this.#active(threadId);
     const text = prompt.trim();
     if (text === "") throw new TenzoError("The prompt is empty.");
+    // Archiving would drop it unread: say so now rather than lose it.
+    if (this.#landing.has(thread.id) || this.#live.get(thread.id)?.landed) {
+      throw new TenzoError(
+        `${thread.id} has landed and is being archived; start a new thread for more work.`,
+      );
+    }
     enqueuePrompt(this.store, thread.id, text);
     this.#pump(thread.id);
     return this.#changed(thread.id);
@@ -299,6 +347,7 @@ export class Engine {
       throw error;
     }
     clearPrompts(this.store, thread.id);
+    this.#wakes.clear(thread.id);
     await removeAttachments(this.store.home, thread.id).catch((error: unknown) => {
       this.#log(`couldn't remove the attachments of ${thread.id}: ${String(error)}`);
     });
@@ -371,21 +420,8 @@ export class Engine {
     const thread = this.#active(item.threadId);
     const checked = checkAnswer(item, answer);
     if (checked.kind === "error") return this.#answerError(item, thread, checked);
-    if (checked.kind === "finished") {
-      // Nothing waits on a report: the daemon records your answer, and that is all (#21 adds the
-      // review actions that go back to the agent).
-      this.#append(
-        draft(thread, {
-          type: "report.resolved",
-          requestId: item.requestId,
-          payload: { decision: checked.decision },
-        }),
-      );
-      return {
-        item: getItem(this.store, item.id) ?? item,
-        delivery: "none",
-        thread: this.#changed(thread.id),
-      };
+    if (checked.kind === "finished" || checked.kind === "ready") {
+      return this.#answerAsMessage(item, thread, checked);
     }
 
     const live = this.#live.get(thread.id);
@@ -443,7 +479,7 @@ export class Engine {
       draft(thread, { type: "item.snoozed", requestId: item.requestId, payload: { until } }),
     );
     const snoozed = getItem(this.store, item.id) ?? item;
-    this.#scheduleWake(snoozed);
+    this.#armSnooze(snoozed);
     return { item: snoozed, thread: this.view(thread.id) };
   }
 
@@ -451,7 +487,7 @@ export class Engine {
   unsnooze(itemId: string): { item: QueueItem; thread: ThreadView } {
     const item = this.#openItem(itemId);
     const thread = this.#active(item.threadId);
-    this.#clearWake(item.id);
+    this.#snoozes.clear(item.id);
     if (item.snoozedUntil !== null) {
       this.#append(
         draft(thread, {
@@ -467,15 +503,22 @@ export class Engine {
   /** Stops every session, leaving open items for the next daemon. */
   async close(): Promise<void> {
     this.#closing = true;
-    for (const timer of this.#wakers.values()) clearTimeout(timer);
-    this.#wakers.clear();
+    this.#snoozes.clearAll();
+    this.#wakes.clearAll();
     this.#stopNaming.abort();
     await Promise.all([
       ...[...this.#live.values()].map(async (live) => {
         // Tenzo's own restart is no error of the agent's: the turn picks up when it is back.
-        if (this.#cutShort(live.threadId)) this.#resumeLater(live.threadId);
+        // Only a turn the stop really cut short: one that finishes within the stop's grace
+        // needs no resuming.
+        const cutShort = this.#cutShort(live.threadId);
+        const before = lastEvent(this.store, live.threadId)?.seq ?? 0;
         await live.session.stop();
         await live.reading;
+        const finished = threadEvents(this.store, live.threadId, before).some(
+          (e) => e.event.type === "turn.completed",
+        );
+        if (cutShort && !finished) this.#resumeLater(live.threadId);
       }),
       ...this.#naming,
     ]);
@@ -483,12 +526,16 @@ export class Engine {
 
   // Internals.
 
-  /** Stopping the thread's session now would cut a turn short that asked you nothing. */
+  /**
+   * Stopping the thread's session now would cut a turn short that isn't waiting on you. Only an
+   * ask of the live session counts as waiting: finished work, a ready PR, an earlier error card
+   * or an ask from a session that has ended is no reason not to resume.
+   */
   #cutShort(threadId: ThreadId): boolean {
     const { runtime, open } = loadFoldState(this.store, threadId);
     // A prompt we sent counts even before its turn.started has come back.
     const sent = Boolean(this.#live.get(threadId)?.turnId);
-    return (runtime.turnId !== null || sent) && open.length === 0;
+    return (runtime.turnId !== null || sent) && !waitsOnYou(open);
   }
 
   /** The thread's next session starts by picking up the turn a stop of ours cut short. */
@@ -538,30 +585,19 @@ export class Engine {
     };
   }
 
-  /** Wakes the item when its snooze is up (now, if it is already). */
-  #scheduleWake(item: QueueItem): void {
-    this.#clearWake(item.id);
-    if (item.snoozedUntil === null || this.#closing) return;
-    const delay = Math.max(0, Date.parse(item.snoozedUntil) - Date.now());
-    // setTimeout holds at most ~24.8 days; a longer wait just checks again then.
-    const timer = setTimeout(() => this.#wake(item.id), Math.min(delay, 2 ** 31 - 1));
-    timer.unref?.();
-    this.#wakers.set(item.id, timer);
+  /** Brings the item back when its snooze is up (now, if it is already). */
+  #armSnooze(item: QueueItem): void {
+    if (item.snoozedUntil === null || this.#closing) return this.#snoozes.clear(item.id);
+    this.#snoozes.set(item.id, Date.parse(item.snoozedUntil), (id) => this.#endSnooze(id));
   }
 
-  #clearWake(itemId: QueueItemId): void {
-    clearTimeout(this.#wakers.get(itemId));
-    this.#wakers.delete(itemId);
-  }
-
-  #wake(itemId: QueueItemId): void {
-    this.#wakers.delete(itemId);
+  #endSnooze(itemId: QueueItemId): void {
     if (this.#closing) return;
     try {
       const item = getItem(this.store, itemId);
       if (item?.status !== "open" || item.snoozedUntil === null) return;
       if (Date.parse(item.snoozedUntil) > Date.now()) {
-        this.#scheduleWake(item); // snoozed again meanwhile, or a timer cut short
+        this.#armSnooze(item); // snoozed again meanwhile, or a timer cut short
         return;
       }
       const thread = getThread(this.store, item.threadId);
@@ -574,7 +610,206 @@ export class Engine {
         }),
       );
     } catch (error) {
-      this.#log(`couldn't wake ${itemId}: ${String(error)}`);
+      this.#log(`couldn't bring back ${itemId}: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Your answer to finished work or a ready PR. Nothing waits on either, so it is recorded here
+   * and, unless it is Done, sent to the agent as its next turn (prompts.ts), the session resumed
+   * if it has stopped. Merge and Open PR make the thread landing, Needs changes building.
+   */
+  #answerAsMessage(
+    item: QueueItem,
+    thread: Thread,
+    answer: Extract<ItemAnswer, { kind: "finished" | "ready" }>,
+  ): { item: QueueItem; delivery: "message" | "none"; thread: ThreadView } {
+    const note = answer.note ? { note: answer.note } : {};
+    const turn = item.turnId ? { turnId: item.turnId } : {};
+    const resolution =
+      answer.kind === "finished"
+        ? draft(thread, {
+            ...turn,
+            type: "report.resolved",
+            requestId: item.requestId,
+            payload: { decision: answer.decision, ...note },
+          })
+        : draft(thread, {
+            ...turn,
+            type: "merge.resolved",
+            requestId: item.requestId,
+            payload: { decision: answer.decision, ...note },
+          });
+    const prompt =
+      answer.kind === "finished" ? reviewPrompt(answer, this.#prompts()) : mergePrompt(answer);
+    // Both or neither, as with any answer delivered as a message.
+    const appended = transaction(this.store, () => {
+      const result = appendEvent(this.store, resolution);
+      if (prompt) enqueuePrompt(this.store, thread.id, prompt);
+      return result;
+    });
+    this.#publish(resolution, appended);
+    if (prompt) this.#pump(thread.id);
+    return {
+      item: getItem(this.store, item.id) ?? item,
+      delivery: prompt ? "message" : "none",
+      thread: this.#changed(thread.id),
+    };
+  }
+
+  /** Sets the thread's wake timer from its log (`wake_me`); a time already past rings now. */
+  #armWake(threadId: ThreadId): void {
+    const wake = this.#closing ? null : loadFoldState(this.store, threadId).runtime.wake;
+    if (!wake) return this.#wakes.clear(threadId);
+    this.#wakes.set(threadId, Date.parse(wake.at), (id) => this.#ringWake(id));
+  }
+
+  /** The wake's time has come: "You asked to be woken: <why>" goes to the agent as a turn. */
+  #ringWake(threadId: ThreadId): void {
+    if (this.#closing) return;
+    try {
+      const thread = getThread(this.store, threadId);
+      if (thread.status !== "active") return;
+      const wake = loadFoldState(this.store, threadId).runtime.wake;
+      if (!wake) return;
+      if (Date.parse(wake.at) > Date.now()) {
+        this.#armWake(threadId); // a later wake replaced it, or a long one checks again
+        return;
+      }
+      const fired = draft(thread, { type: "wake.fired", payload: { why: wake.why } });
+      const appended = transaction(this.store, () => {
+        const result = appendEvent(this.store, fired);
+        enqueuePrompt(this.store, thread.id, wakePrompt(wake.why));
+        return result;
+      });
+      this.#publish(fired, appended);
+      this.#pump(thread.id);
+      this.#changed(thread.id);
+    } catch (error) {
+      this.#log(`couldn't wake ${threadId}: ${String(error)}`);
+    }
+  }
+
+  /**
+   * Archives a thread whose agent said it landed (and git agreed): worktree removed, branch
+   * kept. If that can't be done, or you sent it a message meanwhile (archiving would drop it
+   * unread), the thread stays, landing, with an error card that says why.
+   */
+  #archiveLanded(threadId: ThreadId): void {
+    if (this.#closing || this.#landing.has(threadId)) return;
+    const waiting = queuedPrompts(this.store, threadId).filter((p) => p !== RESTART_PROMPT);
+    if (waiting.length > 0) {
+      clearPrompts(this.store, threadId);
+      this.#landingStuck(
+        threadId,
+        "unarchived",
+        "It landed, but you sent it a message meanwhile, so it isn't archived. Retry sends your message; Archive drops it.",
+        waiting,
+      );
+      return;
+    }
+    this.#landing.add(threadId);
+    void this.archive(threadId)
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        this.#log(`couldn't archive ${threadId}, which landed: ${message}`);
+        this.#landingStuck(threadId, "unarchived", `It landed, but Tenzo couldn't archive it: ${message}`, [
+          `Tenzo couldn't archive this thread after \`landed\`: ${message}\n\nLeave the worktree clean (commit or delete stray files), then call \`landed\` again.`,
+        ]);
+      })
+      .finally(() => {
+        this.#landing.delete(threadId);
+        this.#pump(threadId); // not archived: what came in meanwhile goes after all
+      });
+  }
+
+  /**
+   * A landing turn of ours ended with nothing to come: no wake, no card, no `landed`, nothing
+   * queued. The thread would sit in Landing forever, so it gets an error card instead.
+   */
+  #checkStalled(live: Live): void {
+    if (this.#closing || live.landed) return;
+    const { runtime, open } = loadFoldState(this.store, live.threadId);
+    if (runtime.phase !== "landing" || runtime.wake !== null || open.length > 0) return;
+    if (queuedCount(this.store, live.threadId) > 0) return;
+    this.#landingStuck(
+      live.threadId,
+      "stalled",
+      "Its last turn ended without a wake, a card or `landed`, so nothing happens next. Retry reminds it how to land; or tell it what to do.",
+      [STALLED_PROMPT],
+    );
+  }
+
+  /** Puts a landing error card on the Pass (`landing.stuck`); Retry sends `prompts`. */
+  #landingStuck(
+    threadId: ThreadId,
+    cause: "stalled" | "unarchived",
+    message: string,
+    prompts: string[],
+  ): void {
+    try {
+      this.#append(
+        draft(getThread(this.store, threadId), {
+          type: "landing.stuck",
+          payload: { cause, message, prompts },
+        }),
+      );
+      this.#changed(threadId);
+    } catch (error) {
+      this.#log(`couldn't record that ${threadId} is stuck landing: ${String(error)}`);
+    }
+  }
+
+  /** What `landed` must pass: a clean worktree whose branch's changes are on origin's default branch. */
+  async #checkLanded(threadId: ThreadId): Promise<void> {
+    const thread = getThread(this.store, threadId);
+    if (await hasChanges(thread.worktreePath)) {
+      throw new TenzoError(
+        "The worktree has uncommitted changes, and archiving removes it. Commit them or delete them, then call landed again.",
+      );
+    }
+    const branch = projectOf(this.store, thread).defaultBranch;
+    if (!(await landedOn(thread.worktreePath, branch))) {
+      throw new TenzoError(
+        `Can't see this branch's changes in origin/${branch}, so it hasn't landed. Merge the PR with \`gh pr merge\` first; if it did merge, ask the person (AskUserQuestion) to archive the thread.`,
+      );
+    }
+  }
+
+  /**
+   * `start_thread` for `parentId`. No fan-out: a thread an agent started can't start threads,
+   * each thread starts at most `MAX_CHILD_THREADS`, and at most `MAX_AGENT_THREADS` threads
+   * started by agents are active at once.
+   */
+  async #startChild(
+    parentId: ThreadId,
+    input: { prompt: string; project?: string; title?: string },
+  ): Promise<ThreadView> {
+    const parent = getThread(this.store, parentId);
+    if (parent.origin === "agent") {
+      throw new TenzoError("This thread was started by another thread, so it can't start threads itself.");
+    }
+    const pending = this.#startingChildren.get(parentId) ?? 0;
+    if (countChildren(this.store, parentId) + pending >= MAX_CHILD_THREADS) {
+      throw new TenzoError(`A thread starts at most ${MAX_CHILD_THREADS} threads.`);
+    }
+    const starting = [...this.#startingChildren.values()].reduce((a, b) => a + b, 0);
+    if (activeAgentThreads(this.store) + starting >= MAX_AGENT_THREADS) {
+      throw new TenzoError(
+        `${MAX_AGENT_THREADS} threads started by agents are active already: the person archives some first.`,
+      );
+    }
+    this.#startingChildren.set(parentId, pending + 1);
+    try {
+      return await this.createThread({
+        ...input,
+        project: input.project ?? projectOf(this.store, parent).name,
+        parent: parentId,
+      });
+    } finally {
+      const left = (this.#startingChildren.get(parentId) ?? 1) - 1;
+      if (left > 0) this.#startingChildren.set(parentId, left);
+      else this.#startingChildren.delete(parentId);
     }
   }
 
@@ -608,7 +843,7 @@ export class Engine {
 
   /** Sends the thread's next queued prompt if no turn of ours is running, starting the agent. */
   #pump(threadId: ThreadId): void {
-    if (this.#closing || this.#archiving.has(threadId)) return;
+    if (this.#closing || this.#archiving.has(threadId) || this.#landing.has(threadId)) return;
     const thread = getThread(this.store, threadId);
     if (thread.status !== "active") return;
     let live = this.#live.get(threadId);
@@ -667,6 +902,19 @@ export class Engine {
       })(),
       prompts: this.#prompts(),
       attachmentsDir: attachmentsDir(this.store.home, thread.id),
+      host: {
+        phase: () => loadFoldState(this.store, thread.id).runtime.phase,
+        checkLanded: () => this.#checkLanded(thread.id),
+        startThread: async (input) => {
+          const started = await this.#startChild(thread.id, input);
+          return {
+            id: started.id,
+            title: started.title,
+            projectName: started.projectName,
+            branch: started.branch,
+          };
+        },
+      },
     });
     const live: Live = {
       threadId: thread.id,
@@ -674,6 +922,7 @@ export class Engine {
       turnId: null,
       standing: [],
       reading: Promise.resolve(),
+      landed: false,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -701,6 +950,8 @@ export class Engine {
         );
       }
       this.#changed(live.threadId);
+      // It landed and ended before its turn did: archive it all the same.
+      if (live.landed) this.#archiveLanded(live.threadId);
       // Prompts that came in while it was ending start a new session.
       this.#pump(live.threadId);
     }
@@ -727,12 +978,26 @@ export class Engine {
     }
     this.#append(event);
     switch (event.type) {
-      case "turn.completed":
-        if (event.turnId === live.turnId) {
+      case "turn.completed": {
+        const ours = event.turnId === live.turnId;
+        if (ours) {
           live.turnId = null;
           live.standing = [];
-          this.#pump(live.threadId);
         }
+        // The turn that landed the thread is over: it archives instead of going on.
+        if (live.landed) this.#archiveLanded(live.threadId);
+        else if (ours) {
+          this.#pump(live.threadId);
+          if (event.payload.state === "completed") this.#checkStalled(live);
+        }
+        this.#changed(live.threadId);
+        break;
+      }
+      case "thread.landed":
+        live.landed = true;
+        break;
+      case "wake.scheduled":
+        this.#armWake(live.threadId);
         this.#changed(live.threadId);
         break;
       case "turn.started":
@@ -763,7 +1028,7 @@ export class Engine {
       }
       announced = true;
       if (change.type === "resolved") {
-        this.#clearWake(change.item.id);
+        this.#snoozes.clear(change.item.id);
         const waiter = this.#answering.get(change.item.id);
         this.#answering.delete(change.item.id);
         waiter?.(change.item);
@@ -855,6 +1120,9 @@ export class Engine {
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
       phase: runtime.phase,
+      origin: thread.origin,
+      parentId: thread.parentId,
+      wakeAt: thread.status === "active" ? (runtime.wake?.at ?? null) : null,
       activity: awake > 0 ? "needs-you" : open > 0 ? "snoozed" : working ? "working" : "idle",
       working,
       queued,
@@ -889,8 +1157,8 @@ function draft(thread: Thread, event: Draft): RuntimeEvent {
   } as RuntimeEvent;
 }
 
-/** An answer that goes to the agent: everything but finished work's. */
-type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" }>;
+/** An answer that goes to a waiting agent: everything but finished work's and a ready PR's. */
+type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" | "ready" }>;
 
 function respond(
   session: AgentSession,

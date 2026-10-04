@@ -40,8 +40,10 @@ Usage:
   tenzo answer <item> <choice|text…>     answer an item: an option's number or label, or your
                                          own words; allow/deny for a permission request;
                                          build, or what to change, for a proposal;
-                                         retry, archive, or what to tell it, for an error
-  tenzo --version                       print the version
+                                         retry, archive, or what to tell it, for an error;
+                                         merge, pr, done, or what needs changing, for
+                                         finished work; merge, or what first, for a ready PR
+  tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
 (--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
@@ -289,7 +291,8 @@ async function answer(args: string[]): Promise<void> {
     return;
   }
   say(
-    item.kind === "error"
+    result.delivery === "message" &&
+      (item.kind === "error" || item.kind === "finished" || item.kind === "ready")
       ? `Answered ${item.id}; it goes to the agent as its next turn.`
       : result.delivery === "message"
       ? `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`
@@ -318,7 +321,9 @@ async function follow(
     for (const { seq: s, event, environmentId } of events) {
       console.log(json ? JSON.stringify({ seq: s, environmentId, event }) : formatEvent(event));
       seq = s;
-      if (isAsk(event) || event.type === "report.submitted") asked = true;
+      if (isAsk(event) || event.type === "report.submitted" || event.type === "merge.ready") {
+        asked = true;
+      }
       // A failed turn, a crash or an agent that can't start: each leaves an error card.
       if (
         (event.type === "turn.completed" && event.payload.state === "failed") ||
