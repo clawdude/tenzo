@@ -1,10 +1,13 @@
 import { join } from "node:path";
 import { ServerFrame, type UserInputQuestion } from "@tenzo/contracts";
-import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
+import type { WSContext } from "hono/ws";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 import { FakeAdapter } from "./agent/fake-agent.ts";
+import type { Engine } from "./engine.ts";
 import { addProject } from "./projects.ts";
 import { type RunningDaemon, startDaemon } from "./server.ts";
+import { socketHandlers } from "./socket.ts";
 import { openStore } from "./store.ts";
 import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
 
@@ -207,5 +210,29 @@ describe("/ws", () => {
     await stays.command({ type: "thread.create", project: "app", prompt: "Paint it" });
     await stays.next(isItem("opened"));
     expect(gone.frames.map((f) => f.type)).toEqual(["hello", "snapshot"]);
+  });
+});
+
+describe("socketHandlers", () => {
+  it("logs, rather than crashes on, an answer that can't be sent", async () => {
+    const logged: string[] = [];
+    // A result JSON can't serialise: sending the answer throws after the command ran.
+    const engine = {
+      snapshot: () => ({ environmentId: "env_abcdefghij0123456789", threads: [], items: [1n] }),
+    } as unknown as Engine;
+    const handlers = socketHandlers({
+      environmentId: "env_abcdefghij0123456789",
+      version: "0.0.0",
+      engine,
+      log: (message) => logged.push(message),
+    });
+    const ws = { readyState: 1, send: () => {}, close: () => {}, raw: undefined };
+    const frame = { type: "command", id: "7", command: { type: "snapshot" } };
+    handlers.onMessage?.(
+      new MessageEvent("message", { data: JSON.stringify(frame) }),
+      ws as unknown as WSContext,
+    );
+    await vi.waitFor(() => expect(logged).toHaveLength(1));
+    expect(logged[0]).toMatch(/^couldn't answer command 7: TypeError/);
   });
 });

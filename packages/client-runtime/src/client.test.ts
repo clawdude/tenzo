@@ -165,6 +165,45 @@ describe("TenzoClient", () => {
     expect(client.state.threads.map((t) => t.id)).toEqual([thread("a").id, thread("b").id]);
   });
 
+  it("is not synced while a wakeup's probe is out, and synced again once it is answered", () => {
+    const { client, latest, synced } = setup();
+    client.connect();
+    synced();
+    client.connection.wake({ away: 5_000 });
+    expect(client.state).toMatchObject({ synced: false, connection: { probing: true } });
+    expect(client.state.items).toHaveLength(1); // still shown, just not vouched for
+    latest().serverSends({ type: "pong", at: "x" });
+    expect(client.state).toMatchObject({ synced: true, connection: { probing: false } });
+  });
+
+  it("needs a new snapshot after a long time away replaced the socket", () => {
+    const { client, latest, synced, sockets } = setup();
+    client.connect();
+    synced();
+    client.connection.wake({ away: 10 * 60_000 });
+    expect(sockets).toHaveLength(2);
+    expect(client.state.synced).toBe(false);
+    latest().serverOpens();
+    latest().serverSends(hello);
+    expect(client.state.synced).toBe(false);
+    synced();
+    expect(client.state.synced).toBe(true);
+  });
+
+  it("gives every view the newest state when one closes the client from a listener", () => {
+    const { client, latest, synced } = setup();
+    client.subscribe((s) => {
+      if (s.connection.state === "reconnecting") client.close();
+    });
+    const last: string[] = [];
+    client.subscribe((s) => last.push(s.connection.state));
+    client.connect();
+    synced();
+    latest().serverDrops();
+    expect(client.state.connection.state).toBe("closed");
+    expect(last.at(-1)).toBe("closed");
+  });
+
   it("leaves the state alone on frames that don't match the contract", () => {
     const { client, latest, synced, logged } = setup();
     client.connect();

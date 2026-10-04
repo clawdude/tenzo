@@ -1,0 +1,42 @@
+<script lang="ts">
+	import type { ThreadView } from '@tenzo/client-runtime';
+	import { fade } from 'svelte/transition';
+	import { ageLabel } from '#lib/pass.ts';
+
+	interface Props {
+		/** Threads at work while nothing needs you. */
+		working: readonly ThreadView[];
+		now: number;
+	}
+	let { working, now }: Props = $props();
+</script>
+
+<!-- Nothing needs you. New thread (#9) turns the card into the way to start one. -->
+<div
+	class="absolute inset-0 flex flex-col justify-center gap-7 px-2 pb-10"
+	in:fade={{ duration: 300, delay: 120 }}
+	data-testid="all-clear"
+>
+	<div
+		class="flex min-h-[150px] flex-col gap-2.5 rounded-[28px] bg-card p-[22px] shadow-[0_24px_60px_rgba(0,0,0,.6)]"
+	>
+		<p class="text-[26px] leading-[1.15] font-bold tracking-[-0.02em] text-mute">
+			What do you want to do?
+		</p>
+		<span class="grow"></span>
+		<p class="text-[14px] text-faint">Nothing needs you.</p>
+	</div>
+
+	{#if working.length > 0}
+		<section class="flex flex-col gap-0.5 px-2">
+			<h2 class="mb-2 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">Meanwhile</h2>
+			{#each working as thread (thread.id)}
+				<div class="flex min-h-12 items-center gap-3" data-testid="working">
+					<span class="size-2 shrink-0 rounded-full bg-working"></span>
+					<span class="grow truncate text-[17px]">{thread.title}</span>
+					<span class="shrink-0 text-[15px] text-faint">{ageLabel(thread.createdAt, now)}</span>
+				</div>
+			{/each}
+		</section>
+	{/if}
+</div>
