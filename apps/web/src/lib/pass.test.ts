@@ -1,7 +1,21 @@
 import { describe, expect, it } from 'vitest';
 import { type QueueItem, suggestedAnswer } from '@tenzo/client-runtime';
-import { at, finished, item, permission, proposal, question } from './fixtures.ts';
-import { ageLabel, answerOf, othersLabel, pileEdges, pileOf, stepsOf } from './pass.ts';
+import { at, failure, finished, item, permission, proposal, question } from './fixtures.ts';
+import {
+	ageLabel,
+	answerOf,
+	byLaneThenAge,
+	LANES,
+	minutesUntil,
+	othersLabel,
+	pileEdges,
+	pileOf,
+	snoozedLabel,
+	stepsOf
+} from './pass.ts';
+
+const t0 = Date.parse(at);
+const later = (minutes: number) => new Date(t0 + minutes * 60_000).toISOString();
 
 describe('pileEdges', () => {
 	it('shows one edge per card waiting behind the current one, up to four', () => {
@@ -9,28 +23,150 @@ describe('pileEdges', () => {
 	});
 });
 
+describe('lanes', () => {
+	it('serves the quick lane before the review lane', () => {
+		expect(LANES).toEqual(['quick', 'review']);
+	});
+
+	it('orders by lane, then oldest first, whatever order the items came in', () => {
+		const newQuick = item('a', { createdAt: later(9) });
+		const oldReview = item('b', { lane: 'review', createdAt: later(1) });
+		const oldQuick = item('c', { createdAt: later(2) });
+		const newReview = item('d', { lane: 'review', createdAt: later(5) });
+		const sorted = [newReview, newQuick, oldReview, oldQuick].sort(byLaneThenAge);
+		expect(sorted.map((i) => i.id)).toEqual([oldQuick.id, newQuick.id, oldReview.id, newReview.id]);
+	});
+
+	it('keeps the order of equal ones', () => {
+		const [a, b] = [item('a'), item('b')];
+		expect([a, b].sort(byLaneThenAge)).toEqual([a, b]);
+		expect([b, a].sort(byLaneThenAge)).toEqual([b, a]);
+	});
+});
+
 describe('pileOf', () => {
-	it('puts the quick lane first, oldest first, without the cards lifting away', () => {
+	it('puts the quick lane first, oldest first, without the cards leaving', () => {
 		const a = item('a');
 		const b = item('b', { lane: 'review' });
 		const c = item('c');
 		const d = item('d');
-		expect(pileOf([a, b, c, d], new Set()).map((i) => i.id)).toEqual([a.id, c.id, d.id, b.id]);
-		expect(pileOf([a, b, c, d], new Set([a.id])).map((i) => i.id)).toEqual([c.id, d.id, b.id]);
+		const ids = (leaving: string[]) =>
+			pileOf([a, b, c, d], { leaving: new Set(leaving) }).map((i) => i.id);
+		expect(ids([])).toEqual([a.id, c.id, d.id, b.id]);
+		expect(ids([a.id])).toEqual([c.id, d.id, b.id]);
+	});
+
+	it('leaves snoozed items off the pile, its edges included, until the daemon wakes them', () => {
+		const a = item('a');
+		const b = item('b', { snoozedUntil: later(15) });
+		const c = item('c');
+		expect(pileOf([a, b, c]).map((i) => i.id)).toEqual([a.id, c.id]);
+		expect(pileEdges(pileOf([a, b, c]).length)).toBe(1);
+		// Woken (`item.unsnoozed`): back on the pile.
+		expect(pileOf([a, { ...b, snoozedUntil: null }, c]).map((i) => i.id)).toEqual([
+			a.id,
+			b.id,
+			c.id
+		]);
+	});
+
+	it("never trusts this device's clock to decide: one 20 minutes off still agrees with the daemon", () => {
+		// The daemon snoozed it until 10:15 by its clock. This phone thinks it's 10:35 already.
+		const snoozed = item('b', { snoozedUntil: later(15) });
+		const awake = item('a');
+		const realNow = Date.now;
+		Date.now = () => t0 + 35 * 60_000;
+		try {
+			expect(pileOf([awake, snoozed]).map((i) => i.id)).toEqual([awake.id]);
+		} finally {
+			Date.now = realNow;
+		}
+		// And a phone running behind still shows a woken one.
+		Date.now = () => t0 - 60 * 60_000;
+		try {
+			expect(pileOf([awake, { ...snoozed, snoozedUntil: null }])).toHaveLength(2);
+		} finally {
+			Date.now = realNow;
+		}
+	});
+
+	it('keeps the card in front in front while others arrive or come back behind it', () => {
+		const review = item('r', { lane: 'review', createdAt: later(1) });
+		const quick = item('q', { createdAt: later(2) });
+		const back = item('o', { createdAt: later(0) }); // older, returning from a snooze
+		expect(pileOf([review, quick, back], { front: review.id }).map((i) => i.id)).toEqual([
+			review.id,
+			back.id,
+			quick.id
+		]);
+		// Gone (answered, snoozed): the front falls back to the usual order.
+		expect(pileOf([review, quick, back], { front: 'itm_gone', leaving: new Set() })[0]?.id).toBe(
+			back.id
+		);
+		expect(pileOf([review, quick], { front: review.id, leaving: new Set([review.id]) })[0]).toBe(
+			quick
+		);
+	});
+});
+
+describe('snooze times', () => {
+	it("counts down by the daemon's clock: this device's plus the connection's offset", () => {
+		const until = later(15); // set by the daemon at t0, its clock
+		// A phone 20 minutes ahead: its own clock would say "already back".
+		const phone = t0 + 20 * 60_000;
+		const offset = -20 * 60_000;
+		expect(snoozedLabel('Refresh tokens', until, phone + offset)).toBe(
+			'Refresh tokens · back in 15 min'
+		);
+		// A phone 5 minutes behind would say 20.
+		expect(minutesUntil(until, t0 - 5 * 60_000 + 5 * 60_000)).toBe(15);
+	});
+
+	it('says how long in whole minutes, never zero', () => {
+		expect(minutesUntil(later(15), t0)).toBe(15);
+		expect(minutesUntil(later(14.2), t0)).toBe(15);
+		expect(minutesUntil(later(0.1), t0)).toBe(1);
+		expect(minutesUntil(later(-2), t0)).toBe(1);
+		expect(snoozedLabel('Refresh tokens', later(15), t0)).toBe('Refresh tokens · back in 15 min');
+		expect(snoozedLabel('', later(15), t0)).toBe('Snoozed · back in 15 min');
+	});
+});
+
+describe('error cards', () => {
+	it('offer Retry on the filled button, Archive folded, and words to tell it', () => {
+		const e = failure('e');
+		const [step] = stepsOf(e);
+		expect(step).toMatchObject({
+			ask: "Claude's turn failed",
+			suggested: { label: 'Retry', value: 'retry' },
+			recommended: false,
+			others: [{ label: 'Archive', value: 'archive' }],
+			placeholder: 'Tell it something'
+		});
+		expect(answerOf(e, [{ choice: step!.suggested! }])).toEqual({ kind: 'error', action: 'retry' });
+		expect(answerOf(e, [{ choice: step!.others[0]! }])).toEqual({
+			kind: 'error',
+			action: 'archive'
+		});
+		expect(answerOf(e, [{ text: ' Use pnpm, not npm ' }])).toEqual({
+			kind: 'error',
+			action: 'tell',
+			text: 'Use pnpm, not npm'
+		});
 	});
 
 	it('puts finished work behind every card where an agent is stuck, however old it is', () => {
 		const done = finished('f', {});
 		const older = { ...finished('g'), createdAt: '2026-10-01T00:00:00.000Z' };
-		const ask = item('q', { createdAt: '2026-10-05T00:00:00.000Z' });
+		const ask = item('q', { createdAt: '2026-10-05T00:00:00.000Z' }); // newer than the proposal
 		const build = proposal('p');
-		expect(pileOf([older, done, ask, build], new Set()).map((i) => i.kind)).toEqual([
-			'question',
+		expect(pileOf([older, done, ask, build]).map((i) => i.kind)).toEqual([
 			'proposal',
+			'question',
 			'finished',
 			'finished'
 		]);
-		expect(pileOf([older, done, ask], new Set()).at(-1)?.id).toBe(done.id);
+		expect(pileOf([older, done, ask]).at(-1)?.id).toBe(done.id);
 	});
 });
 
@@ -129,7 +265,8 @@ describe('answerOf', () => {
 		],
 		['a permission request', permission('p')],
 		['a permission request with no suggestion', permission('q', null)],
-		['a proposal', proposal('r')]
+		['a proposal', proposal('r')],
+		['an error', failure('s')]
 	];
 
 	it.each(cases)('sends exactly what the filled buttons say, for %s', (_, asked) => {
@@ -145,9 +282,8 @@ describe('answerOf', () => {
 				expect(q.options.find((o) => o.value === answer.answers[q.id])?.label).toBe(shown);
 			});
 		} else {
-			expect(asked.options.find((o) => o.value === answer.decision)?.label).toBe(
-				steps[0]!.suggested!.label
-			);
+			const value = answer.kind === 'error' ? answer.action : answer.decision;
+			expect(asked.options.find((o) => o.value === value)?.label).toBe(steps[0]!.suggested!.label);
 		}
 	});
 

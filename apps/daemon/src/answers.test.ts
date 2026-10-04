@@ -6,7 +6,9 @@ import {
   answerFromWords,
   checkAnswer,
   deliveryPrompt,
+  errorPrompts,
   matchReply,
+  carryOn,
   standingReply,
 } from "./answers.ts";
 
@@ -40,6 +42,7 @@ const base = {
   detached: true,
   resolvedAt: null,
   resolution: null,
+  snoozedUntil: null,
 } as const;
 
 const question = (questions: UserInputQuestion[] = [color]): QueueItem => ({
@@ -65,6 +68,74 @@ const permission: QueueItem = {
   },
   fingerprint: fingerprintOf("Bash", { command: "rm -rf build" }),
 };
+const error = (prompts: string[] = ["Fix it"]): QueueItem => ({
+  ...base,
+  kind: "error",
+  ask: "Claude's turn failed",
+  options: [],
+  suggested: "retry",
+  questions: [],
+  error: { cause: "turn", message: "API Error: 529", prompts },
+});
+
+describe("error items", () => {
+  it("take retry, archive, or words to tell the agent, from the CLI too", () => {
+    expect(answerFromWords(error(), ["retry"])).toEqual({ kind: "error", action: "retry" });
+    expect(answerFromWords(error(), ["1"])).toEqual({ kind: "error", action: "retry" });
+    expect(answerFromWords(error(), ["archive"])).toEqual({ kind: "error", action: "archive" });
+    expect(answerFromWords(error(), ["use", "pnpm"])).toEqual({
+      kind: "error",
+      action: "tell",
+      text: "use pnpm",
+    });
+  });
+
+  it("are checked: words to tell are tidied and required; no standing reply", () => {
+    expect(checkAnswer(error(), { kind: "error", action: "tell", text: " hi " })).toEqual({
+      kind: "error",
+      action: "tell",
+      text: "hi",
+    });
+    expect(checkAnswer(error(), { kind: "error", action: "retry", text: "x" })).toEqual({
+      kind: "error",
+      action: "retry",
+    });
+    expect(() => checkAnswer(error(), { kind: "error", action: "tell" })).toThrow(/Say what/);
+    expect(() => checkAnswer(permission, { kind: "error", action: "retry" })).toThrow(
+      /permission request/,
+    );
+    expect(standingReply(error(), { kind: "error", action: "retry" })).toBeNull();
+  });
+
+  const retry = { kind: "error", action: "retry" } as const;
+  const withCause = (cause: "start" | "crash" | "turn", prompts: string[]): QueueItem => ({
+    ...error(prompts),
+    error: { cause, message: "Claude Code process exited with code 3", prompts },
+  });
+
+  it("Retry, agent never started: the prompts that never went, as they were", () => {
+    expect(errorPrompts(withCause("start", ["a", "b"]), retry)).toEqual(["a", "b"]);
+    // Nothing was waiting: just carry on.
+    expect(errorPrompts(withCause("start", []), retry)).toEqual([carryOn(withCause("start", []).error)]);
+  });
+
+  it("Retry, a crash or failed turn: never the prompt again, but check-what's-done-then-carry-on", () => {
+    for (const cause of ["crash", "turn"] as const) {
+      const [prompt] = errorPrompts(withCause(cause, ["Push the fix and open a PR"]), retry);
+      expect(prompt).not.toBe("Push the fix and open a PR");
+      expect(prompt).toContain("Your last turn didn't finish: Claude Code process exited with code 3");
+      expect(prompt).toContain('It began with my message: "Push the fix and open a PR"');
+      expect(prompt).toMatch(/don't redo it/);
+    }
+    // A turn the agent started by itself: no message of ours to quote.
+    const [own] = errorPrompts(withCause("turn", []), retry);
+    expect(own).not.toContain("It began with");
+  });
+
+  it("Tell it something sends the words", () => {
+    expect(errorPrompts(error(), { kind: "error", action: "tell", text: "hi" })).toEqual(["hi"]);
+  });
+});
 
 describe("answerFromWords", () => {
   it("picks an option by number or label, or takes free text", () => {

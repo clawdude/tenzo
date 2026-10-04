@@ -56,6 +56,10 @@ export const Command = z.discriminatedUnion("type", [
     itemId: z.string().min(1),
     answer: ItemAnswer,
   }),
+  /** Not now: the item leaves the Pass for a while (15 minutes) and comes back by itself. */
+  z.object({ type: z.literal("item.snooze"), itemId: z.string().min(1) }),
+  /** Brings a snoozed item back now (Undo). An item that is awake already stays as it is. */
+  z.object({ type: z.literal("item.unsnooze"), itemId: z.string().min(1) }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -85,12 +89,15 @@ export const CommandResults = {
     item: QueueItem,
     /**
      * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
-     * asked had stopped, so the answer goes to it as a message when its session resumes. `none`:
-     * nothing goes to the agent (finished work marked done).
+     * asked had stopped (or it is an error item), so the answer goes to it as its next prompt.
+     * `none`: nothing goes to the agent (finished work marked done). `archived`: an error item
+     * answered with Archive; the thread is gone.
      */
-    delivery: z.enum(["live", "message", "none"]),
+    delivery: z.enum(["live", "message", "none", "archived"]),
     thread: ThreadView,
   }),
+  "item.snooze": z.object({ item: QueueItem, thread: ThreadView }),
+  "item.unsnooze": z.object({ item: QueueItem, thread: ThreadView }),
 } satisfies Record<CommandType, z.ZodType>;
 export type CommandResult<T extends CommandType> = z.infer<(typeof CommandResults)[T]>;
 

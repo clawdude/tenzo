@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { isSnoozed } from "./index.ts";
 import { applyFrame, EMPTY } from "./state.ts";
 import { item, project, snapshotFrame, thread } from "./testing.ts";
 
@@ -30,6 +31,23 @@ describe("applyFrame", () => {
     expect(applyFrame(data, { type: "thread", thread: thread("z", { status: "archived" }) })).toBe(
       data,
     );
+  });
+
+  it("keeps a snoozed item, with its return time, until the daemon wakes it; the daemon decides", () => {
+    // A time long past by any clock: still snoozed until the daemon says otherwise.
+    const until = "2000-01-01T00:00:00.000Z";
+    let data = applyFrame(EMPTY, snapshotFrame([thread("a")], [item("x", "a")]));
+    data = applyFrame(data, {
+      type: "item",
+      change: "snoozed",
+      item: item("x", "a", { snoozedUntil: until }),
+    });
+    const [snoozed] = data.items;
+    expect(snoozed?.snoozedUntil).toBe(until);
+    expect(isSnoozed(snoozed ?? item("x", "a"))).toBe(true);
+    data = applyFrame(data, { type: "item", change: "unsnoozed", item: item("x", "a") });
+    expect(data.items[0]?.snoozedUntil).toBeNull();
+    expect(isSnoozed(data.items[0] ?? item("x", "a", { snoozedUntil: until }))).toBe(false);
   });
 
   it("opens, updates and resolves items, and a repeat changes nothing", () => {

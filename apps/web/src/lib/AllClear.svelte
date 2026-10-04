@@ -1,14 +1,14 @@
 <script lang="ts">
-	import type { ThreadView } from '@tenzo/client-runtime';
 	import { fade } from 'svelte/transition';
-	import { ageLabel } from '#lib/pass.ts';
+	import type { MeanwhileRow } from '#lib/meanwhile.ts';
 
 	interface Props {
-		/** Threads at work while nothing needs you. */
-		working: readonly ThreadView[];
-		now: number;
+		/** Threads at work and snoozed items, while nothing needs you (meanwhile.ts). */
+		meanwhile: readonly MeanwhileRow[];
+		/** Brings a snoozed item back now. */
+		onwake: (itemId: string) => void;
 	}
-	let { working, now }: Props = $props();
+	let { meanwhile, onwake }: Props = $props();
 </script>
 
 <!-- Nothing needs you: the card becomes the way to start something. -->
@@ -37,15 +37,31 @@
 		</span>
 	</a>
 
-	{#if working.length > 0}
-		<section class="flex flex-col gap-0.5 px-2">
+	{#if meanwhile.length > 0}
+		<section class="flex flex-col gap-0.5 px-2" data-testid="meanwhile">
 			<h2 class="mb-2 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">Meanwhile</h2>
-			{#each working as thread (thread.id)}
-				<div class="flex min-h-12 items-center gap-3" data-testid="working">
-					<span class="size-2 shrink-0 rounded-full bg-working"></span>
-					<span class="grow truncate text-[17px]">{thread.title}</span>
-					<span class="shrink-0 text-[15px] text-faint">{ageLabel(thread.createdAt, now)}</span>
-				</div>
+			{#each meanwhile as row (row.key)}
+				{#if row.kind === 'working'}
+					<div class="flex min-h-12 items-center gap-3" data-testid="working">
+						<span class="size-2 shrink-0 rounded-full bg-working"></span>
+						<span class="grow truncate text-[17px]">{row.title}</span>
+						<span class="shrink-0 text-[15px] text-faint">{row.age}</span>
+					</div>
+				{:else}
+					<!-- Snoozed: back by itself when the time is up, or now with a tap. -->
+					<button
+						type="button"
+						class="opt flex min-h-12 w-full items-center gap-3 text-left"
+						aria-label={`${row.title}, snoozed, ${row.left}. Bring it back now`}
+						onclick={() => onwake(row.itemId)}
+						data-testid="snoozed"
+						data-id={row.itemId}
+					>
+						<span class="size-2 shrink-0 rounded-full bg-fill-strong"></span>
+						<span class="grow truncate text-[17px] text-ink-soft">{row.title} · snoozed</span>
+						<span class="shrink-0 text-[15px] text-faint">{row.left}</span>
+					</button>
+				{/if}
 			{/each}
 		</section>
 	{/if}

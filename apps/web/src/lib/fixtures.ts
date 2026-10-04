@@ -43,6 +43,7 @@ export function item(tag: string, overrides: Partial<QueueItem> = {}): QueueItem
 		detached: false,
 		resolvedAt: null,
 		resolution: null,
+		snoozedUntil: null,
 		...overrides
 	};
 }
@@ -93,6 +94,20 @@ export function permission(tag: string, suggested: string | null = 'allow'): Que
 		suggested,
 		questions: [],
 		permission: { toolKind: 'command', toolName: 'Bash', detail: 'uname -a', input: {} }
+	});
+}
+
+export function failure(tag: string, message = 'API Error: 529 Overloaded'): QueueItem {
+	return item(tag, {
+		kind: 'error',
+		ask: "Claude's turn failed",
+		options: [
+			{ label: 'Retry', value: 'retry', description: '', recommended: true },
+			{ label: 'Archive', value: 'archive', description: '', recommended: false }
+		],
+		suggested: 'retry',
+		questions: [],
+		error: { cause: 'turn', message, prompts: ['Fix it'] }
 	});
 }
 

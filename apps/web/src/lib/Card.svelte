@@ -93,7 +93,7 @@
 </script>
 
 <article
-	class="absolute inset-0 flex flex-col overflow-hidden rounded-[28px] bg-card shadow-[0_24px_60px_rgba(0,0,0,.6)]"
+	class="absolute inset-0 flex touch-pan-y flex-col overflow-hidden rounded-[28px] bg-card shadow-[0_24px_60px_rgba(0,0,0,.6)]"
 	data-testid="card"
 	data-id={item.id}
 	data-kind={item.kind}
@@ -111,7 +111,7 @@
 
 	<!-- Text scrolls in here and fades out above the answers, which never move. -->
 	<div
-		class="scroll min-h-0 grow overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
+		class="scroll min-h-0 grow touch-pan-y overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
 	>
 		{#if item.context && !compact && !view}
 			<!--
@@ -157,6 +157,12 @@
 				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
 				{@html renderMarkdown(item.proposal.summary)}
 			</div>
+		{/if}
+		{#if item.error}
+			<!-- What went wrong, in the agent's (or Tenzo's) own words. -->
+			<pre
+				class="rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft"
+				data-testid="error-message">{item.error.message}</pre>
 		{/if}
 
 		{#if view}
@@ -224,8 +230,8 @@
 			{/if}
 		{/if}
 
-		<!-- Proposals and finished work show all they have; their backs come with #22. -->
-		{#if item.kind !== 'proposal' && item.kind !== 'finished'}
+		<!-- Proposals, finished work and errors show all they have; their backs come with #22. -->
+		{#if item.kind !== 'proposal' && item.kind !== 'finished' && item.kind !== 'error'}
 			<button
 				type="button"
 				class="opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium"
@@ -265,7 +271,7 @@
 		{/if}
 	</div>
 
-	<div class="scroll flex max-h-[58%] shrink-0 flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
+	<div class="scroll flex max-h-[58%] shrink-0 touch-pan-y flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
 		{#if failure}
 			<p class="px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">
 				{failure.message}

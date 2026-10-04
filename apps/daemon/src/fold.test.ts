@@ -10,6 +10,8 @@ import {
 import { describe, expect, it } from "vitest";
 import {
   CONTEXT_LIMIT,
+  ERROR_LIMIT,
+  errorRequestId,
   type FoldState,
   foldEvent,
   foldEvents,
@@ -436,6 +438,215 @@ describe("replay", () => {
     expect([...items.values()]).toEqual(whole.items);
     expect(whole.state.runtime).toMatchObject({ live: true, sessionId: "sess-2", context: "Resumed." });
     expect(whole.state.open.map((i) => [i.requestId, i.detached])).toEqual([[REQ1, true]]);
+  });
+});
+
+describe("foldEvent: error items", () => {
+  const failed = (extra: Record<string, unknown> = {}) =>
+    ev({ type: "turn.completed", turnId: TURN, payload: { state: "failed", ...extra } });
+  const runtimeError = (message: string, extra: Record<string, unknown> = {}) =>
+    ev({ type: "runtime.error", payload: { message }, ...extra });
+
+  it("a failed turn opens a quick-lane error item: what went wrong, Retry suggested", () => {
+    const fail = failed({ errorMessage: "API Error: 529 Overloaded" });
+    const { state, items } = fold(started(), turnStarted(), said("Looking at the tests."), fail);
+    const item = items[0] as QueueItem;
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      id: itemIdFor(errorRequestId(fail.eventId)),
+      requestId: errorRequestId(fail.eventId),
+      lane: "quick",
+      kind: "error",
+      turnId: TURN,
+      context: "Looking at the tests.",
+      ask: "Claude's turn failed",
+      suggested: "retry",
+      options: [
+        { label: "Retry", value: "retry" },
+        { label: "Archive", value: "archive" },
+      ],
+      error: { cause: "turn", message: "API Error: 529 Overloaded", prompts: ["go"] },
+      status: "open",
+      snoozedUntil: null,
+    });
+    expect(state.open).toEqual([item]);
+    expect(state.runtime.turnId).toBeNull();
+  });
+
+  it("takes the agent's runtime error when the failed turn says nothing itself", () => {
+    const { items } = fold(
+      started(),
+      turnStarted(),
+      runtimeError("Claude sign-in failed: expired", { turnId: TURN }),
+      failed(),
+    );
+    expect(items.map((i) => i.error?.message)).toEqual(["Claude sign-in failed: expired"]);
+  });
+
+  it("a completed or interrupted turn opens nothing", () => {
+    const interrupted = ev({ type: "turn.completed", turnId: TURN, payload: { state: "interrupted" } });
+    expect(fold(started(), turnStarted(), completed()).items).toEqual([]);
+    expect(fold(started(), turnStarted(), interrupted).items).toEqual([]);
+  });
+
+  it("a crash mid-turn with nothing asked opens one; with an item open, that item is enough", () => {
+    const crash = ev({
+      type: "session.exited",
+      turnId: TURN,
+      payload: { exitKind: "error", reason: "Claude Code process exited with code 1" },
+    });
+    const { items } = fold(started(), turnStarted(), crash);
+    expect(items).toMatchObject([
+      {
+        kind: "error",
+        ask: "Claude stopped mid-turn",
+        error: {
+          cause: "crash",
+          message: "Claude Code process exited with code 1",
+          prompts: ["go"],
+        },
+      },
+    ]);
+    const asking = fold(started(), turnStarted(), asked(), exited("error"));
+    expect(asking.items.map((i) => [i.kind, i.detached])).toEqual([["question", true]]);
+  });
+
+  it("no error for a crash or a stop between turns: nothing was cut short", () => {
+    expect(fold(started(), turnStarted(), completed(), exited("error")).items).toEqual([]);
+    expect(fold(started(), turnStarted(), completed(), exited("graceful")).items).toEqual([]);
+  });
+
+  it("no card for a stop Tenzo asked for mid-turn (an archive, its own restart resumes it)", () => {
+    expect(fold(started(), turnStarted(), exited("graceful")).items).toEqual([]);
+  });
+
+  it("an agent that couldn't start opens one that keeps the prompts that never went", () => {
+    const { items } = fold(
+      ev({
+        type: "runtime.error",
+        payload: { message: "Couldn't start claude: not found", unsent: ["Fix it", "And test it"] },
+      }),
+    );
+    expect(items).toMatchObject([
+      {
+        ask: "Claude couldn't start",
+        error: { cause: "start", prompts: ["Fix it", "And test it"] },
+      },
+    ]);
+    expect(items[0]?.turnId).toBeUndefined();
+  });
+
+  it("failing to start again updates that one card, with every prompt that never went", () => {
+    const cantStart = (unsent: string[]) =>
+      ev({ type: "runtime.error", payload: { message: "Couldn't start claude: gone", unsent } });
+    const first = foldEvent(INITIAL_STATE, cantStart(["Fix it"]), ENV);
+    const again = foldEvent(first.state, cantStart(["And test it"]), ENV);
+    expect(again.changes).toMatchObject([
+      {
+        type: "updated",
+        item: {
+          id: first.changes[0]?.item.id,
+          error: { cause: "start", prompts: ["Fix it", "And test it"] },
+        },
+      },
+    ]);
+    expect(again.state.open).toHaveLength(1);
+  });
+
+  it("a turn the agent starts by itself leaves the card; only a prompt of ours clears it", () => {
+    const own = ev({ type: "turn.started", turnId: TURN2, payload: {} });
+    const { state } = fold(started(), turnStarted(), failed(), own);
+    expect(state.open.map((i) => i.kind)).toEqual(["error"]);
+  });
+
+  it("Retry and Tell it something resolve it; so does the thread's next turn, as recovered", () => {
+    const fail = failed();
+    const req = errorRequestId(fail.eventId);
+    const retried = fold(
+      started(),
+      turnStarted(),
+      fail,
+      ev({ type: "error.resolved", requestId: req, payload: { action: "retry" } }),
+    );
+    expect(retried.state.open).toEqual([]);
+    expect(retried.items[0]?.resolution).toEqual({ kind: "retried" });
+
+    const told = fold(
+      started(),
+      turnStarted(),
+      fail,
+      ev({ type: "error.resolved", requestId: req, payload: { action: "tell", text: "Use pnpm" } }),
+    );
+    expect(told.items[0]?.resolution).toEqual({ kind: "told", text: "Use pnpm" });
+
+    const recovered = fold(started(), turnStarted(), fail, turnStarted(TURN2));
+    expect(recovered.state.open).toEqual([]);
+    expect(recovered.items[0]).toMatchObject({
+      status: "resolved",
+      resolution: { kind: "recovered" },
+    });
+    expect(recovered.state.runtime).toMatchObject({ turnId: TURN2, prompt: "go", error: null });
+  });
+
+  it("remembers the turn's prompt and error; a new turn starts clean", () => {
+    const { state } = fold(started(), turnStarted(), runtimeError("boom", { turnId: TURN }));
+    expect(state.runtime).toMatchObject({ prompt: "go", error: "boom" });
+    const agentTurn = ev({ type: "turn.started", turnId: TURN2, payload: {} });
+    expect(fold(started(), turnStarted(), completed(), agentTurn).state.runtime).toMatchObject({
+      prompt: null,
+      error: null,
+    });
+  });
+
+  it("cuts a long message; archive dismisses the error like any item", () => {
+    const { items } = fold(started(), turnStarted(), failed({ errorMessage: "x".repeat(5000) }));
+    expect(items[0]?.error?.message.length).toBe(ERROR_LIMIT);
+    const archived = fold(
+      started(),
+      turnStarted(),
+      failed(),
+      ev({ type: "thread.archived", payload: {} }),
+    );
+    expect(archived.items[0]?.resolution).toEqual({ kind: "dismissed" });
+  });
+
+  it("the same log gives the same error item, id included", () => {
+    const log = [started(), turnStarted(), failed({ errorMessage: "no" })];
+    expect(fold(...log).items).toEqual(fold(...log).items);
+  });
+});
+
+describe("foldEvent: snooze", () => {
+  const until = "2026-10-02T12:15:00.000Z";
+  const snoozed = (requestId = REQ1) =>
+    ev({ type: "item.snoozed", requestId, payload: { until } });
+  const unsnoozed = (requestId = REQ1, reason = "returned") =>
+    ev({ type: "item.unsnoozed", requestId, payload: { reason } });
+
+  it("snoozing sets the item's return time, and waking clears it; it stays open", () => {
+    const first = fold(started(), turnStarted(), asked(), snoozed());
+    expect(first.state.open).toMatchObject([{ requestId: REQ1, snoozedUntil: until }]);
+    const folded = foldEvent(first.state, unsnoozed(REQ1, "undo"), ENV);
+    expect(folded.changes).toMatchObject([
+      { type: "unsnoozed", item: { requestId: REQ1, snoozedUntil: null, status: "open" } },
+    ]);
+    expect(folded.state.open[0]?.snoozedUntil).toBeNull();
+  });
+
+  it("reports the change, and nothing for an item that isn't open or is already so", () => {
+    const { state } = fold(started(), turnStarted(), asked());
+    const change = foldEvent(state, snoozed(), ENV);
+    expect(change.changes.map((c) => c.type)).toEqual(["snoozed"]);
+    expect(foldEvent(change.state, snoozed(), ENV).changes).toEqual([]);
+    expect(foldEvent(state, unsnoozed(), ENV).changes).toEqual([]);
+    expect(foldEvent(state, snoozed(REQ2), ENV).changes).toEqual([]);
+    const answeredState = fold(started(), turnStarted(), asked(), answered()).state;
+    expect(foldEvent(answeredState, snoozed(), ENV)).toEqual({ state: answeredState, changes: [] });
+  });
+
+  it("a snoozed item answered or archived resolves as usual", () => {
+    const { items } = fold(started(), turnStarted(), asked(), snoozed(), answered());
+    expect(items[0]).toMatchObject({ status: "resolved", snoozedUntil: until });
   });
 });
 

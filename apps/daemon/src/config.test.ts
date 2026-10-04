@@ -78,4 +78,12 @@ describe("readConfig", () => {
     expect(readConfig({ TENZO_DEFAULT_MODEL: " " }).defaultModel).toBeUndefined();
     expect(readConfig({ TENZO_DEFAULT_MODEL: " haiku " }).defaultModel).toBe("haiku");
   });
+
+  it("takes a snooze length from TENZO_SNOOZE_MS, for trying snooze out", () => {
+    expect(readConfig({}).snoozeMs).toBeUndefined();
+    expect(readConfig({ TENZO_SNOOZE_MS: "20000" }).snoozeMs).toBe(20_000);
+    for (const bad of ["0", "999", "1.5", "soon", String(25 * 60 * 60_000)]) {
+      expect(() => readConfig({ TENZO_SNOOZE_MS: bad })).toThrow(/TENZO_SNOOZE_MS/);
+    }
+  });
 });

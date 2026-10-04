@@ -74,6 +74,7 @@ describe("formatItem", () => {
     detached: false,
     resolvedAt: null,
     resolution: null,
+    snoozedUntil: null,
   };
 
   it("shows the context, the question and numbered options with the suggestion", () => {

@@ -52,7 +52,8 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
     store.db
       .prepare(
         `UPDATE threads SET live = ?, agent = ?, session_id = ?, turn_id = ?, context = ?, phase = ?,
-           attachments = ?, preview = ?
+           attachments = ?, preview = ?,
+           turn_prompt = ?, turn_error = ?
          WHERE id = ?`,
       )
       .run(
@@ -64,6 +65,8 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
         r.phase,
         JSON.stringify(r.attachments),
         r.preview === null ? null : JSON.stringify(r.preview),
+        r.prompt,
+        r.error,
         event.threadId,
       );
     // A request id seen before never opens an item again, even one already resolved.
@@ -79,7 +82,9 @@ export function appendEvent(store: Store, event: RuntimeEvent): Appended {
 export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
   const row = store.db
     .prepare(
-      "SELECT live, agent, session_id, turn_id, context, phase, attachments, preview FROM threads WHERE id = ?",
+      `SELECT live, agent, session_id, turn_id, context, phase, attachments, preview, turn_prompt,
+         turn_error
+       FROM threads WHERE id = ?`,
     )
     .get(threadId);
   if (!row) throw new Error(`No thread ${threadId} for an event`);
@@ -95,6 +100,8 @@ export function loadFoldState(store: Store, threadId: ThreadId): FoldState {
         .catch([])
         .parse(JSON.parse(String(row.attachments ?? "[]"))),
       preview: row.preview === null ? null : Preview.parse(JSON.parse(String(row.preview))),
+      prompt: row.turn_prompt === null ? null : String(row.turn_prompt),
+      error: row.turn_error === null ? null : String(row.turn_error),
     },
     open: queryItems(store, "WHERE thread_id = ? AND status = 'open'", threadId),
     known: new Set(
@@ -200,17 +207,25 @@ export interface QueuedPrompt {
   createdAt: string;
 }
 
+/** Queues a prompt for the thread, last; `first` puts it before every prompt waiting. */
 export function enqueuePrompt(
   store: Store,
   threadId: ThreadId,
   text: string,
   reply: StandingReply | null = null,
+  { first = false }: { first?: boolean } = {},
 ): void {
+  // The queue is ordered by seq; one below the lowest waiting goes before them all.
+  const lowest = first
+    ? store.db.prepare("SELECT MIN(seq) AS seq FROM prompts").get()?.seq
+    : null;
+  const seq = typeof lowest === "number" ? lowest - 1 : null;
   store.db
     .prepare(
-      "INSERT INTO prompts (environment_id, thread_id, text, reply, created_at) VALUES (?, ?, ?, ?, ?)",
+      "INSERT INTO prompts (seq, environment_id, thread_id, text, reply, created_at) VALUES (?, ?, ?, ?, ?, ?)",
     )
     .run(
+      seq,
       store.environmentId,
       threadId,
       text,
@@ -231,6 +246,14 @@ export function nextPrompt(store: Store, threadId: ThreadId): QueuedPrompt | und
     reply: row.reply === null ? null : (JSON.parse(String(row.reply)) as StandingReply),
     createdAt: String(row.created_at),
   };
+}
+
+/** The texts of the thread's waiting prompts, oldest first. */
+export function queuedPrompts(store: Store, threadId: ThreadId): string[] {
+  return store.db
+    .prepare("SELECT text FROM prompts WHERE thread_id = ? ORDER BY seq")
+    .all(threadId)
+    .map((row) => String(row.text));
 }
 
 export function removePrompt(store: Store, seq: number): void {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { finished, item, permission, proposal, thread } from './fixtures.ts';
+import { failure, finished, item, permission, proposal, thread } from './fixtures.ts';
 import { groupThreads, rowOf } from './threads.ts';
 
 // Local times, so "today" means the same wherever the tests run.
@@ -63,11 +63,38 @@ describe('rowOf', () => {
 			tone: 'working',
 			word: 'discussing'
 		});
-		expect(rowOf(thread('b', { activity: 'working', phase: 'building' }), [])).toMatchObject({
-			tone: 'working',
-			word: 'building'
-		});
+		expect(
+			rowOf(thread('b', { activity: 'working', phase: 'building' }), [])
+		).toMatchObject({ tone: 'working', word: 'building' });
 		expect(rowOf(thread('c'), [])).toMatchObject({ tone: 'done', word: 'done' });
-		expect(rowOf(thread('d', { lastSeq: 0 }), [])).toMatchObject({ tone: 'quiet', word: 'new' });
+		expect(rowOf(thread('d', { lastSeq: 0 }), [])).toMatchObject({
+			tone: 'quiet',
+			word: 'new'
+		});
+	});
+
+	it('says failed, in clay, for a thread whose last turn failed: never done', () => {
+		const t = thread('a', { activity: 'needs-you' });
+		const failed = { ...failure('e'), threadId: t.id };
+		expect(rowOf(t, [failed])).toMatchObject({ tone: 'clay', word: 'failed' });
+		expect(groupThreads([t], [failed], now)[0]?.key).toBe('needs-you');
+	});
+
+	it('says snoozed, quietly, while all its items are; needs you again once one is back', () => {
+		const t = thread('a', { activity: 'snoozed', activeAt: noon });
+		const until = new Date(now + 10 * 60_000).toISOString();
+		const snoozed = item('x', { threadId: t.id, snoozedUntil: until });
+		expect(rowOf(t, [snoozed])).toMatchObject({ tone: 'quiet', word: 'snoozed' });
+		expect(groupThreads([t], [snoozed], now)[0]?.key).toBe('today');
+		// Still snoozed long after its time by this device's clock: the daemon hasn't woken it.
+		const late = now + 60 * 60_000;
+		expect(groupThreads([t], [snoozed], late)[0]?.rows[0]?.word).toBe('snoozed');
+		// Woken by the daemon: it needs you again.
+		const woken = { ...snoozed, snoozedUntil: null };
+		expect(rowOf(t, [woken])).toMatchObject({ tone: 'clay', word: 'asking' });
+		expect(groupThreads([t], [woken], now)[0]?.key).toBe('needs-you');
+		// One awake beside a snoozed one: it needs you, and says for what.
+		const awake = { ...failure('e'), threadId: t.id };
+		expect(rowOf(t, [snoozed, awake])).toMatchObject({ tone: 'clay', word: 'failed' });
 	});
 });
