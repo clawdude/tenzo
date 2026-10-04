@@ -242,6 +242,33 @@ describe("/ws", () => {
     expect(live.ws.readyState).toBe(WebSocket.OPEN);
   });
 
+  it("makes one thread for a thread.create sent twice under one client key, from any client", async () => {
+    const daemon = await start();
+    const a = await Client.open(daemon);
+    const create = {
+      type: "thread.create",
+      project: "app",
+      prompt: "Paint it",
+      clientKey: "key-socket-01",
+    } as const;
+    const first = await a.command(create);
+    a.ws.terminate(); // the answer may have been lost: the client reconnects and retries
+    const b = await Client.open(daemon);
+    const second = await b.command(create);
+    const id = (answer: typeof first) => answer.type === "ok" && (answer.result as { thread: { id: string } }).thread.id;
+    expect(first).toMatchObject({ type: "ok", result: { thread: { title: "Paint it" } } });
+    expect(id(second)).toBe(id(first));
+    const listed = await b.command({ type: "snapshot" });
+    expect(listed.type === "ok" && listed.result).toMatchObject({ threads: [{ title: "Paint it" }] });
+    expect(listed.type === "ok" && (listed.result as { threads: unknown[] }).threads).toHaveLength(1);
+
+    const reused = await b.command({ ...create, prompt: "Paint it red" });
+    expect(reused).toMatchObject({
+      type: "error",
+      error: expect.stringMatching(/already used for another thread\.create/),
+    });
+  });
+
   it("stops sending to a client once it has gone", async () => {
     const daemon = await start();
     const gone = await Client.open(daemon);

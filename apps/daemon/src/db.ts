@@ -122,6 +122,8 @@ export const MIGRATIONS: readonly Migration[] = [
       -- The client's key for the thread.create that made this thread: the same key again (a
       -- retry after a dropped connection) gets this thread back instead of a second one.
       ALTER TABLE threads ADD COLUMN client_key TEXT;
+      -- What that create asked for (engine.ts): the same key with another request is refused.
+      ALTER TABLE threads ADD COLUMN client_request TEXT;
       CREATE UNIQUE INDEX threads_by_client_key ON threads (client_key);
     `,
   },

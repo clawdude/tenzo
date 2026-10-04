@@ -52,8 +52,8 @@ export async function createThread(
     model?: string;
     /** The prompt `title` stands in for until the titler names the thread (`finishNaming`). */
     naming?: string;
-    /** The client's key for this create (see `threadByClientKey`). */
-    clientKey?: string;
+    /** The client's key for this create and what it asked for (see `threadByClientKey`). */
+    client?: { key: string; request: string };
   } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
@@ -93,8 +93,8 @@ export async function createThread(
       .prepare(
         `INSERT INTO threads
            (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at,
-            environment_id, model, naming, client_key)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_id, model, naming, client_key, client_request)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -109,7 +109,8 @@ export async function createThread(
         thread.environmentId,
         thread.model,
         options.naming ?? null,
-        options.clientKey ?? null,
+        options.client?.key ?? null,
+        options.client?.request ?? null,
       );
   } catch (error) {
     // Nobody has seen this worktree or branch yet: undo both rather than leave strays.
@@ -212,10 +213,13 @@ export function threadsToName(store: Store): { id: ThreadId; prompt: string }[] 
     .map((row) => ({ id: String(row.id) as ThreadId, prompt: String(row.naming) }));
 }
 
-/** The thread an earlier `thread.create` with this client key made, if any. */
-export function threadByClientKey(store: Store, clientKey: string): Thread | undefined {
+/** The thread an earlier `thread.create` with this client key made, and what it asked, if any. */
+export function threadByClientKey(
+  store: Store,
+  clientKey: string,
+): { thread: Thread; request: string } | undefined {
   const row = store.db.prepare("SELECT * FROM threads WHERE client_key = ?").get(clientKey);
-  return row ? toThread(row) : undefined;
+  return row ? { thread: toThread(row), request: String(row.client_request) } : undefined;
 }
 
 export function getThread(store: Store, threadId: string): Thread {

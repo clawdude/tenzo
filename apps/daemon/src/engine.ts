@@ -87,6 +87,16 @@ export interface NewThread {
   clientKey?: string;
 }
 
+/** What a `thread.create` asked for, to tell a retry (the same) from a reused key (not). */
+function createRequest(input: NewThread): string {
+  return JSON.stringify([
+    input.project,
+    input.title?.trim() ?? "",
+    input.prompt?.trim() ?? "",
+    input.model ?? "",
+  ]);
+}
+
 /** What subscribers hear: each event as stored, each item change, each thread change. */
 export type EngineChange =
   | ({ type: "event" } & StoredEvent)
@@ -122,7 +132,7 @@ export class Engine {
   readonly #naming = new Set<Promise<void>>();
   readonly #stopNaming = new AbortController();
   /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
-  readonly #creating = new Map<string, Promise<ThreadView>>();
+  readonly #creating = new Map<string, { request: string; thread: Promise<ThreadView> }>();
   #closing = false;
 
   constructor(options: EngineOptions) {
@@ -161,21 +171,29 @@ export class Engine {
 
   /**
    * A new thread. With a `clientKey`, a create the daemon has made (or is making) under that key
-   * answers with that thread instead: a client's retry never makes a second one.
+   * answers with that thread instead: a client's retry never makes a second one. The same key
+   * with another request (project, title, prompt or model) is a client bug, and is refused.
    */
   async createThread(input: NewThread): Promise<ThreadView> {
     const key = input.clientKey;
     if (key === undefined) return this.#create(input);
+    const request = createRequest(input);
     const made = threadByClientKey(this.store, key);
-    if (made) return this.view(made.id);
     const pending = this.#creating.get(key);
-    if (pending) return pending;
-    const creating = this.#create(input).finally(() => this.#creating.delete(key));
-    this.#creating.set(key, creating);
-    return creating;
+    const seen = made?.request ?? pending?.request;
+    if (seen !== undefined && seen !== request) {
+      throw new TenzoError(
+        `Client key "${key}" was already used for another thread.create (a different project, title, prompt or model). A new request needs a new key.`,
+      );
+    }
+    if (made) return this.view(made.thread.id);
+    if (pending) return pending.thread;
+    const thread = this.#create(input, { key, request }).finally(() => this.#creating.delete(key));
+    this.#creating.set(key, { request, thread });
+    return thread;
   }
 
-  async #create(input: NewThread): Promise<ThreadView> {
+  async #create(input: NewThread, client?: { key: string; request: string }): Promise<ThreadView> {
     const prompt = input.prompt?.trim();
     const given = input.title?.trim();
     // Without a title, the prompt's first words stand in until the titler has a name.
@@ -185,7 +203,7 @@ export class Engine {
     const thread = await createThread(this.store, input.project, title, {
       ...(model ? { model } : {}),
       ...(prompt && !given ? { naming: prompt } : {}),
-      ...(input.clientKey ? { clientKey: input.clientKey } : {}),
+      ...(client ? { client } : {}),
     });
     if (prompt) enqueuePrompt(this.store, thread.id, prompt);
     this.#pump(thread.id);

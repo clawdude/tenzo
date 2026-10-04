@@ -46,6 +46,17 @@ describe("contracts", () => {
     expect(Command.safeParse({ type: "thread.delete" }).success).toBe(false);
   });
 
+  it("takes a thread.create client key of 8 to 128 characters", () => {
+    const create = { type: "thread.create", project: "app", prompt: "Hi" };
+    const withKey = (clientKey: string) => Command.safeParse({ ...create, clientKey }).success;
+    expect(Command.safeParse(create).success).toBe(true);
+    expect(withKey("x".repeat(8))).toBe(true);
+    expect(withKey("x".repeat(128))).toBe(true);
+    expect(withKey("x".repeat(7))).toBe(false);
+    expect(withKey("x".repeat(129))).toBe(false);
+    expect(withKey("")).toBe(false);
+  });
+
   it("parses client frames by type, a command's shape included", () => {
     expect(ClientFrame.parse({ type: "ping", at: "x" }).type).toBe("ping");
     const command = { type: "command", id: "1", command: { type: "snapshot" } };

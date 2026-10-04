@@ -33,7 +33,11 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Playwright version
         id: playwright
-        run: echo "version=$(pnpm --filter @tenzo/smoke exec playwright-core --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          version=$(pnpm --filter @tenzo/smoke exec playwright-core --version | awk '{print $2}')
+          test -n "$version" || { echo "::error::no Playwright version"; exit 1; }
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Cache Chromium
         id: chromium
         uses: actions/cache@v4
