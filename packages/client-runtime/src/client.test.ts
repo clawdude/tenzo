@@ -1,6 +1,16 @@
 import { describe, expect, it } from "vitest";
 import { CommandError, TenzoClient, type TenzoState } from "./client.ts";
-import { FakeClock, FakeSocket, hello, item, project, snapshotFrame, thread } from "./testing.ts";
+import type { Feed } from "./feed.ts";
+import {
+  FakeClock,
+  FakeSocket,
+  hello,
+  item,
+  project,
+  snapshotFrame,
+  stored,
+  thread,
+} from "./testing.ts";
 
 function setup() {
   FakeSocket.reset();
@@ -254,5 +264,120 @@ describe("TenzoClient", () => {
     ).not.toThrow();
     expect(seen.at(-1)?.items).toHaveLength(2);
     expect(logged).toContain("a listener threw");
+  });
+});
+
+describe("TenzoClient.watch", () => {
+  const T = thread("a").id;
+  const watchOk = (
+    id: string,
+    seqs: number[],
+    extra: { older?: boolean; reset?: boolean } = {},
+  ) => ({
+    type: "ok",
+    id,
+    result: {
+      thread: thread("a"),
+      events: seqs.map((s) => stored(s, "a")),
+      older: extra.older ?? false,
+      reset: extra.reset ?? true,
+    },
+  });
+  const eventFrame = (seq: number, tag = "a") => ({ type: "event", event: stored(seq, tag) });
+  const commandsOf = (socket: FakeSocket) =>
+    socket.frames
+      .filter((f) => f.type === "command")
+      .map((f) => f as unknown as { id: string; command: Record<string, unknown> });
+
+  function watching() {
+    const s = setup();
+    const feeds: Feed[] = [];
+    s.client.connect();
+    s.synced();
+    const unwatch = s.client.watch(T, (f) => feeds.push(f));
+    const sent = () => commandsOf(s.latest()).filter((c) => c.command.type === "thread.watch");
+    return { ...s, feeds, unwatch, sent, feed: () => feeds.at(-1) };
+  }
+
+  it("asks for the backlog, then appends each live event once", () => {
+    const { latest, feed, sent } = watching();
+    expect(feed()?.status).toBe("loading");
+    const [watch] = sent();
+    expect(watch?.command).toEqual({ type: "thread.watch", threadId: T });
+    // The answer and the first live event in one go: the event must not be lost to the answer.
+    latest().serverSends(watchOk(watch?.id ?? "", [3, 5]));
+    latest().serverSends(eventFrame(8));
+    latest().serverSends(eventFrame(8));
+    latest().serverSends(eventFrame(9, "b")); // another thread's
+    expect(feed()?.status).toBe("live");
+    expect(feed()?.events.map((e) => e.seq)).toEqual([3, 5, 8]);
+  });
+
+  it("ignores live events while the watch's answer is on its way: the backlog has them", () => {
+    const { latest, feed, sent } = watching();
+    latest().serverSends(eventFrame(4));
+    latest().serverSends(watchOk(sent()[0]?.id ?? "", [3, 4]));
+    expect(feed()?.events.map((e) => e.seq)).toEqual([3, 4]);
+  });
+
+  it("goes offline with the connection, and watches again from its last event on reconnect", () => {
+    const { latest, feed, sent, sockets, clock } = watching();
+    latest().serverSends(watchOk(sent()[0]?.id ?? "", [3, 5]));
+    latest().serverDrops();
+    expect(feed()?.status).toBe("offline");
+    expect(feed()?.events.map((e) => e.seq)).toEqual([3, 5]);
+    clock.advance(1000);
+    expect(sockets).toHaveLength(2);
+    latest().serverOpens();
+    latest().serverSends(hello);
+    expect(sent()).toEqual([]); // not before the snapshot
+    latest().serverSends(snapshotFrame([thread("a")], []));
+    const [again] = sent();
+    expect(again?.command).toEqual({ type: "thread.watch", threadId: T, after: 5 });
+    latest().serverSends(watchOk(again?.id ?? "", [7], { reset: false }));
+    expect(feed()).toMatchObject({ status: "live" });
+    expect(feed()?.events.map((e) => e.seq)).toEqual([3, 5, 7]);
+  });
+
+  it("shares one watch between listeners, and unwatches when the last one leaves", () => {
+    const { client, latest, unwatch, sent, feed } = watching();
+    latest().serverSends(watchOk(sent()[0]?.id ?? "", [3]));
+    const second: Feed[] = [];
+    const unwatchSecond = client.watch(T, (f) => second.push(f));
+    expect(second.at(-1)?.events.map((e) => e.seq)).toEqual([3]); // what the first has, at once
+    expect(sent()).toHaveLength(1);
+    unwatch();
+    latest().serverSends(eventFrame(4));
+    expect(second.at(-1)?.events.map((e) => e.seq)).toEqual([3, 4]);
+    expect(feed()?.events.map((e) => e.seq)).toEqual([3]); // the first stopped hearing
+    unwatchSecond();
+    const last = commandsOf(latest()).at(-1);
+    expect(last?.command).toEqual({ type: "thread.unwatch", threadId: T });
+    expect(client.feed(T)).toBeUndefined();
+  });
+
+  it("says why when the daemon refuses the watch", () => {
+    const { latest, feed, sent } = watching();
+    latest().serverSends({ type: "error", id: sent()[0]?.id, error: 'No thread "thr_x".' });
+    expect(feed()).toMatchObject({ status: "failed", error: 'No thread "thr_x".' });
+  });
+
+  it("pages older events in front", async () => {
+    const { client, latest, feed, sent } = watching();
+    latest().serverSends(watchOk(sent()[0]?.id ?? "", [10, 11], { older: true }));
+    const loading = client.loadOlder(T);
+    expect(feed()?.loadingOlder).toBe(true);
+    const page = commandsOf(latest()).at(-1);
+    expect(page?.command).toEqual({ type: "thread.events", threadId: T, before: 10, limit: 200 });
+    latest().serverSends({
+      type: "ok",
+      id: page?.id,
+      result: { thread: thread("a"), events: [stored(8, "a")], older: false },
+    });
+    await loading;
+    expect(feed()).toMatchObject({ older: false, loadingOlder: false });
+    expect(feed()?.events.map((e) => e.seq)).toEqual([8, 10, 11]);
+    await client.loadOlder(T); // nothing older: no request
+    expect(commandsOf(latest()).at(-1)?.id).toBe(page?.id);
   });
 });

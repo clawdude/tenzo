@@ -4,7 +4,9 @@ import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   appendEvent,
   clearPrompts,
+  countEventsAfter,
   enqueuePrompt,
+  eventPage,
   getItem,
   lastSeq,
   liveThreads,
@@ -89,6 +91,28 @@ describe("event store", () => {
     expect(lastSeq(store, threadId)).toBe(seqs.at(-1));
     const rows = store.db.prepare("SELECT DISTINCT environment_id FROM items").all();
     expect(rows).toEqual([{ environment_id: store.environmentId }]);
+  });
+
+  it("pages a thread's events: the latest first, then earlier ones before a seq", async () => {
+    const other = (await createThread(store, "app", "Other")).id;
+    const events = log();
+    const seqs: number[] = [];
+    for (const e of events) {
+      seqs.push(appendEvent(store, e).seq);
+      // Another thread's events interleave: pages and counts never see them.
+      appendEvent(store, { ...ev({ type: "thread.archived", payload: {} }), threadId: other });
+    }
+    const latest = eventPage(store, threadId, { limit: 4 });
+    expect(latest.events.map((s) => s.seq)).toEqual(seqs.slice(2));
+    expect(latest.older).toBe(true);
+    const earlier = eventPage(store, threadId, { before: seqs[2] ?? 0, limit: 4 });
+    expect(earlier.events.map((s) => s.seq)).toEqual(seqs.slice(0, 2));
+    expect(earlier.older).toBe(false);
+    expect(eventPage(store, threadId, { after: seqs[1] ?? 0, before: seqs[4] ?? 0, limit: 9 }).events.map((s) => s.seq)).toEqual(
+      seqs.slice(2, 4),
+    );
+    expect(countEventsAfter(store, threadId, seqs[3] ?? 0)).toBe(2);
+    expect(countEventsAfter(store, threadId, 0)).toBe(6);
   });
 
   it("stores the projection with each event; reopening gives the same as folding the log", () => {

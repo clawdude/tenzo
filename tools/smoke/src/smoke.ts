@@ -217,6 +217,152 @@ async function reload(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/**
+ * A thread's timeline: from a row of the Threads list and back, or loaded directly (a bookmark),
+ * when Back goes to the Pass. The thread has no agent, so its timeline is empty but live.
+ */
+async function thread(browser: Browser, base: string, id: string, direct: boolean): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    if (direct) {
+      await page.goto(`${base}/threads/${id}`);
+    } else {
+      await page.goto(`${base}/threads`);
+      await page.locator(`[data-testid="thread-row"][data-id="${id}"] a`).tap();
+    }
+    await page.getByTestId("thread-view").waitFor();
+    if (path(page) !== `/threads/${id}`) problems.push(`opened ${path(page)}`);
+    await page.locator('[data-testid="timeline"][data-status="live"]').waitFor();
+    const title = await page.getByTestId("thread-title").textContent();
+    if (title?.trim() !== "Smoke thread") problems.push(`the title was "${title}"`);
+    await page.getByTestId("back").tap();
+    await page.getByTestId(direct ? "pass" : "threads-list").waitFor();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  if (seen.sockets !== 1) problems.push(`${seen.sockets} WebSockets, not 1`);
+  if (seen.documents !== 1) problems.push(`${seen.documents} page loads, not 1`);
+  return problems;
+}
+
+/**
+ * A long, busy thread, read further up: the feed is full (2000 events) and new ones keep coming,
+ * so the oldest drop off. Whatever row you're reading must not move. The daemon is played by a
+ * routed WebSocket, which streams the events; scroll anchoring is off on the timeline (as on iOS
+ * Safari, which has none), so only the app can hold the place.
+ */
+async function heldPlace(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const environmentId = "env_smoke000000000000000";
+  const threadId = "thr_smoketimeline0000000".slice(0, 24);
+  const at = new Date().toISOString();
+  const event = (seq: number) => ({
+    seq,
+    environmentId,
+    event: {
+      type: "item.completed",
+      eventId: `evt_${String(seq).padStart(20, "0")}`,
+      threadId,
+      agent: "claude",
+      createdAt: at,
+      itemId: `m${seq}`,
+      payload: { itemType: "assistant_message", status: "completed", text: `Line ${seq} of a long thread.` },
+    },
+  });
+  const thread = {
+    id: threadId,
+    environmentId,
+    projectId: "prj_smoke000000000000000",
+    projectName: "app",
+    title: "Busy thread",
+    branch: "tenzo/busy",
+    worktreePath: "/tmp/busy",
+    status: "active",
+    agent: "claude",
+    model: null,
+    createdAt: at,
+    updatedAt: at,
+    archivedAt: null,
+    phase: "building",
+    activity: "working",
+    working: true,
+    queued: 0,
+    openItems: 0,
+    lastSeq: 2000,
+    activeAt: at,
+  };
+  let next = 2001;
+  let stream: ((count: number) => void) | null = null;
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    const send = (frame: unknown) => ws.send(JSON.stringify(frame));
+    send({ type: "hello", environmentId, version: "smoke", serverTime: at });
+    send({
+      type: "snapshot",
+      snapshot: { environmentId, threads: [thread], items: [], projects: [], live: null },
+    });
+    ws.onMessage((data) => {
+      const frame = JSON.parse(String(data)) as { type: string; id?: string; command?: { type: string } };
+      if (frame.type === "ping") send({ type: "pong", at });
+      if (frame.type !== "command" || !frame.command) return;
+      const result =
+        frame.command.type === "thread.watch"
+          ? {
+              thread,
+              events: Array.from({ length: 2000 }, (_, i) => event(i + 1)),
+              older: true,
+              reset: true,
+            }
+          : { watching: false };
+      send({ type: "ok", id: frame.id, result });
+    });
+    stream = (count) => {
+      for (let i = 0; i < count; i++) send({ type: "event", event: event(next++) });
+    };
+  });
+  try {
+    await page.goto(`${base}/threads/${threadId}`);
+    const timeline = page.locator('[data-testid="timeline"][data-status="live"]');
+    await timeline.waitFor();
+    // At the end first: the timeline scrolls itself down to the latest row.
+    await page.locator('[data-key="said:m2000"]').waitFor();
+    for (let i = 0; i < 50 && (await timeline.evaluate((el) => el.scrollTop)) === 0; i++) {
+      await sleep(50);
+    }
+    // Read further up: well away from the end.
+    await timeline.evaluate((el) => (el.scrollTop = el.scrollTop - 900));
+    await page.locator('[data-testid="timeline"][data-following="false"]').waitFor();
+    const key = await page.locator('[data-testid="row"]').nth(20).getAttribute("data-key");
+    const top = async () => (await page.locator(`[data-key="${key}"]`).boundingBox())?.y ?? null;
+    const before = await top();
+    for (let round = 0; round < 10; round++) {
+      (stream as ((count: number) => void) | null)?.(30);
+      await sleep(50);
+    }
+    await page.locator('[data-testid="timeline"][data-newer="300"]').waitFor();
+    const after = await top();
+    if (before === null || after === null || Math.abs(after - before) > 1) {
+      problems.push(`the row being read moved from ${before} to ${after}`);
+    }
+    await page.getByTestId("newer").tap();
+    await page.locator('[data-key="said:m2300"]').waitFor();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 async function main(): Promise<number> {
   if (!existsSync(join(WEB_DIR, "index.html"))) {
     console.error("No web build. Run `pnpm --filter @tenzo/web build` first (`pnpm smoke` does).");
@@ -244,12 +390,25 @@ async function main(): Promise<number> {
     });
     browser = launched;
     const base = `http://127.0.0.1:${port}`;
+    // A thread with a title and no prompt: no agent starts, so no `claude` is needed.
+    const created = (await (
+      await fetch(`${base}/api/commands`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "thread.create", project: "app", title: "Smoke thread" }),
+      })
+    ).json()) as { ok: boolean; result?: { thread: { id: string } }; error?: string };
+    const threadId = created.result?.thread.id;
+    if (!threadId) throw new Error(`couldn't create a thread: ${created.error}`);
     const checks: [string, () => Promise<string[]>][] = [
       ...["/", "/new", "/threads"].map((start): [string, () => Promise<string[]>] => [
         `start at ${start}`,
         () => run(launched, base, start),
       ]),
       ["reload on New, then Close", () => reload(launched, base)],
+      ["a Threads row opens its timeline, and back", () => thread(launched, base, threadId, false)],
+      ["start at a thread's timeline, back to the Pass", () => thread(launched, base, threadId, true)],
+      ["a long timeline holds your place as the full feed moves on", () => heldPlace(launched, base)],
     ];
     let failed = false;
     for (const [name, check] of checks) {

@@ -1,7 +1,9 @@
+import { existsSync } from "node:fs";
 import {
   type AgentKind,
   type ItemAnswer,
   type LiveInfo,
+  MAX_EVENT_PAGE,
   Preview,
   type ProjectView,
   type QueueItem,
@@ -9,6 +11,7 @@ import {
   type RuntimeEvent,
   type Snapshot,
   type StoredEvent,
+  type ThreadDiff,
   type ThreadId,
   type ThreadView,
   type TurnId,
@@ -30,7 +33,9 @@ import {
   type Appended,
   appendEvent,
   clearPrompts,
+  countEventsAfter,
   enqueuePrompt,
+  eventPage,
   getItem,
   landedThreads,
   lastEvent,
@@ -45,8 +50,9 @@ import {
   threadsToWake,
   threadsWithPrompts,
 } from "./event-store.ts";
+import { diffStat } from "./diff.ts";
 import { type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { hasChanges, landedOn } from "./git.ts";
+import { branchExists, hasChanges, landedOn, resolveBase } from "./git.ts";
 import { randomId } from "./ids.ts";
 import { findProject, listProjects } from "./projects.ts";
 import {
@@ -141,6 +147,9 @@ function createRequest(input: NewThread): string {
     input.model ?? "",
   ]);
 }
+
+/** How many of its latest events a client gets when it starts watching a thread. */
+export const WATCH_BACKLOG = 200;
 
 /** What subscribers hear: each event as stored, each item change, each thread change. */
 export type EngineChange =
@@ -394,9 +403,63 @@ export class Engine {
     this.#liveInfo = live;
   }
 
-  events(threadId: string, after = 0): { thread: ThreadView; events: StoredEvent[] } {
+  /**
+   * A thread's events after `after`; with `limit`, only the latest `limit` of those before
+   * `before`, and whether there are earlier ones.
+   */
+  events(
+    threadId: string,
+    page: { after?: number; before?: number; limit?: number } = {},
+  ): { thread: ThreadView; events: StoredEvent[]; older: boolean } {
     const thread = getThread(this.store, threadId);
-    return { thread: this.#viewOf(thread), events: threadEvents(this.store, thread.id, after) };
+    const view = this.#viewOf(thread);
+    if (page.limit === undefined && page.before === undefined) {
+      return { thread: view, events: threadEvents(this.store, thread.id, page.after ?? 0), older: false };
+    }
+    const limit = Math.min(page.limit ?? MAX_EVENT_PAGE, MAX_EVENT_PAGE);
+    return { thread: view, ...eventPage(this.store, thread.id, { ...page, limit }) };
+  }
+
+  /**
+   * The backlog for a client that starts watching a thread: the events after `after` when there
+   * are at most `limit` of them (the client has the ones before), else the `limit` latest, which
+   * replace what the client had. Synchronous on purpose: a caller that subscribes in the same
+   * tick misses no event and sees none twice (socket.ts).
+   */
+  backlog(
+    threadId: string,
+    { after, limit = WATCH_BACKLOG }: { after?: number; limit?: number } = {},
+  ): { thread: ThreadView; events: StoredEvent[]; older: boolean; reset: boolean } {
+    const thread = getThread(this.store, threadId);
+    const view = this.#viewOf(thread);
+    const size = Math.min(limit, MAX_EVENT_PAGE);
+    if (after !== undefined && countEventsAfter(this.store, thread.id, after) <= size) {
+      return {
+        thread: view,
+        events: threadEvents(this.store, thread.id, after),
+        older: false,
+        reset: false,
+      };
+    }
+    return { thread: view, ...eventPage(this.store, thread.id, { limit: size }), reset: true };
+  }
+
+  /** What the thread changed against its project's default branch, counted now (diff.ts). */
+  async diff(threadId: string): Promise<ThreadDiff> {
+    const thread = getThread(this.store, threadId);
+    const project = projectOf(this.store, thread);
+    const base = await resolveBase(project.path, project.defaultBranch);
+    const options = { baseName: project.defaultBranch };
+    // An archived thread's worktree is gone; its branch is kept, so compare that.
+    if (thread.status === "active" && existsSync(thread.worktreePath)) {
+      return diffStat(thread.worktreePath, base, options);
+    }
+    if (!(await branchExists(project.path, thread.branch))) {
+      throw new TenzoError(
+        `${thread.branch} is gone (deleted since the thread was archived), so there is no change to show.`,
+      );
+    }
+    return diffStat(project.path, base, { ...options, head: `refs/heads/${thread.branch}` });
   }
 
   snapshot(): Snapshot {

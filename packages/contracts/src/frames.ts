@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { Command, Snapshot } from "./commands.ts";
 import { EnvironmentId } from "./ids.ts";
-import { QueueItem, ThreadView } from "./queue.ts";
+import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
 
 /**
  * The WebSocket protocol, `/ws`. One socket carries both directions:
@@ -9,6 +9,8 @@ import { QueueItem, ThreadView } from "./queue.ts";
  * - the daemon says `hello`, then sends a `snapshot` (active threads, open items), then streams
  *   a `thread` frame whenever a thread changes and an `item` frame whenever an item opens,
  *   detaches, is snoozed or wakes, or resolves; a client that applies them in order has what the daemon has;
+ * - a client that watches a thread (`thread.watch`) also gets an `event` frame for each of that
+ *   thread's new events, after the watch's answer and in the log's order;
  * - the client sends `command` frames, each with an id of its choosing, and the daemon answers
  *   each with `ok` or `error` carrying that id; commands are the same vocabulary as
  *   `POST /api/commands` and run through the same code;
@@ -52,6 +54,11 @@ export const ServerItem = z.object({
   change: z.enum(["opened", "updated", "detached", "snoozed", "unsnoozed", "resolved"]),
   item: QueueItem,
 });
+/** One new event of a thread this socket watches (`thread.watch`). */
+export const ServerEvent = z.object({
+  type: z.literal("event"),
+  event: StoredEvent,
+});
 /** A command ran. `result` has the shape `CommandResults[type]` for the command's type. */
 export const ServerOk = z.object({
   type: z.literal("ok"),
@@ -74,6 +81,7 @@ export const ServerFrame = z.discriminatedUnion("type", [
   ServerSnapshot,
   ServerThread,
   ServerItem,
+  ServerEvent,
   ServerOk,
   ServerError,
 ]);

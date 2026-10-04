@@ -172,11 +172,49 @@ export function threadEvents(store: Store, threadId: ThreadId, after = 0): Store
       "SELECT seq, environment_id, body FROM events WHERE thread_id = ? AND seq > ? ORDER BY seq",
     )
     .all(threadId, after)
-    .map((row) => ({
-      seq: Number(row.seq),
-      environmentId: String(row.environment_id) as StoredEvent["environmentId"],
-      event: RuntimeEvent.parse(JSON.parse(String(row.body))),
-    }));
+    .map(storedEvent);
+}
+
+/** A page of a thread's events, oldest first, and whether earlier ones exist. */
+export interface EventPage {
+  events: StoredEvent[];
+  /** There are events before `events[0]` (or before `before`, when the page is empty). */
+  older: boolean;
+}
+
+/**
+ * Up to `limit` of a thread's events after `after` and before `before`: the latest ones when
+ * there are more, oldest first. One query, newest first, one extra row to tell if there's more.
+ */
+export function eventPage(
+  store: Store,
+  threadId: ThreadId,
+  { after = 0, before, limit }: { after?: number; before?: number; limit: number },
+): EventPage {
+  const rows = store.db
+    .prepare(
+      `SELECT seq, environment_id, body FROM events
+       WHERE thread_id = ? AND seq > ? AND seq < ? ORDER BY seq DESC LIMIT ?`,
+    )
+    .all(threadId, after, before ?? Number.MAX_SAFE_INTEGER, limit + 1);
+  const older = rows.length > limit;
+  return { events: rows.slice(0, limit).reverse().map(storedEvent), older };
+}
+
+/** How many of a thread's events come after `after`. */
+export function countEventsAfter(store: Store, threadId: ThreadId, after: number): number {
+  const row = store.db
+    .prepare("SELECT COUNT(*) AS n FROM events WHERE thread_id = ? AND seq > ?")
+    .get(threadId, after);
+  return Number(row?.n ?? 0);
+}
+
+function storedEvent(row: Record<string, unknown>): StoredEvent {
+  return {
+    seq: Number(row.seq),
+    environmentId: String(row.environment_id) as StoredEvent["environmentId"],
+    event: RuntimeEvent.parse(JSON.parse(String(row.body))),
+  };
 }
 
 export function lastSeq(store: Store, threadId: ThreadId): number {
