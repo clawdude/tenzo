@@ -42,6 +42,13 @@ describe("cleanTitle", () => {
     expect(cleanTitle("\n\n“Hero redesign”")).toBe("Hero redesign");
   });
 
+  it("drops control and bidi characters, which would reach a terminal", () => {
+    expect(cleanTitle("\u001b[31mRed\u001b[0m alert")).toBe("[31mRed[0m alert");
+    expect(cleanTitle("Fix‮ txt.exe‬ login")).toBe("Fix txt.exe login");
+    expect(cleanTitle("Dark​ mode\u0007")).toBe("Dark mode");
+    expect(cleanTitle("Tabs\tand\tspaces")).toBe("Tabs and spaces");
+  });
+
   it("refuses an answer that isn't a name", () => {
     expect(cleanTitle("")).toBeNull();
     expect(cleanTitle("I'll start by reading the repository to see what needs doing")).toBeNull();
@@ -98,6 +105,25 @@ describe("createClaudeTitler", () => {
       throw new Error("Claude Code process exited with code 1");
     });
     expect(await createClaudeTitler({ ...broken, claudePath: "c" })("x", signal)).toBeNull();
+  });
+
+  it("gives up on a run that hangs", async () => {
+    let seen: AbortController | undefined;
+    const hanging = (async function* () {
+      yield* [];
+      await new Promise((resolve) => seen?.signal.addEventListener("abort", resolve));
+      throw new Error("aborted");
+    })();
+    const titler = createClaudeTitler({
+      query: ((params: { options?: Options }) => {
+        seen = params.options?.abortController;
+        return hanging as unknown as Query;
+      }) as typeof sdkQuery,
+      claudePath: "c",
+      timeoutMs: 20,
+    });
+    expect(await titler("x", new AbortController().signal)).toBeNull();
+    expect(seen?.signal.aborted).toBe(true);
   });
 
   it("passes an abort on to the run", async () => {

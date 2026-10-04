@@ -4,9 +4,8 @@
 </script>
 
 <script lang="ts">
-	import { afterNavigate } from '$app/navigation';
 	import { onDestroy, onMount } from 'svelte';
-	import { back, leave } from '#lib/nav.ts';
+	import { back, leaveTo } from '#lib/nav.ts';
 	import { chooseProject, rememberedProject, rememberProject } from '#lib/projects.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 	import { connectionLabel } from '#lib/status.ts';
@@ -24,16 +23,11 @@
 	let dictation = $state(canDictate());
 	let fit = $state.raw<Fit | null>(null);
 	let field: HTMLTextAreaElement | undefined = $state();
-	let from: string | null = null;
 
 	const ready = $derived(text.trim() !== '' && project !== null && !starting);
 
 	$effect(() => {
 		draft = text;
-	});
-
-	afterNavigate((navigation) => {
-		from = navigation.from?.url.pathname ?? null;
 	});
 
 	onMount(() => {
@@ -55,7 +49,7 @@
 			await command({ type: 'thread.create', project: project.id, prompt });
 			rememberProject(project.id);
 			text = '';
-			leave(from);
+			leaveTo('/'); // to the Pass, wherever New was opened from
 		} catch (e) {
 			error = e instanceof Error ? e.message : String(e);
 		} finally {
@@ -110,7 +104,7 @@
 				type="button"
 				aria-label="Close"
 				class="opt flex size-11 shrink-0 items-center justify-center rounded-full bg-card"
-				onclick={() => back(from)}
+				onclick={back}
 				data-testid="close"
 			>
 				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>

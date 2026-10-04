@@ -85,6 +85,13 @@ export function findProject(store: Store, ref: string): Project {
     );
     if (byPath) return byPath;
   }
+  // Removed while a client still offered it (New thread on the phone sends the id): say which.
+  const removed = store.db
+    .prepare("SELECT name FROM projects WHERE (name = ? OR id = ?) AND removed_at IS NOT NULL")
+    .get(ref, ref);
+  if (removed) {
+    throw new TenzoError(`"${String(removed.name)}" was removed from Tenzo. Pick another project.`);
+  }
   throw new TenzoError(`No project "${ref}". \`tenzo project list\` shows them.`);
 }
 
