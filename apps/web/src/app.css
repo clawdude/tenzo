@@ -15,6 +15,8 @@
 	--color-mute: #8e8e93;
 	--color-faint: #6e6e73;
 	--color-dim: #48484a;
+	/* Text on the back layer: quieter than mute, still 4.5:1 on it and on black. */
+	--color-back-ink: #808085;
 	--color-working: #0a84ff;
 	--color-done: #6ccb8c;
 	/* Check badges on finished work: green passed, red failed, grey skipped. */

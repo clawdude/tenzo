@@ -140,7 +140,10 @@ function statusOf(
 		return { tone: 'clay', word: ASKS[first?.kind ?? 'question'] };
 	}
 	if (waits === 'later') return { tone: 'waiting', word: 'snoozed' };
-	if (thread.activity === 'working') return { tone: 'working', word: thread.phase };
+	if (thread.activity === 'working') {
+		// A follow-up during review runs straight away: it builds. "review" means work waits on you.
+		return { tone: 'working', word: thread.phase === 'review' ? 'building' : thread.phase };
+	}
 	if (thread.phase === 'landing') {
 		// Waiting on CI and reviewers: grey, with when it looks again if it said.
 		const word = thread.wakeAt ? `in ${untilLabel(thread.wakeAt, now)}` : 'landing';

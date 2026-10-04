@@ -148,15 +148,37 @@ describe('every state has its word', () => {
 	const phases: ThreadView['phase'][] = ['discussing', 'building', 'review', 'landing'];
 	const activities: ThreadView['activity'][] = ['idle', 'working', 'needs-you', 'snoozed'];
 
-	it('gives each phase and activity one short word and a dot', () => {
-		for (const phase of phases) {
-			for (const activity of activities) {
-				const t = thread('a', { phase, activity, working: activity === 'working' });
-				const row = rowOf(t, [], now);
-				expect(row.word, `${phase}/${activity}`).toMatch(/^(in \d+[mhd]|[a-z]+\??)$/);
-				expect(row.tone).toBeTruthy();
-			}
-		}
+	// [phase, activity] → word, dot, group: by the thread alone, its items not here.
+	const table: [ThreadView['phase'], ThreadView['activity'], string, string, string][] = [
+		['discussing', 'idle', 'done', 'done', 'today'],
+		['discussing', 'working', 'discussing', 'working', 'working'],
+		['discussing', 'needs-you', 'asking', 'clay', 'needs-you'],
+		['discussing', 'snoozed', 'snoozed', 'waiting', 'today'],
+		['building', 'idle', 'done', 'done', 'today'],
+		['building', 'working', 'building', 'working', 'working'],
+		['building', 'needs-you', 'asking', 'clay', 'needs-you'],
+		['building', 'snoozed', 'snoozed', 'waiting', 'today'],
+		['review', 'idle', 'done', 'done', 'today'],
+		// A follow-up during review builds; "review" is only finished work waiting on you.
+		['review', 'working', 'building', 'working', 'working'],
+		['review', 'needs-you', 'asking', 'clay', 'needs-you'],
+		['review', 'snoozed', 'snoozed', 'waiting', 'today'],
+		['landing', 'idle', 'landing', 'waiting', 'landing'],
+		['landing', 'working', 'landing', 'working', 'landing'],
+		['landing', 'needs-you', 'asking', 'clay', 'needs-you'],
+		['landing', 'snoozed', 'snoozed', 'waiting', 'landing']
+	];
+
+	it('covers every phase and activity', () => {
+		expect(table.map(([p, a]) => `${p}/${a}`).sort()).toEqual(
+			phases.flatMap((p) => activities.map((a) => `${p}/${a}`)).sort()
+		);
+	});
+
+	it.each(table)('%s, %s: %s, %s dot, in %s', (phase, activity, word, tone, group) => {
+		const t = thread('a', { phase, activity, working: activity === 'working', activeAt: noon });
+		expect(rowOf(t, [], now)).toMatchObject({ word, tone });
+		expect(groupThreads([t], [], now)[0]?.key).toBe(group);
 	});
 
 	it('says what each kind of item waits for', () => {

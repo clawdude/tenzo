@@ -29,8 +29,8 @@
 		'needs-you': 'text-clay',
 		working: 'text-mute',
 		landing: 'text-mute',
-		today: 'text-dim',
-		earlier: 'text-dim'
+		today: 'text-back-ink',
+		earlier: 'text-back-ink'
 	};
 
 	$effect(() => {
@@ -69,7 +69,9 @@
 				type="button"
 				aria-label={waiting > 0 ? `The Pass, ${waiting} waiting` : 'The Pass'}
 				class={[
-					'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold transition-colors',
+					'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold',
+					// Turns clay as things come in, but is drawn clay at once on arrival.
+					moving && 'transition-colors',
 					waiting > 0 ? 'bg-clay text-on-clay' : 'bg-card text-ink'
 				]}
 				onclick={() => leaveTo('/')}
@@ -89,10 +91,13 @@
 			</p>
 		{/if}
 
-		<!-- One run of headings and rows, so a thread changing group is the same row moving. -->
-		<div class="relative flex flex-col px-5">
+		<!--
+			One run of headings and rows, so a thread changing group is the same row moving (a list
+			per group would make it a different element). Each heading is an item of the list too.
+		-->
+		<div class="relative flex flex-col px-5" role="list" aria-label="Threads">
 			{#each entries as entry (entry.key)}
-				<div animate:move in:appear={moving} out:vanish>
+				<div role="listitem" animate:move in:appear={moving} out:vanish>
 					{#if entry.kind === 'head'}
 						<h2
 							class={[
@@ -137,7 +142,7 @@
 									{#if row.origin}
 										<!-- Started by another thread's agent, not by you. -->
 										<span
-											class="flex min-w-0 items-center gap-1 text-[13px] leading-[1.3] text-faint"
+											class="flex min-w-0 items-center gap-1 text-[13px] leading-[1.3] text-mute"
 											data-testid="origin"
 											data-kind={row.origin.kind}
 										>
@@ -146,7 +151,7 @@
 										</span>
 									{/if}
 								</span>
-								<span class={['shrink-0 text-[15px]', entry.back ? 'text-dim' : 'text-mute']}
+								<span class={['shrink-0 text-[15px]', entry.back ? 'text-back-ink' : 'text-mute']}
 									>{row.word}</span
 								>
 							{/snippet}
