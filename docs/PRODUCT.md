@@ -77,7 +77,9 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 - **Look:** black ground, one card tone, system font, no borders, depth by layering, one accent (clay `#D97757`) only for "needs you" and the primary action; blue working, green done. Subtle motion that explains what happened; nothing decorative.
 - **Dictation:** iOS keyboard mic first; a mic button using browser speech recognition soon after.
 
-Not yet designed in this language: Threads list, New thread, the PC layout, Automations.
+- **Threads list:** Needs you, Working, Landing, Today, Earlier, one word of status per thread (asking, allow?, build?, review, merge?, failed, discussing, building, landing or "in 12m", snoozed, done). Each group is a stack of slices on the black ground, Today and Earlier a layer further back; a thread another thread started says so. A thread that changes group slides to its new place.
+
+Not yet designed in this language: the PC layout, Automations.
 
 ## 6. Verification without reading code
 

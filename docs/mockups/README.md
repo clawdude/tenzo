@@ -10,4 +10,4 @@ Files are Design-canvas components (`.dc.html`). The static ones open in a brows
 - `B1` why it's asking · `B3` the change · `B2` what happened so far (backs of the card)
 - `C2` snooze toast · `D1` all clear
 - `A1`–`A4` — the four question-card variations compared before choosing A1
-- `Threads`, `NewThread` — round 2, not yet redone in the pile language
+- `Threads`, `NewThread` — round 2; the built screens (#33) follow them, with hairlines replaced by slices and layers

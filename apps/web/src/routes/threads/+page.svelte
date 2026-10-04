@@ -1,33 +1,43 @@
 <script lang="ts">
 	import { isSnoozed } from '@tenzo/client-runtime';
 	import { onMount } from 'svelte';
+	import { appear, move, vanish } from '#lib/motion.ts';
 	import { leaveTo } from '#lib/nav.ts';
 	import { connectionLabel } from '#lib/status.ts';
 	import { tenzo } from '#lib/tenzo.svelte.ts';
-	import { groupThreads, type GroupKey, type Tone } from '#lib/threads.ts';
+	import { entriesOf, groupThreads, type GroupKey, type Tone } from '#lib/threads.ts';
 
-	// Threads: every active thread, grouped by what it is doing, live from the daemon.
+	// Threads: every active thread, grouped by what it is doing, live from the daemon. One card
+	// tone and no lines: each group is a stack of slices on the black ground, and what is finished
+	// sits a layer further back. A thread changing group slides to its new place.
 	let now = $state(Date.now());
 	const live = $derived(tenzo.state);
-	const groups = $derived(groupThreads(live.threads, live.items, now));
+	const entries = $derived(entriesOf(groupThreads(live.threads, live.items, now)));
 	/** What the Pass has for you now: snoozed items wait elsewhere. */
 	const waiting = $derived(live.items.filter((i) => !isSnoozed(i)).length);
+	/** Rows move once the list has drawn: what arrives with the first snapshot just appears. */
+	let moving = $state(false);
 
 	const DOTS: Record<Tone, string> = {
 		clay: 'bg-clay',
 		working: 'bg-working',
 		done: 'bg-done',
+		waiting: 'bg-dim',
 		quiet: 'bg-fill'
 	};
 	const HEADS: Record<GroupKey, string> = {
 		'needs-you': 'text-clay',
 		working: 'text-mute',
 		landing: 'text-mute',
-		today: 'text-faint',
-		earlier: 'text-faint'
+		today: 'text-back-ink',
+		earlier: 'text-back-ink'
 	};
-	/** Finished threads sit back a little, as in the mock-up. */
-	const quiet = (key: GroupKey) => key === 'today' || key === 'earlier';
+
+	$effect(() => {
+		if (!tenzo.seen || moving) return;
+		const frame = requestAnimationFrame(() => (moving = true));
+		return () => cancelAnimationFrame(frame);
+	});
 
 	onMount(() => {
 		const tick = setInterval(() => (now = Date.now()), 60_000);
@@ -60,6 +70,8 @@
 				aria-label={waiting > 0 ? `The Pass, ${waiting} waiting` : 'The Pass'}
 				class={[
 					'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold',
+					// Turns clay as things come in, but is drawn clay at once on arrival.
+					moving && 'transition-colors',
 					waiting > 0 ? 'bg-clay text-on-clay' : 'bg-card text-ink'
 				]}
 				onclick={() => leaveTo('/')}
@@ -73,74 +85,102 @@
 			</button>
 		</header>
 
-		{#if tenzo.seen && groups.length === 0}
+		{#if tenzo.seen && entries.length === 0}
 			<p class="px-6 text-[17px] text-mute" data-testid="no-threads">
 				No threads yet. Start one with New.
 			</p>
 		{/if}
 
-		<div class="flex flex-col gap-[26px] px-5">
-			{#each groups as group (group.key)}
-				<section class="flex flex-col gap-1.5" data-testid="group" data-group={group.key}>
-					<h2
-						class={[
-							'px-1 text-[13px] font-semibold tracking-[0.06em] uppercase',
-							HEADS[group.key]
+		<!--
+			One run of headings and rows, so a thread changing group is the same row moving (a list
+			per group would make it a different element). Each heading is an item of the list too.
+		-->
+		<div class="relative flex flex-col px-5" role="list" aria-label="Threads">
+			{#each entries as entry (entry.key)}
+				<div role="listitem" animate:move in:appear={moving} out:vanish>
+					{#if entry.kind === 'head'}
+						<h2
+							class={[
+								'px-1 pb-1.5 text-[13px] font-semibold tracking-[0.06em] uppercase transition-colors',
+								!entry.first && 'pt-[26px]',
+								HEADS[entry.group]
+							]}
+							data-testid="group"
+							data-group={entry.group}
+						>
+							{entry.label}
+						</h2>
+					{:else}
+						{@const row = entry.row}
+						{@const tile = [
+							'flex min-h-14 items-center gap-3.5 px-[18px] py-2',
+							'transition-[background-color,border-radius] duration-[380ms] ease-[cubic-bezier(.2,.8,.2,1)] motion-reduce:transition-none',
+							entry.top ? 'rounded-t-[20px]' : 'rounded-t-[6px]',
+							entry.bottom ? 'rounded-b-[20px]' : 'rounded-b-[6px]',
+							entry.back ? 'bg-card-back' : 'bg-card'
 						]}
-					>
-						{group.label}
-					</h2>
-					<ul
-						class={[
-							'overflow-hidden rounded-[20px]',
-							quiet(group.key) ? 'bg-[#0e0e10]' : 'bg-card'
-						]}
-					>
-						{#each group.rows as row, i (row.thread.id)}
-							{#if i > 0}
-								<li
-									class={['ml-10 h-px', quiet(group.key) ? 'bg-card' : 'bg-fill']}
-									aria-hidden="true"
-								></li>
-							{/if}
-							<li data-testid="thread-row" data-id={row.thread.id} data-word={row.word}>
-								{#snippet content()}
-									<span class={['size-2 shrink-0 rounded-full', DOTS[row.tone]]}></span>
-									<span
-										class={['min-w-0 grow truncate', quiet(group.key) && 'text-mute']}
-										data-testid="thread-title">{row.thread.title}</span
+						<div
+							class={[!entry.top && 'pt-0.5']}
+							data-testid="thread-row"
+							data-id={row.thread.id}
+							data-group={entry.group}
+							data-word={row.word}
+						>
+							{#snippet content()}
+								<span
+									class={[
+										'size-2 shrink-0 rounded-full transition-[background-color,opacity] duration-300 motion-reduce:transition-none',
+										DOTS[row.tone],
+										// Finished work's green sits back with its layer.
+										entry.back && 'opacity-60'
+									]}
+								></span>
+								<span class="flex min-w-0 grow flex-col">
+									<span class={['truncate', entry.back && 'text-mute']} data-testid="thread-title"
+										>{row.thread.title}</span
 									>
-									<span
-										class={[
-											'shrink-0 text-[15px]',
-											quiet(group.key) ? 'text-faint' : 'text-mute'
-										]}>{row.word}</span
-									>
-								{/snippet}
-								{#if group.key === 'needs-you'}
-									<!-- What it needs is on the Pass. -->
-									<a href="/" class="flex min-h-14 items-center gap-3.5 px-[18px]" onclick={(e) => {
+									{#if row.origin}
+										<!-- Started by another thread's agent, not by you. -->
+										<span
+											class="flex min-w-0 items-center gap-1 text-[13px] leading-[1.3] text-mute"
+											data-testid="origin"
+											data-kind={row.origin.kind}
+										>
+											<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a4 4 0 0 0 4 4h9"></path><path d="M15 11l4 4-4 4"></path></svg>
+											<span class="truncate">{row.origin.label}</span>
+										</span>
+									{/if}
+								</span>
+								<span class={['shrink-0 text-[15px]', entry.back ? 'text-back-ink' : 'text-mute']}
+									>{row.word}</span
+								>
+							{/snippet}
+							{#if entry.group === 'needs-you'}
+								<!-- What it needs is on the Pass. -->
+								<a
+									href="/"
+									class={tile}
+									onclick={(e) => {
 										e.preventDefault();
 										leaveTo('/');
-									}}>{@render content()}</a>
-								{:else}
-									<!-- What happened so far, live. -->
-									<a
-										href={`/threads/${row.thread.id}`}
-										class="flex min-h-14 items-center gap-3.5 px-[18px]"
-										data-testid="open-thread">{@render content()}</a
-									>
-								{/if}
-							</li>
-						{/each}
-					</ul>
-				</section>
+									}}>{@render content()}</a
+								>
+							{:else}
+								<!-- What happened so far, live. -->
+								<a href={`/threads/${row.thread.id}`} class={tile} data-testid="open-thread"
+									>{@render content()}</a
+								>
+							{/if}
+						</div>
+					{/if}
+				</div>
 			{/each}
 		</div>
 	</div>
 
+	<!-- New floats over the list; the list fades out under it. -->
 	<div
-		class="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center pb-[calc(env(safe-area-inset-bottom)+24px)]"
+		class="pointer-events-none absolute inset-x-0 bottom-0 flex justify-center bg-linear-to-t from-black from-40% to-transparent pt-12 pb-[calc(env(safe-area-inset-bottom)+24px)]"
 	>
 		<a
 			href="/new"
