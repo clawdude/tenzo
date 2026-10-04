@@ -1,18 +1,20 @@
-import type {
-  AgentKind,
-  ItemAnswer,
-  ProjectView,
-  QueueItem,
-  QueueItemId,
-  RuntimeEvent,
-  Snapshot,
-  StoredEvent,
-  ThreadId,
-  ThreadView,
-  TurnId,
+import {
+  type AgentKind,
+  type ItemAnswer,
+  type LiveInfo,
+  Preview,
+  type ProjectView,
+  type QueueItem,
+  type QueueItemId,
+  type RuntimeEvent,
+  type Snapshot,
+  type StoredEvent,
+  type ThreadId,
+  type ThreadView,
+  type TurnId,
 } from "@tenzo/contracts";
 import type { AgentAdapter, AgentSession } from "./agent/agent.ts";
-import { attachmentsDir, removeAttachments } from "./attachments.ts";
+import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
 import {
   checkAnswer,
   deliveryPrompt,
@@ -143,6 +145,7 @@ export class Engine {
   /** Creates under way, by client key: a retry that comes in meanwhile waits for the same one. */
   readonly #creating = new Map<string, { request: string; thread: Promise<ThreadView> }>();
   #closing = false;
+  #liveInfo: LiveInfo | null = null;
 
   constructor(options: EngineOptions) {
     this.store = options.store;
@@ -289,14 +292,18 @@ export class Engine {
    * null (live.ts). Only that thread's port, never one named by a request.
    */
   livePort(threadId: string): number | null {
-    let thread: Thread;
-    try {
-      thread = getThread(this.store, threadId);
-    } catch {
-      return null;
-    }
-    if (thread.status !== "active") return null;
-    return loadFoldState(this.store, thread.id).runtime.preview?.port ?? null;
+    // Every request a live page makes comes through here: one row, one column.
+    const row = this.store.db
+      .prepare("SELECT preview FROM threads WHERE id = ? AND status = 'active'")
+      .get(threadId);
+    if (!row || row.preview === null) return null;
+    const preview = Preview.safeParse(JSON.parse(String(row.preview)));
+    return preview.success ? preview.data.port : null;
+  }
+
+  /** Where threads' live apps are served; the daemon sets it once its live listener is up. */
+  setLive(live: LiveInfo | null): void {
+    this.#liveInfo = live;
   }
 
   events(threadId: string, after = 0): { thread: ThreadView; events: StoredEvent[] } {
@@ -310,6 +317,7 @@ export class Engine {
       threads: this.threads(),
       items: openItems(this.store).filter((i) => !this.#quiet.has(i.id)),
       projects: this.projects(),
+      live: this.#liveInfo,
     };
   }
 
@@ -484,7 +492,11 @@ export class Engine {
       cwd: thread.worktreePath,
       ...(thread.sessionId ? { resumeSessionId: thread.sessionId } : {}),
       ...(thread.model ? { model: thread.model } : {}),
-      phase: loadFoldState(this.store, thread.id).runtime.phase,
+      ...(() => {
+        const runtime = loadFoldState(this.store, thread.id).runtime;
+        // The attach cap counts what this thread already holds for its next report.
+        return { phase: runtime.phase, pendingAttachments: runtime.attachments.length };
+      })(),
       prompts: this.#prompts(),
       attachmentsDir: attachmentsDir(this.store.home, thread.id),
     });
@@ -586,9 +598,19 @@ export class Engine {
         const waiter = this.#answering.get(change.item.id);
         this.#answering.delete(change.item.id);
         waiter?.(change.item);
+        if (change.item.resolution?.kind === "superseded") this.#dropCopies(change.item);
       }
     }
     if (announced) this.#changed(event.threadId);
+  }
+
+  /** A replaced report's screenshots: nothing shows them any more, so their copies go. */
+  #dropCopies(item: QueueItem): void {
+    const files = item.finished?.attachments.map((a) => a.file) ?? [];
+    if (files.length === 0) return;
+    void removeCopies(this.store.home, item.threadId, files).catch((error: unknown) => {
+      this.#log(`couldn't remove the screenshots of ${item.id}: ${String(error)}`);
+    });
   }
 
   /** Shows an item that was being answered for you, as it now stands. */

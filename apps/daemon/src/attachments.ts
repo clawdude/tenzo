@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { mkdir, open, realpath, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, realpath, rm, unlink, writeFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve, sep } from "node:path";
 import {
   type Attachment,
@@ -54,8 +54,11 @@ export async function takeAttachment(input: {
       `${asked} is outside this thread's worktree (${root}). Only files in the worktree can be attached: save the screenshot there.`,
     );
   }
-  // No symlink can be swapped in between the check above and the read: O_NOFOLLOW on the
-  // resolved path, and the size and type come from the open file itself.
+  // A directory on the way could be swapped for a symlink between the check above and the open
+  // (O_NOFOLLOW guards only the last name). So once the file is open, the path is resolved
+  // again, checked again, and must name the very file that is open (same device and inode).
+  // A hard link would be the same inode with a name outside: files with more than one name are
+  // refused. Size and type come from the open file itself.
   let bytes: Buffer;
   const handle = await open(real, constants.O_RDONLY | constants.O_NOFOLLOW).catch(() => {
     throw new TenzoError(`Can't read ${asked}.`);
@@ -63,6 +66,16 @@ export async function takeAttachment(input: {
   try {
     const stat = await handle.stat();
     if (!stat.isFile()) throw new TenzoError(`${asked} is not a file.`);
+    const again = await realpath(resolve(input.worktree, asked)).catch(() => null);
+    const named = again && inside(root, again) ? await lstat(again).catch(() => null) : null;
+    if (!named || named.dev !== stat.dev || named.ino !== stat.ino) {
+      throw new TenzoError(`${asked} changed while it was being attached. Try again.`);
+    }
+    if (stat.nlink > 1) {
+      throw new TenzoError(
+        `${asked} has more than one name (a hard link). Attach a plain copy saved in the worktree.`,
+      );
+    }
     if (stat.size > MAX_ATTACHMENT_BYTES) {
       throw new TenzoError(
         `${asked} is ${megabytes(stat.size)}; the limit is ${megabytes(MAX_ATTACHMENT_BYTES)}. Take a smaller screenshot.`,
@@ -122,6 +135,18 @@ export function storedAttachment(
   if (!match || !mediaType || !AttachmentId.safeParse(match[1]).success) return null;
   if (!ThreadId.safeParse(threadId).success) return null;
   return { path: join(attachmentsDir(home, threadId), file), mediaType };
+}
+
+/** Removes some of a thread's copies (a report that was replaced). Names are checked first. */
+export async function removeCopies(
+  home: string,
+  threadId: string,
+  files: readonly string[],
+): Promise<void> {
+  for (const file of files) {
+    const stored = storedAttachment(home, threadId, file);
+    if (stored) await unlink(stored.path).catch(() => {});
+  }
 }
 
 /** Removes a thread's copies (it was archived: its card is gone). */

@@ -4,7 +4,7 @@ export * from "./connection.ts";
 export * from "./state.ts";
 export type { Log } from "./notify.ts";
 // The records views draw and the commands they send, so a view needs this package only.
-export { attachmentUrl, liveUrl } from "@tenzo/contracts";
+export { attachmentUrl, liveOriginFor, liveUrl } from "@tenzo/contracts";
 export type {
   Attachment,
   Check,
@@ -12,6 +12,7 @@ export type {
   Command,
   CommandResult,
   Finished,
+  LiveInfo,
   ItemAnswer,
   ProjectView,
   QueueItem,

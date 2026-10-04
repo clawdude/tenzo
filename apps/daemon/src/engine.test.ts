@@ -827,6 +827,7 @@ describe("Engine: finished work", () => {
   async function threadReporting(d: ReturnType<typeof daemon>) {
     d.adapter.onStart = (session) => {
       session.onPrompt = () => {
+        session.respondToProposal(session.propose("Add a counter page."), "build");
         session.attach(shot);
         session.expose(5173, "counter");
         session.say("Built the counter.");
@@ -888,6 +889,44 @@ describe("Engine: finished work", () => {
     expect(d.adapter.sessions.length).toBe(sessions); // nothing resumed, nothing sent
     expect(d.engine.snapshot().items).toEqual([]);
     expect(d.engine.events(thread.id).events.at(-1)?.event.type).toBe("report.resolved");
+  });
+
+  it("a newer report replaces the card, and the replaced card's screenshot copies go", async () => {
+    const d = daemon();
+    const thread = await threadReporting(d);
+    const dir = join(home, "attachments", thread.id);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, shot.file), "png");
+    const next = { ...shot, id: "att_bbbbbbbbbbbbbbbbbbbb", file: "att_bbbbbbbbbbbbbbbbbbbb.png" } as const;
+    writeFileSync(join(dir, next.file), "png");
+    d.engine.send(thread.id, "again");
+    d.adapter.last.onPrompt = () => {
+      d.adapter.last.attach(next);
+      d.adapter.last.report("Second go.");
+      d.adapter.last.complete();
+    };
+    await settle();
+    await expect.poll(() => existsSync(join(dir, shot.file))).toBe(false);
+    expect(existsSync(join(dir, next.file))).toBe(true);
+    expect(d.engine.snapshot().items).toMatchObject([
+      { kind: "finished", finished: { summary: "Second go.", attachments: [next] } },
+    ]);
+  });
+
+  it("counts the screenshots a thread holds toward the next session's cap", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        session.attach(shot);
+        session.complete();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt: "shoot" });
+    await settle();
+    await d.adapter.last.stop();
+    await settle();
+    d.engine.send(thread.id, "again");
+    expect(d.adapter.last.input.pendingAttachments).toBe(1);
   });
 
   it("the card and the live port survive a restart", async () => {

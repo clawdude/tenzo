@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { ClientFrame, Command, EnvironmentId, ProjectId, ServerFrame, ThreadId } from "./index.ts";
+import {
+  ClientFrame,
+  Command,
+  EnvironmentId,
+  liveOriginFor,
+  liveUrl,
+  ProjectId,
+  ServerFrame,
+  ThreadId,
+} from "./index.ts";
 
 describe("contracts", () => {
   it("accepts a well-formed environment id and rejects others", () => {
@@ -104,5 +113,22 @@ describe("contracts", () => {
       snapshot: { environmentId: project.environmentId, threads: [], items: [] },
     });
     expect(bare.type === "snapshot" && bare.snapshot.projects).toEqual([]);
+    expect(bare.type === "snapshot" && bare.snapshot.live).toBeNull();
+  });
+
+  it("links live apps to the live origin the browser can reach", () => {
+    const live = { port: 4781, origins: ["https://mac.tail0000.ts.net:8444"] };
+    const at = (protocol: string, hostname: string) => liveOriginFor({ protocol, hostname }, live);
+    // Over the tailnet: the configured Serve route for that name.
+    expect(at("https:", "mac.tail0000.ts.net")).toBe("https://mac.tail0000.ts.net:8444");
+    expect(at("https:", "MAC.tail0000.ts.net")).toBe("https://mac.tail0000.ts.net:8444");
+    // Locally: the live port on the name the Pass was reached by.
+    expect(at("http:", "127.0.0.1")).toBe("http://127.0.0.1:4781");
+    expect(at("http:", "localhost")).toBe("http://localhost:4781");
+    expect(at("http:", "[::1]")).toBe("http://[::1]:4781");
+    expect(liveOriginFor({ protocol: "http:", hostname: "x" }, null)).toBeNull();
+    expect(liveUrl("http://127.0.0.1:4781", "thr_x", { path: "a?b" })).toBe(
+      "http://127.0.0.1:4781/live/thr_x/a?b",
+    );
   });
 });

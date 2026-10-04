@@ -96,7 +96,7 @@ const PROPOSE_DESCRIPTION = [
 ].join(" ");
 
 const REPORT_DESCRIPTION = [
-  "Hand the finished work to the person for review. Call it once, when the work is built, checked and committed.",
+  "Hand the finished work to the person for review. Call it once the approved work is built, checked and committed (not before your proposal is approved).",
   "They see a card with your headline, the summary, how to test it, a badge per check, the screenshots you attached and the dev server you exposed: attach and expose first.",
   "It returns at once; then end your turn with one short line. Their answer comes back to you as a message. Reporting again replaces the card.",
 ].join(" ");
@@ -109,8 +109,8 @@ const ATTACH_DESCRIPTION = [
 function exposeDescription(base: string): string {
   return [
     "Make a dev server running in this worktree reachable from the person's phone, as the card's \"Open live\" link.",
-    `Tenzo forwards ${base} on its own address to localhost:<port>, paths unchanged, so the server must serve under that base: Vite \`npx vite --port 5173 --base ${base}\` (also in $TENZO_LIVE_BASE); for others, their base-path option.`,
-    "Start it in the background so it keeps running after your turn, then call expose before you report.",
+    `Tenzo forwards ${base} on its live address to localhost:<port>, paths unchanged, so the server must serve under that base: Vite \`npx vite --port 5173 --base ${base}\` (also in $TENZO_LIVE_BASE); for others, their base-path option.`,
+    "Start it from this worktree, in the background so it keeps running after your turn, then call expose before you report.",
   ].join(" ");
 }
 
@@ -139,6 +139,7 @@ export function tenzoTools(host: TenzoToolHost, context: ToolContext) {
       {
         summary: z
           .string()
+          .trim()
           .min(1)
           .max(4000)
           .describe("The handoff note: what changed, and anything not done. A few short lines; Markdown."),
@@ -149,7 +150,7 @@ export function tenzoTools(host: TenzoToolHost, context: ToolContext) {
         checks: z
           .array(
             z.object({
-              name: z.string().min(1).max(60).describe('"Tests", "Typecheck", "Lint", …'),
+              name: z.string().trim().min(1).max(60).describe('"Tests", "Typecheck", "Lint", …'),
               status: CheckStatus.describe("pass, fail, or skipped (not run)"),
               detail: z.string().max(500).optional().describe('"42 passed", the failing line, …'),
             }),

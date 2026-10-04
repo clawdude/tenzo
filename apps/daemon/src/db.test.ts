@@ -164,7 +164,8 @@ describe("openDatabase", () => {
 
   it("gives threads from before finished work no attachments and no live app", () => {
     const path = join(tempDir(), "tenzo.db");
-    const before = openDatabase(path, MIGRATIONS.slice(0, -1));
+    const finished = MIGRATIONS.findIndex((m) => m.name === "finished work");
+    const before = openDatabase(path, MIGRATIONS.slice(0, finished));
     before.exec(`
       INSERT INTO projects (id, name, path, default_branch, created_at)
         VALUES ('prj_1', 'app', '/r/app', 'main', 'now');

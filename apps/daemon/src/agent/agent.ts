@@ -36,6 +36,8 @@ export interface StartSessionInput {
   phase: ThreadPhase;
   /** Where `attach` keeps its copies (`<home>/attachments/<thread>`). None: attach refuses. */
   attachmentsDir?: string;
+  /** Screenshots the thread already holds for its next report: they count against the cap. */
+  pendingAttachments?: number;
   /**
    * Tenzo's thread prompts: the one for `phase` is appended to the agent's own system prompt,
    * and an approved proposal carries the build prompt (prompts.ts). None: nothing is appended.

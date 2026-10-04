@@ -15,14 +15,16 @@
 		failure: Failure | null;
 		/** Little room (the keyboard is up): the question and the answers only. */
 		compact?: boolean;
+		/** Where threads' live apps are, for Open live; null: no link. */
+		liveOrigin?: string | null;
 		/** Sends the answer; false when it couldn't go (offline), and the card stays. */
 		onanswer: (answer: ItemAnswer) => boolean;
 	}
-	let { item, thread, now, failure, compact = false, onanswer }: Props = $props();
+	let { item, thread, now, failure, compact = false, liveOrigin = null, onanswer }: Props = $props();
 
 	const steps = $derived(stepsOf(item));
 	/** Finished work's content; null on every other card. */
-	const view = $derived(finishedView(item, thread));
+	const view = $derived(finishedView(item, thread, liveOrigin));
 	/** The screenshot shown full screen, if one was tapped. */
 	let enlarged = $state.raw<Shot | null>(null);
 	// Which question the card is on, whether its answer has gone, and which taps to ignore.

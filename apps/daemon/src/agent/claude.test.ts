@@ -1,4 +1,12 @@
-import { chmodSync, mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  linkSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
@@ -13,6 +21,7 @@ import {
 import { afterAll, describe, expect, it } from "vitest";
 import { removeTempDirs, tempDir } from "../testing.ts";
 import type { AgentSession, StartSessionInput } from "./agent.ts";
+import { type ListenerDirs, lsofListenerDirs } from "../live.ts";
 import { claudeEnv, createClaudeAdapter, findClaude, parseQuestions } from "./claude.ts";
 import { fingerprintOf } from "./fingerprint.ts";
 import {
@@ -720,7 +729,10 @@ describe("Claude adapter: report, attach, expose", () => {
   /** Claude calls Tenzo's tools one after another in a turn; the replies are collected. */
   async function calls(
     list: [string, Record<string, unknown>][],
-    input: Partial<Omit<StartSessionInput, "threadId" | "cwd">> & { cwd?: string } = {},
+    input: Partial<Omit<StartSessionInput, "threadId" | "cwd">> & {
+      cwd?: string;
+      listenerDirs?: ListenerDirs;
+    } = {},
   ) {
     const replies: Reply[] = [];
     const fake = fakeQuery(async function* (turn) {
@@ -728,10 +740,16 @@ describe("Claude adapter: report, attach, expose", () => {
       for (const [name, args] of list) replies.push(await turn.callTool("tenzo", name, args));
       yield result();
     });
-    const adapter = createClaudeAdapter({ query: fake.query, claudePath: "/opt/bin/claude" });
+    const cwd = input.cwd ?? "/w/thread";
+    const adapter = createClaudeAdapter({
+      query: fake.query,
+      claudePath: "/opt/bin/claude",
+      // Unless a test says otherwise, the dev server runs in the worktree.
+      listenerDirs: input.listenerDirs ?? (async () => [cwd]),
+    });
     const session = adapter.start({
       threadId: THREAD,
-      cwd: input.cwd ?? "/w/thread",
+      cwd,
       phase: "building",
       prompts: PROMPTS,
       ...input,
@@ -912,6 +930,114 @@ describe("Claude adapter: report, attach, expose", () => {
     expect(replies[3]?.text).toMatch(/not a page under the live base/);
     expect(replies[5]?.text).toMatch(/Nothing answers on localhost/);
     expect(events.some((e) => e.type === "preview.exposed")).toBe(false);
+  });
+
+  it("report waits for Build it: before, it is refused and nothing reaches the Pass", async () => {
+    const report = { summary: "Done.", how_to_test: "", checks: [] };
+    const early = await calls([["report", report]], { phase: "discussing" });
+    expect(early.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/propose first/) });
+    expect(early.events.some((e) => e.type === "report.submitted")).toBe(false);
+
+    // Approved in the same session: from then on it reports.
+    const replies: Reply[] = [];
+    const { session, events } = start(
+      async function* (turn) {
+        yield init();
+        await turn.callTool("tenzo", "propose", { summary: "Add it." });
+        replies.push(await turn.callTool("tenzo", "report", report));
+        yield result();
+      },
+      { phase: "discussing" },
+    );
+    session.sendTurn("go");
+    session.respondToProposal((await events.until("proposal.requested")).requestId, "build");
+    await events.until("report.submitted");
+    await events.until("turn.completed");
+    expect(replies[0]?.isError).toBe(false);
+    await session.stop();
+  });
+
+  it("report refuses a check name of only spaces", async () => {
+    const { replies } = await calls([
+      ["report", { summary: "x", how_to_test: "", checks: [{ name: "  ", status: "pass" }] }],
+      ["report", { summary: "   ", how_to_test: "", checks: [] }],
+    ]);
+    expect(replies.map((r) => r.isError)).toEqual([true, true]);
+  });
+
+  it("attach counts what the thread already holds for its report", async () => {
+    const wt = worktree();
+    const { replies } = await calls(
+      [
+        ["attach", { path: "shot.png" }],
+        ["attach", { path: "shot.png" }],
+      ],
+      { cwd: wt.root, attachmentsDir: wt.store, pendingAttachments: 7 },
+    );
+    expect(replies.map((r) => r.isError)).toEqual([false, true]);
+    expect(replies[1]?.text).toMatch(/at most 8/);
+  });
+
+  it("attach refuses a hard link: the same file can have a name outside", async () => {
+    const wt = worktree();
+    linkSync(join(wt.outside, "secret.png"), join(wt.root, "hard.png"));
+    const { replies, events } = await calls([["attach", { path: "hard.png" }]], {
+      cwd: wt.root,
+      attachmentsDir: wt.store,
+    });
+    expect(replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/hard link/) });
+    expect(events.some((e) => e.type === "attachment.added")).toBe(false);
+  });
+
+  it("expose takes only a server running in this worktree, and never Tenzo itself", async () => {
+    const page = await listen((_req, res) => {
+      res.setHeader("content-type", "text/html");
+      res.end(`<script src="/live/${THREAD}/main.js"></script>`);
+    });
+    const tenzo = await listen((_req, res) => {
+      res.setHeader("x-tenzo-daemon", "1");
+      res.statusCode = 404;
+      res.end();
+    });
+    try {
+      const elsewhere = await calls([["expose", { port: page.port }]], {
+        listenerDirs: async () => ["/Users/someone/other-project"],
+      });
+      expect(elsewhere.replies[0]).toMatchObject({
+        isError: true,
+        text: expect.stringMatching(/other-project, outside this worktree/),
+      });
+      const unknown = await calls([["expose", { port: page.port }]], { listenerDirs: async () => [] });
+      expect(unknown.replies[0]?.text).toMatch(/Can't tell which process/);
+      const inside = await calls([["expose", { port: page.port }]], {
+        listenerDirs: async () => ["/w/thread/app"],
+      });
+      expect(inside.replies[0]?.isError).toBe(false);
+      // No lsof on the machine: unchecked, as documented.
+      const unchecked = await calls([["expose", { port: page.port }]], { listenerDirs: async () => null });
+      expect(unchecked.replies[0]?.isError).toBe(false);
+      const self = await calls([["expose", { port: tenzo.port }]]);
+      expect(self.replies[0]).toMatchObject({ isError: true, text: expect.stringMatching(/is Tenzo itself/) });
+      for (const run of [elsewhere, unknown, self]) {
+        expect(run.events.some((e) => e.type === "preview.exposed")).toBe(false);
+      }
+    } finally {
+      page.close();
+      tenzo.close();
+    }
+  });
+});
+
+describe("lsofListenerDirs", () => {
+  it("finds the working directory of the process listening on a port", async (ctx) => {
+    const server = await listen(() => {});
+    try {
+      const dirs = await lsofListenerDirs(server.port);
+      if (dirs === null) return ctx.skip(); // no lsof here
+      expect(dirs.map((d) => realpathSync(d))).toContain(realpathSync(process.cwd()));
+    } finally {
+      server.close();
+    }
   });
 });
 

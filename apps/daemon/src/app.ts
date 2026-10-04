@@ -7,16 +7,14 @@ import {
   type CommandResponse,
   type EnvironmentId,
   type Health,
-  liveBase,
-  ThreadId,
 } from "@tenzo/contracts";
-import { Hono } from "hono";
+import { type Context, Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
 import { accessGuard } from "./access.ts";
 import { storedAttachment } from "./attachments.ts";
 import { executeCommand } from "./commands.ts";
 import type { Engine } from "./engine.ts";
-import { isLivePath, liveHandler } from "./live.ts";
+import { markDaemon } from "./live.ts";
 import { socketHandlers } from "./socket.ts";
 
 export const VERSION: string = pkg.version;
@@ -35,10 +33,10 @@ export interface AppOptions {
 
 /**
  * The daemon's HTTP surface: `/health`, `POST /api/commands`, the `/ws` WebSocket, attached
- * screenshots under `/api/attachments/`, threads' live dev servers under `/live/` (live.ts), and
- * the web app with an SPA fallback. WebSockets only upgrade when served by `startDaemon` (it
- * needs the Node server). A foreign `Host` is refused everywhere, a foreign `Origin` on the API,
- * `/ws` and `/live/`.
+ * screenshots under `/api/attachments/`, and the web app with an SPA fallback. WebSockets only
+ * upgrade when served by `startDaemon` (it needs the Node server). A foreign `Host` is refused
+ * everywhere, a foreign `Origin` on the API and `/ws`. Threads' live apps are never served here:
+ * they have a listener and an origin of their own (live.ts), so their pages can't call the API.
  */
 export function createApp({
   environmentId,
@@ -49,11 +47,12 @@ export function createApp({
 }: AppOptions): Hono {
   const app = new Hono();
 
+  app.use("*", markDaemon());
   app.use(
     "*",
     accessGuard(
       { allowedHosts, devOrigins },
-      (path) => path === "/ws" || path.startsWith("/api/") || isLivePath(path),
+      (path) => path === "/ws" || path.startsWith("/api/"),
     ),
   );
 
@@ -103,16 +102,12 @@ export function createApp({
   });
   app.all("/api/*", (c) => c.json({ ok: false, error: "No such API." } satisfies CommandResponse, 404));
 
-  // A thread's live dev server, through this origin (live.ts). WebSocket upgrades under it are
-  // the Node server's (server.ts); this is plain HTTP.
-  const live = liveHandler((threadId) => engine?.livePort(threadId) ?? null);
-  app.all("/live/:thread", (c) => {
-    const thread = c.req.param("thread");
-    if (!ThreadId.safeParse(thread).success) return c.text("This thread has no live app.\n", 404);
-    return c.redirect(liveBase(thread), 308);
-  });
-  app.all("/live/:thread/*", live);
-  app.all("/live/*", (c) => c.text("This thread has no live app.\n", 404));
+  // Live apps are on the live listener (live.ts), never on this origin; WebSocket upgrades here
+  // get the same 404.
+  const elsewhere = (c: Context) =>
+    c.text("Threads' live apps are served on Tenzo's live port, not here.\n", 404);
+  app.all("/live", elsewhere);
+  app.all("/live/*", elsewhere);
 
   // The access guard above has already refused a foreign Host or Origin before any upgrade.
   app.get(

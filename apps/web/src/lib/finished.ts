@@ -28,11 +28,18 @@ export interface FinishedView {
 	howToTestHtml: string;
 	badges: Badge[];
 	shots: Shot[];
-	/** The "Open live" link, on the daemon's origin; null when nothing was exposed. */
+	/**
+	 * The "Open live" link, on Tenzo's live origin (never the Pass's own: a live page must not
+	 * reach the API); null when nothing was exposed or the daemon serves no live apps.
+	 */
 	live: string | null;
 }
 
-export function finishedView(item: QueueItem, threadTitle: string): FinishedView | null {
+export function finishedView(
+	item: QueueItem,
+	threadTitle: string,
+	liveOrigin: string | null
+): FinishedView | null {
 	const f = item.finished;
 	if (item.kind !== 'finished' || !f) return null;
 	return {
@@ -49,6 +56,6 @@ export function finishedView(item: QueueItem, threadTitle: string): FinishedView
 			alt: a.caption || a.name,
 			caption: a.caption ?? ''
 		})),
-		live: f.live ? liveUrl(item.threadId, f.live) : null
+		live: f.live && liveOrigin ? liveUrl(liveOrigin, item.threadId, f.live) : null
 	};
 }

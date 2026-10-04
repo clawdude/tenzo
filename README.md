@@ -33,13 +33,20 @@ pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
 
 `pnpm tenzo <command>` runs `apps/daemon/src/cli.ts` on Node's type stripping, with no build step. The file is executable and is the package's `tenzo` bin, so a symlink to it on your PATH gives you a bare `tenzo`.
 
-The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS.
+The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS. Threads' live apps (`expose`, below) are served by a second loopback listener on `TENZO_LIVE_PORT` (default the next port), an origin of their own; to open them from the phone, give that port a second Serve route and name it in `TENZO_LIVE_ORIGIN`:
+
+```bash
+tailscale serve --bg --https=8444 http://127.0.0.1:4781
+TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net TENZO_LIVE_ORIGIN=https://my-mac.tailnet-1234.ts.net:8444 pnpm tenzo serve
+```
 
 On `/ws` the daemon sends a snapshot of active threads and open items, then every thread and item change as it happens; clients send the same commands as `POST /api/commands`, each answered by id. The frames are in `packages/contracts/src/frames.ts`; `packages/client-runtime` keeps the connection (reconnect, ping, wake-on-foreground) and a store the web app reads. A command whose connection drops before its answer fails as lost and isn't resent; to make trying again safe, `thread.create` takes a `clientKey` (New thread sends one per request), and the daemon answers a key it has seen, even before a restart, with the thread it made then (the same key with another project, title, prompt or model is refused).
 
 | Variable | Default | |
 |---|---|---|
 | `TENZO_PORT` | `4780` | port to listen on |
+| `TENZO_LIVE_PORT` | `TENZO_PORT` + 1 | port of the second listener, which serves only threads' live apps (`/live/`) |
+| `TENZO_LIVE_ORIGIN` | none | the live listener's public origins, comma-separated (e.g. a second Tailscale Serve route, `https://my-mac.tailnet.ts.net:8444`); Open live links to the one with the host name you reached Tenzo by, else to the live port on that name |
 | `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
@@ -126,12 +133,12 @@ The daemon folds the log into **items** (`apps/daemon/src/fold.ts`, a pure funct
 
 When a build is done the agent calls `report(summary, how_to_test, checks)`: the thread goes to **review** and a review-lane card (after every quick-lane card) shows the handoff note, a badge per check, screenshots and an **Open live** link. `report` returns at once; nothing waits on it, and Done just closes the card (Merge, Open PR and Needs changes come with #21). A second report replaces the first card.
 
-- `attach(path, caption?)` takes a PNG, JPEG, GIF or WebP (by its bytes; no SVG) of up to 10 MB from inside the thread's worktree, after symlinks are resolved. The daemon keeps a copy under `$TENZO_HOME/attachments/<thread>/` and serves it at `/api/attachments/<thread>/<file>` (nosniff, sandboxed); archiving removes them.
-- `expose(port, path?)` points `/live/<thread>/` on the daemon's own origin at `localhost:<port>`, HTTP and WebSocket, once something answers there. Only that thread's latest port is reachable, behind the same Host/Origin guard as the API, so one Tailscale Serve route covers it. Paths are forwarded unchanged, so the dev server must serve under that base (Vite: `--base /live/<thread>/`; the base is in `$TENZO_LIVE_BASE` in the thread's environment). An app that only works at `/` won't load its assets; `expose` warns the agent when its page points outside the base. The app runs on Tenzo's origin, which is fine while the daemon has no credentials of its own; remote mode with device tokens (M4) must give it an origin of its own. The link works while the dev server runs (the agent's session keeps background processes until the thread is archived or the daemon stops); otherwise it answers 502.
+- `attach(path, caption?)` takes a PNG, JPEG, GIF or WebP (by its bytes; no SVG) of up to 10 MB from inside the thread's worktree, after symlinks are resolved and checked again on the open file (no hard links), at most 8 per report. The daemon keeps a copy under `$TENZO_HOME/attachments/<thread>/` and serves it at `/api/attachments/<thread>/<file>` (nosniff, sandboxed); archiving removes them.
+- `expose(port, path?)` points `/live/<thread>/` on the **live listener** (`TENZO_LIVE_PORT`) at `localhost:<port>`, HTTP and WebSocket. Never on the daemon's own origin: a live page runs whatever its dependencies, embeds and bugs put in it, and on Tenzo's origin it could answer your permission cards and start threads. On the live origin the daemon refuses its requests, and the live listener serves nothing but `/live/` (same Host allowlist; an Origin only if it is the live origin itself). Threads' apps share the live origin with each other. `expose` takes a port only once something answers there, it isn't Tenzo, and `lsof` shows its listening process running in the thread's worktree (unchecked where there is no `lsof`); only that thread's latest port is reachable. Paths are forwarded unchanged, so the dev server must serve under that base (Vite: `--base /live/<thread>/`; the base is in `$TENZO_LIVE_BASE` in the thread's environment). An app that only works at `/` won't load its assets; `expose` warns the agent when its page points outside the base. The link works while the dev server runs (the agent's session keeps background processes until the thread is archived or the daemon stops); otherwise it answers 502.
 
 ### Who may call the daemon
 
-The daemon's commands (`POST /api/commands`, `/ws`, and threads' live apps under `/live/`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding), and browser requests (WebSocket upgrades included, which get no CORS preflight) from any page but its own: the same host and port it was reached at (for an allowed host, over https on any port, e.g. Tailscale Serve on `:8443`), or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
+The daemon's commands (`POST /api/commands`, and `/ws`) can start agents, so it refuses requests whose `Host` isn't 127.0.0.1, localhost or ::1 (against DNS rebinding), and browser requests (WebSocket upgrades included, which get no CORS preflight) from any page but its own: the same host and port it was reached at (for an allowed host, over https on any port, e.g. Tailscale Serve on `:8443`), or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused. Put any other name you reach it by, such as its Tailscale Serve host, in `TENZO_ALLOWED_HOSTS`:
 
 ```bash
 TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net pnpm tenzo serve

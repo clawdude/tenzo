@@ -72,16 +72,47 @@ export const Finished = z.object({
 export type Finished = z.infer<typeof Finished>;
 
 /**
- * Where a thread's exposed dev server is reachable on the daemon's own origin. Requests under it
+ * Where threads' live apps are served: a listener of their own, on another port, so a page an
+ * agent serves runs on an origin that can't call Tenzo's API. `origins` are its public origins
+ * (`TENZO_LIVE_ORIGIN`, e.g. a second Tailscale Serve route); `port` is its loopback port.
+ */
+export const LiveInfo = z.object({
+  port: z.number().int().min(1).max(65_535),
+  origins: z.array(z.string()),
+});
+export type LiveInfo = z.infer<typeof LiveInfo>;
+
+/**
+ * The live origin for a page reached at `location`: the configured origin with the same host
+ * name, else the live port on that host name, same scheme. Null when the daemon has none.
+ */
+export function liveOriginFor(
+  location: { protocol: string; hostname: string },
+  live: LiveInfo | null,
+): string | null {
+  if (!live) return null;
+  const host = location.hostname.toLowerCase();
+  const named = live.origins.find(
+    (origin) => /^[a-z][a-z0-9+.-]*:\/\/(\[[^\]]*\]|[^:/?#]+)/i.exec(origin)?.[1]?.toLowerCase() === host,
+  );
+  return named ?? `${location.protocol}//${location.hostname}:${live.port}`;
+}
+
+/**
+ * Where a thread's exposed dev server is reachable on the live listener. Requests under it
  * are forwarded to the server with the path unchanged, so the server serves under this base.
  */
 export function liveBase(threadId: string): string {
   return `/live/${threadId}/`;
 }
 
-/** The "Open live" link: the thread's live base and the page the agent named. */
-export function liveUrl(threadId: string, preview: Pick<Preview, "path">): string {
-  return `${liveBase(threadId)}${preview.path}`;
+/** The "Open live" link on the live origin: the thread's live base and the page the agent named. */
+export function liveUrl(
+  liveOrigin: string,
+  threadId: string,
+  preview: Pick<Preview, "path">,
+): string {
+  return `${liveOrigin}${liveBase(threadId)}${preview.path}`;
 }
 
 /** Where the daemon serves an attachment's copy. */

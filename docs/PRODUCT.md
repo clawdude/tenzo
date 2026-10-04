@@ -85,7 +85,7 @@ Every finished item carries, via Tenzo's injected MCP server:
 - `attach(file)`: screenshots the agent took (Playwright/Chromium are on the machine).
 - `expose(port)`: a live URL to the dev server in that thread's worktree, reachable from your phone over the tailnet.
 
-`report` doesn't wait for you: it puts the card on the Pass, the thread enters review, and the agent ends its turn; your answer reaches it as a message. `attach` takes images from the thread's worktree only. `expose` makes the dev server reachable at `/live/<thread>/` on the daemon's own address (so one Tailscale Serve route covers it), and only that thread's port; the server must serve under that base.
+`report` doesn't wait for you: it puts the card on the Pass, the thread enters review, and the agent ends its turn; your answer reaches it as a message. `attach` takes images from the thread's worktree only. `expose` makes the dev server reachable at `/live/<thread>/` on Tenzo's **live origin**, a second listener of its own, and only that thread's port; the server must serve under that base. Never on Tenzo's own origin: a live page could otherwise drive Tenzo (answer your cards, start threads). Over the tailnet that takes a second Tailscale Serve route.
 
 Later: video, and daemon-verified checks (the daemon runs the project's check commands itself).
 

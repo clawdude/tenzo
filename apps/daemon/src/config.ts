@@ -10,6 +10,17 @@ export interface DaemonConfig {
   /** Loopback only; remote access goes through Tailscale Serve (PRODUCT.md, M4). */
   host: "127.0.0.1";
   port: number;
+  /**
+   * The second listener, for threads' live apps (live.ts): an origin of their own, so a page an
+   * agent serves can't call Tenzo's API. `TENZO_LIVE_PORT`, default `port + 1` (0 with port 0).
+   */
+  livePort?: number;
+  /**
+   * Where the live listener is reached from elsewhere, e.g. a second Tailscale Serve route
+   * `https://my-mac.tailnet.ts.net:8444`. `TENZO_LIVE_ORIGIN`, comma-separated. Open live links
+   * to the one whose host name the browser reached Tenzo by; else to the live port on that name.
+   */
+  liveOrigins?: string[];
   /** Tenzo's own state: environment id, later SQLite and worktrees. `TENZO_HOME`, default `~/.tenzo`. */
   home: string;
   /** The built web app the daemon serves. `TENZO_WEB_DIR`, default `apps/web/build`. */
@@ -33,20 +44,29 @@ export interface DaemonConfig {
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
 export function readConfig(env: Record<string, string | undefined>): DaemonConfig {
+  const port = readPort(env.TENZO_PORT);
+  const livePort = env.TENZO_LIVE_PORT ? readPort(env.TENZO_LIVE_PORT, "TENZO_LIVE_PORT") : port + 1;
+  if (livePort === port || livePort > 65_535) {
+    throw new Error(
+      `TENZO_LIVE_PORT must be a free port other than TENZO_PORT (${port}), got ${livePort}`,
+    );
+  }
   return {
     host: "127.0.0.1",
-    port: readPort(env.TENZO_PORT),
+    port,
+    livePort,
+    liveOrigins: readOrigins(env.TENZO_LIVE_ORIGIN, "TENZO_LIVE_ORIGIN", "https://my-mac.tailnet.ts.net:8444"),
     // Absolute, always: git runs with the repo as cwd, so a relative home would put worktrees
     // inside the user's repo.
     home: resolve(env.TENZO_HOME || join(homedir(), ".tenzo")),
     webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
     allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
-    devOrigins: readOrigins(env.TENZO_DEV_ORIGIN),
+    devOrigins: readOrigins(env.TENZO_DEV_ORIGIN, "TENZO_DEV_ORIGIN", "http://localhost:5173"),
     ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
   };
 }
 
-function readOrigins(raw: string | undefined): string[] {
+function readOrigins(raw: string | undefined, name: string, example: string): string[] {
   return (raw ?? "")
     .split(",")
     .map((o) => o.trim())
@@ -60,18 +80,18 @@ function readOrigins(raw: string | undefined): string[] {
       }
       if (!url || (url.protocol !== "http:" && url.protocol !== "https:") || url.origin !== o.replace(/\/$/, "")) {
         throw new Error(
-          `TENZO_DEV_ORIGIN takes origins separated by commas, like http://localhost:5173, got "${o}"`,
+          `${name} takes origins separated by commas, like ${example}, got "${o}"`,
         );
       }
       return url.origin;
     });
 }
 
-function readPort(raw: string | undefined): number {
+function readPort(raw: string | undefined, name = "TENZO_PORT"): number {
   if (raw === undefined || raw === "") return DEFAULT_PORT;
   const port = Number(raw);
   if (!Number.isInteger(port) || port < 1 || port > 65_535) {
-    throw new Error(`TENZO_PORT must be an integer between 1 and 65535, got "${raw}"`);
+    throw new Error(`${name} must be an integer between 1 and 65535, got "${raw}"`);
   }
   return port;
 }
