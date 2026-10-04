@@ -47,6 +47,7 @@ Environment:
   TENZO_ALLOWED_HOSTS  host names besides localhost that may reach the daemon, comma-separated
                        (e.g. its Tailscale Serve name)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
+  TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
 `;
 
 const config = () => readConfig(process.env);

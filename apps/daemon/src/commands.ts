@@ -67,6 +67,8 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
       };
     case "thread.events":
       return engine.events(command.threadId, command.after ?? 0);
+    case "project.list":
+      return { projects: engine.projects() };
     case "snapshot":
       return engine.snapshot();
     case "item.answer":

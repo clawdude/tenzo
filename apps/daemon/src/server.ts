@@ -11,6 +11,7 @@ import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
 import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
+import { createClaudeTitler, type Titler } from "./titles.ts";
 
 export interface RunningDaemon {
   url: string;
@@ -26,6 +27,11 @@ export interface DaemonDeps {
   adapters?: Partial<Record<"claude" | "codex", AgentAdapter>>;
   /** How often silent WebSockets are pinged, and dropped if still silent next time (socket.ts). */
   heartbeatMs?: number;
+  /**
+   * Names new threads (titles.ts). Default: a one-shot Claude, unless `adapters` is given (tests),
+   * where threads then keep the prompt's first words: a test never spawns `claude` unasked.
+   */
+  titler?: Titler;
 }
 
 /**
@@ -44,7 +50,13 @@ export async function startDaemon(
     unlock();
     throw error;
   }
-  const engine = new Engine({ store, adapters: deps.adapters ?? { claude: createClaudeAdapter() } });
+  const titler = deps.titler ?? (deps.adapters ? undefined : createClaudeTitler());
+  const engine = new Engine({
+    store,
+    adapters: deps.adapters ?? { claude: createClaudeAdapter() },
+    ...(titler ? { titler } : {}),
+    ...(config.defaultModel ? { defaultModel: config.defaultModel } : {}),
+  });
   const environmentId = store.environmentId;
   const app = createApp({
     environmentId,

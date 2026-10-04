@@ -45,6 +45,7 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
+| `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads started without one (e.g. `haiku` for cheap trial runs) |
 
 ## Projects and threads
 
@@ -80,6 +81,8 @@ pnpm tenzo thread archive <thread-id>          # worktree gone, branch tenzo/try
 ## Running Claude Code in a thread
 
 Threads run your own `claude` (see `TENZO_CLAUDE_PATH`) through the Claude Agent SDK, with your own login and everything your terminal `claude` loads: user, project and local settings, `CLAUDE.md`, subagents, skills, hooks, MCP servers and plugins, and Claude Code's own system prompt. Tenzo only sets the permission mode to accept edits and catches questions and permission prompts so they can come to you. Threads get Tenzo's environment minus the variables a parent Claude Code session exports (`CLAUDECODE`, its session id, IDE port, bridge wiring), so running Tenzo from inside Claude Code doesn't tie its threads to that session; your configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, Bedrock/Vertex, proxies) passes through.
+
+A thread started from a prompt without a title is named in two steps: at once by the prompt's first few words, then, a few seconds later, by a 2–4 word name from a one-shot `claude` on haiku (no tools, no settings, not saved to your session history). If that fails, the first words stay.
 
 The daemon runs the threads: thread commands go to it (start `pnpm tenzo serve` first, with the same `TENZO_HOME` and `TENZO_PORT`), so everything a client sees comes from one place.
 

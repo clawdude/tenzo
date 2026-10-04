@@ -1,4 +1,4 @@
-import type { QueueItem, UserInputQuestion } from '@tenzo/client-runtime';
+import type { ProjectView, QueueItem, ThreadView, UserInputQuestion } from '@tenzo/client-runtime';
 
 /** Test-only records that pass the contracts. */
 
@@ -44,6 +44,40 @@ export function item(tag: string, overrides: Partial<QueueItem> = {}): QueueItem
 		resolvedAt: null,
 		resolution: null,
 		...overrides
+	};
+}
+
+export function thread(tag: string, overrides: Partial<ThreadView> = {}): ThreadView {
+	return {
+		id: `thr_${tag.repeat(20).slice(0, 20)}`,
+		environmentId: 'env_abcdefghij0123456789',
+		projectId: 'prj_pppppppppppppppppppp',
+		projectName: 'app',
+		title: `Thread ${tag}`,
+		branch: `tenzo/${tag}`,
+		worktreePath: `/tmp/${tag}`,
+		status: 'active',
+		agent: 'claude',
+		model: null,
+		createdAt: at,
+		updatedAt: at,
+		archivedAt: null,
+		activity: 'idle',
+		working: false,
+		queued: 0,
+		openItems: 0,
+		lastSeq: 4,
+		activeAt: at,
+		...overrides
+	};
+}
+
+export function project(name: string): ProjectView {
+	return {
+		id: `prj_${name.charAt(0).repeat(20)}`,
+		environmentId: 'env_abcdefghij0123456789',
+		name,
+		defaultBranch: 'main'
 	};
 }
 

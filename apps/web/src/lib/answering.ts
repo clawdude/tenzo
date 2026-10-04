@@ -68,3 +68,15 @@ export function unsent(state: Answering): Answering {
 export function refused(now: number): Answering {
 	return fresh(now);
 }
+
+/**
+ * A refusal the card hasn't started over for yet. The card looks again whenever anything it
+ * reads changes (its item, say); the failure it has already handled must not reset the questions
+ * answered since. A repeat of the same refusal is a new failure object, so it still counts.
+ */
+export function isNewRefusal(
+	failure: Failure | null,
+	handled: Failure | null
+): failure is Failure {
+	return failure !== null && failure.refused && failure !== handled;
+}

@@ -6,7 +6,7 @@ import { WebSocket } from "ws";
 import { FakeAdapter } from "./agent/fake-agent.ts";
 import type { Engine } from "./engine.ts";
 import { addProject } from "./projects.ts";
-import { type RunningDaemon, startDaemon } from "./server.ts";
+import { type DaemonDeps, type RunningDaemon, startDaemon } from "./server.ts";
 import { socketHandlers } from "./socket.ts";
 import { openStore } from "./store.ts";
 import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
@@ -48,7 +48,7 @@ afterEach(async () => {
   await Promise.all(running.splice(0).map((d) => d.close()));
 });
 
-async function start(heartbeatMs?: number): Promise<RunningDaemon> {
+async function start(heartbeatMs?: number, deps: DaemonDeps = {}): Promise<RunningDaemon> {
   const daemon = await startDaemon(
     {
       host: "127.0.0.1",
@@ -58,7 +58,7 @@ async function start(heartbeatMs?: number): Promise<RunningDaemon> {
       allowedHosts: [],
       devOrigins: [],
     },
-    { adapters: { claude: adapter }, ...(heartbeatMs ? { heartbeatMs } : {}) },
+    { adapters: { claude: adapter }, ...(heartbeatMs ? { heartbeatMs } : {}), ...deps },
   );
   running.push(daemon);
   return daemon;
@@ -133,6 +133,47 @@ describe("/ws", () => {
       threads: [{ title: "Paint it", activity: "needs-you" }],
       items: [{ ask: "Which color?", context: "Before I paint:", status: "open" }],
     });
+  });
+
+  it("offers the projects: in the snapshot, and fresh on request", async () => {
+    const daemon = await start();
+    const client = await Client.open(daemon);
+    const snapshot = client.frames[1];
+    expect(snapshot?.type === "snapshot" && snapshot.snapshot.projects).toEqual([
+      expect.objectContaining({ name: "app", defaultBranch: "main" }),
+    ]);
+    // `tenzo project add` writes the database from another process while the daemon runs.
+    const store = openStore(home);
+    await addProject(store, initRepo("blog"));
+    store.close();
+    const listed = await client.command({ type: "project.list" });
+    expect(listed.type === "ok" && listed.result).toEqual({
+      projects: [
+        expect.objectContaining({ name: "app" }),
+        expect.objectContaining({ name: "blog" }),
+      ],
+    });
+  });
+
+  it("renames a new thread once its name is ready, and tells every client", async () => {
+    let name: (title: string) => void = () => {};
+    const daemon = await start(undefined, {
+      titler: () => new Promise((resolve) => (name = resolve)),
+    });
+    const client = await Client.open(daemon);
+    const created = await client.command({
+      type: "thread.create",
+      project: "app",
+      prompt: "Paint the fence a colour of my choosing",
+    });
+    expect(created.type === "ok" && created.result).toMatchObject({
+      thread: { title: "Paint the fence a…" },
+    });
+    name("Fence colour");
+    const renamed = await client.next(
+      (f) => f.type === "thread" && f.thread.title === "Fence colour",
+    );
+    expect(renamed).toMatchObject({ thread: { title: "Fence colour" } });
   });
 
   it("streams the same changes to every client, and runs commands from any of them", async () => {

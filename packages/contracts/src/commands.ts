@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { EnvironmentId } from "./ids.ts";
-import { ItemAnswer, QueueItem, StoredEvent, ThreadView } from "./queue.ts";
+import { ItemAnswer, ProjectView, QueueItem, StoredEvent, ThreadView } from "./queue.ts";
 
 /**
  * What a client can ask the daemon to do. One vocabulary for every transport: the CLI posts these
@@ -40,7 +40,9 @@ export const Command = z.discriminatedUnion("type", [
     threadId: z.string().min(1),
     after: z.number().int().nonnegative().optional(),
   }),
-  /** Active threads and open items: everything the Pass needs to draw. */
+  /** The projects a thread can start in, by name. */
+  z.object({ type: z.literal("project.list") }),
+  /** Projects, active threads and open items: everything the Pass needs to draw. */
   z.object({ type: z.literal("snapshot") }),
   z.object({
     type: z.literal("item.answer"),
@@ -56,6 +58,8 @@ export const Snapshot = z.object({
   threads: z.array(ThreadView),
   /** Open items, oldest first. */
   items: z.array(QueueItem),
+  /** Registered projects, by name. Projects added later come with `project.list`. */
+  projects: z.array(ProjectView).default([]),
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 
@@ -66,6 +70,7 @@ export const CommandResults = {
   "thread.archive": z.object({ thread: ThreadView }),
   "thread.list": z.object({ threads: z.array(ThreadView) }),
   "thread.events": z.object({ thread: ThreadView, events: z.array(StoredEvent) }),
+  "project.list": z.object({ projects: z.array(ProjectView) }),
   snapshot: Snapshot,
   "item.answer": z.object({
     item: QueueItem,

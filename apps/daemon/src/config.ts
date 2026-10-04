@@ -24,6 +24,11 @@ export interface DaemonConfig {
    * `http://localhost:5173` (`pnpm dev` sets it). `TENZO_DEV_ORIGIN`, comma-separated.
    */
   devOrigins: string[];
+  /**
+   * The model threads run when they are started without one, e.g. "haiku" for cheap trial runs.
+   * `TENZO_DEFAULT_MODEL`; unset, the agent's own default (the user's config).
+   */
+  defaultModel?: string;
 }
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
@@ -37,6 +42,7 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
     allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
     devOrigins: readOrigins(env.TENZO_DEV_ORIGIN),
+    ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
   };
 }
 

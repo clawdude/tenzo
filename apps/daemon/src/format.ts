@@ -2,14 +2,6 @@ import type { QueueItem, RuntimeEvent } from "@tenzo/contracts";
 
 /** How the CLI shows threads' events and items. */
 
-/** A thread's title from its first prompt: the first line, cut at a word near 80 characters. */
-export function titleFrom(prompt: string): string {
-  const line = prompt.trim().split("\n")[0]?.trim() ?? "";
-  if (line.length <= 80) return line;
-  const space = line.lastIndexOf(" ", 80);
-  return `${line.slice(0, space > 40 ? space : 80)}…`;
-}
-
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */
 export function formatItem(item: QueueItem, threadTitle?: string): string {
   const head = [item.id, threadTitle, item.kind === "question" ? "question" : "permission"]

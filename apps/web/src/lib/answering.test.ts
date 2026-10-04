@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fresh, refused, SETTLE_MS, tap, unsent } from './answering.ts';
+import { type Failure, fresh, isNewRefusal, refused, SETTLE_MS, tap, unsent } from './answering.ts';
 import { item, permission, question } from './fixtures.ts';
 import { stepsOf } from './pass.ts';
 
@@ -71,5 +71,23 @@ describe('refused', () => {
 		expect(tap(two, again.state, suggested(two, 1), 2050 + 2 * SETTLE_MS).answer).toEqual(
 			sent.answer
 		);
+	});
+});
+
+describe('isNewRefusal', () => {
+	const refusal = (): Failure => ({ message: 'Refused for the test.', refused: true });
+
+	it('starts the card over once per refusal, not again when the card looks again', () => {
+		const first = refusal();
+		expect(isNewRefusal(first, null)).toBe(true);
+		// Handled: the item changing (a `detached` frame, say) mid-way through must not reset it.
+		expect(isNewRefusal(first, first)).toBe(false);
+		// The same words again are a new refusal.
+		expect(isNewRefusal(refusal(), first)).toBe(true);
+	});
+
+	it('never starts over for no failure, or for one that never went out', () => {
+		expect(isNewRefusal(null, null)).toBe(false);
+		expect(isNewRefusal({ message: 'Not connected.', refused: false }, null)).toBe(false);
 	});
 });

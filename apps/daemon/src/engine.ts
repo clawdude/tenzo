@@ -1,6 +1,7 @@
 import type {
   AgentKind,
   ItemAnswer,
+  ProjectView,
   QueueItem,
   QueueItemId,
   RuntimeEvent,
@@ -25,7 +26,7 @@ import {
   clearPrompts,
   enqueuePrompt,
   getItem,
-  lastSeq,
+  lastEvent,
   liveThreads,
   loadFoldState,
   nextPrompt,
@@ -36,9 +37,8 @@ import {
   threadsWithPrompts,
 } from "./event-store.ts";
 import { type ItemChange, itemIdFor } from "./fold.ts";
-import { titleFrom } from "./format.ts";
 import { randomId } from "./ids.ts";
-import { findProject } from "./projects.ts";
+import { findProject, listProjects } from "./projects.ts";
 import { type Store, transaction } from "./store.ts";
 import {
   archiveThread,
@@ -47,8 +47,10 @@ import {
   getThread,
   listThreads,
   projectOf,
+  setThreadTitle,
   type Thread,
 } from "./threads.ts";
+import { quickTitle, type Titler } from "./titles.ts";
 
 /**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
@@ -64,6 +66,13 @@ export interface EngineOptions {
   adapters: Partial<Record<AgentKind, AgentAdapter>>;
   /** How long an answer waits for the agent to confirm it took it. */
   answerTimeoutMs?: number;
+  /**
+   * Names a thread started from a prompt without a title, after it has started (titles.ts).
+   * Without one, threads keep the prompt's first words.
+   */
+  titler?: Titler;
+  /** The model for threads started without one (`TENZO_DEFAULT_MODEL`). Default: the agent's. */
+  defaultModel?: string;
   log?: (message: string) => void;
 }
 
@@ -96,12 +105,19 @@ export class Engine {
   readonly #archiving = new Set<ThreadId>();
   /** Items answered for you from a standing reply: subscribers never see them open. */
   readonly #quiet = new Set<QueueItemId>();
+  readonly #titler: Titler | undefined;
+  readonly #defaultModel: string | undefined;
+  /** Names being thought of; `close` stops and waits for them. */
+  readonly #naming = new Set<Promise<void>>();
+  readonly #stopNaming = new AbortController();
   #closing = false;
 
   constructor(options: EngineOptions) {
     this.store = options.store;
     this.#adapters = options.adapters;
     this.#answerTimeoutMs = options.answerTimeoutMs ?? 10_000;
+    this.#titler = options.titler;
+    this.#defaultModel = options.defaultModel;
     this.#log = options.log ?? ((message) => console.error(`tenzo: ${message}`));
   }
 
@@ -135,14 +151,29 @@ export class Engine {
     model?: string;
   }): Promise<ThreadView> {
     const prompt = input.prompt?.trim();
-    const title = input.title?.trim() || (prompt ? titleFrom(prompt) : "");
+    const given = input.title?.trim();
+    // Without a title, the prompt's first words stand in until the titler has a name.
+    const title = given || (prompt ? quickTitle(prompt) : "");
     if (title === "") throw new TenzoError("A new thread needs a title or a prompt.");
+    const model = input.model ?? this.#defaultModel;
     const thread = await createThread(this.store, input.project, title, {
-      ...(input.model ? { model: input.model } : {}),
+      ...(model ? { model } : {}),
     });
     if (prompt) enqueuePrompt(this.store, thread.id, prompt);
     this.#pump(thread.id);
-    return this.#changed(thread.id);
+    const view = this.#changed(thread.id);
+    if (prompt && !given) this.#name(thread.id, prompt);
+    return view;
+  }
+
+  /** The registered projects, by name: where a new thread can start. */
+  projects(): ProjectView[] {
+    return listProjects(this.store).map((p) => ({
+      id: p.id,
+      environmentId: p.environmentId,
+      name: p.name,
+      defaultBranch: p.defaultBranch,
+    }));
   }
 
   /** Queues a prompt; it is sent as soon as the thread's running turn (if any) ends. */
@@ -204,6 +235,7 @@ export class Engine {
       environmentId: this.store.environmentId,
       threads: this.threads(),
       items: openItems(this.store).filter((i) => !this.#quiet.has(i.id)),
+      projects: this.projects(),
     };
   }
 
@@ -283,15 +315,40 @@ export class Engine {
   /** Stops every session, leaving open items for the next daemon. */
   async close(): Promise<void> {
     this.#closing = true;
-    await Promise.all(
-      [...this.#live.values()].map(async (live) => {
+    this.#stopNaming.abort();
+    await Promise.all([
+      ...[...this.#live.values()].map(async (live) => {
         await live.session.stop();
         await live.reading;
       }),
-    );
+      ...this.#naming,
+    ]);
   }
 
   // Internals.
+
+  /**
+   * Asks the titler for the thread's name, in the background: the thread has started already.
+   * A name that comes back replaces the stand-in and is announced; no name (or an error) leaves
+   * the stand-in, quietly.
+   */
+  #name(threadId: ThreadId, prompt: string): void {
+    const titler = this.#titler;
+    if (!titler) return;
+    const naming = (async () => {
+      try {
+        const title = await titler(prompt, this.#stopNaming.signal);
+        if (!title || this.#closing) return;
+        if (getThread(this.store, threadId).status !== "active") return;
+        setThreadTitle(this.store, threadId, title);
+        this.#changed(threadId);
+      } catch {
+        // A name is a nicety; the stand-in stays.
+      }
+    })();
+    this.#naming.add(naming);
+    void naming.finally(() => this.#naming.delete(naming));
+  }
 
   /** Sends the thread's next queued prompt if no turn of ours is running, starting the agent. */
   #pump(threadId: ThreadId): void {
@@ -503,6 +560,7 @@ export class Engine {
     const working =
       thread.status === "active" &&
       (queued > 0 || Boolean(live?.turnId) || (runtime.live && runtime.turnId !== null));
+    const last = lastEvent(this.store, thread.id);
     return {
       id: thread.id,
       environmentId: thread.environmentId,
@@ -521,7 +579,8 @@ export class Engine {
       working,
       queued,
       openItems: open,
-      lastSeq: lastSeq(this.store, thread.id),
+      lastSeq: last?.seq ?? 0,
+      activeAt: last?.at ?? thread.createdAt,
     };
   }
 
