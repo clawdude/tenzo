@@ -20,7 +20,11 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
   } else if (item.kind === "error") {
     lines.push(`  ! ${item.ask}`);
     if (item.error?.message) lines.push(`    ${oneLine(item.error.message, 300)}`);
-    lines.push("    1. Retry (suggested)", "    2. Archive", "    Or tell it something.");
+    if (item.error?.cause === "budget") {
+      lines.push("    1. Continue (suggested): as much budget again", "    2. Stop: archive the thread", "    Or tell it what to do.");
+    } else {
+      lines.push("    1. Retry (suggested)", "    2. Archive", "    Or tell it something.");
+    }
   } else if (item.kind === "proposal") {
     lines.push(`  ! ${item.ask}`);
     for (const line of (item.proposal?.summary ?? "").split("\n")) {
@@ -100,6 +104,7 @@ function describe(event: RuntimeEvent): string {
         p.costUsd === undefined ? undefined : `$${p.costUsd.toFixed(4)}`,
         p.durationMs === undefined ? undefined : `${(p.durationMs / 1000).toFixed(1)}s`,
         p.errorMessage,
+        p.stoppedBy === "budget" ? "stopped at its spend limit" : undefined,
       ]
         .filter(Boolean)
         .join(" · ");
@@ -162,6 +167,8 @@ function describe(event: RuntimeEvent): string {
       return [event.payload.url, event.payload.summary].filter(Boolean).join(" · ");
     case "landing.stuck":
       return `${event.payload.cause}: ${event.payload.message}`;
+    case "budget.exceeded":
+      return event.payload.message;
     case "runtime.error":
       return event.payload.message;
     case "config.checked":

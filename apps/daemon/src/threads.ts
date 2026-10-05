@@ -46,9 +46,11 @@ export interface Thread {
   model: string | null;
   /** The thread's own thinking level, over its project's config. */
   thinking: ThinkingLevel | null;
-  /** Who started it: you, or another thread's agent (`start_thread`), `parentId`. */
+  /** Who started it: you, another thread's agent (`start_thread`, `parentId`), an automation. */
   origin: ThreadOrigin;
   parentId: ThreadId | null;
+  /** The automation it is a run of (origin `automation`). */
+  automation: string | null;
 }
 
 const BRANCH_PREFIX = "tenzo/";
@@ -70,6 +72,10 @@ export async function createThread(
     client?: { key: string; request: string };
     /** The thread whose agent starts this one (origin `agent`). */
     parent?: ThreadId;
+    /** The automation this thread is a run of (origin `automation`). */
+    automation?: string;
+    /** The thread's own thinking level from the start. */
+    thinking?: ThinkingLevel;
   } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
@@ -101,9 +107,10 @@ export async function createThread(
     agent: null,
     sessionId: null,
     model: options.model ?? null,
-    thinking: null,
-    origin: options.parent ? "agent" : "user",
+    thinking: options.thinking ?? null,
+    origin: options.automation ? "automation" : options.parent ? "agent" : "user",
     parentId: options.parent ?? null,
+    automation: options.automation ?? null,
   };
 
   await addWorktree(project.path, thread.worktreePath, thread.branch, base);
@@ -112,8 +119,9 @@ export async function createThread(
       .prepare(
         `INSERT INTO threads
            (id, project_id, title, slug, branch, worktree_path, status, created_at, updated_at,
-            environment_id, model, naming, client_key, client_request, origin, parent_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            environment_id, model, naming, client_key, client_request, origin, parent_id,
+            thinking, automation)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         thread.id,
@@ -132,6 +140,8 @@ export async function createThread(
         options.client?.request ?? null,
         thread.origin,
         thread.parentId,
+        thread.thinking,
+        thread.automation,
       );
   } catch (error) {
     // Nobody has seen this worktree or branch yet: undo both rather than leave strays.
@@ -343,8 +353,10 @@ function toThread(row: Record<string, unknown>): Thread {
       row.session_id === null || row.session_id === undefined ? null : String(row.session_id),
     model: row.model === null || row.model === undefined ? null : String(row.model),
     thinking: ThinkingLevel.safeParse(row.thinking).data ?? null,
-    origin: row.origin === "agent" ? "agent" : "user",
+    origin: row.origin === "agent" || row.origin === "automation" ? row.origin : "user",
     parentId:
       row.parent_id === null || row.parent_id === undefined ? null : (String(row.parent_id) as ThreadId),
+    automation:
+      row.automation === null || row.automation === undefined ? null : String(row.automation),
   };
 }

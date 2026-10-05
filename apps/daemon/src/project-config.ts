@@ -10,6 +10,8 @@ import {
 } from "node:fs";
 import { join, sep } from "node:path";
 import {
+  type Automation,
+  checkAutomations,
   type LandingRule,
   type PermissionModeName,
   ProjectConfig,
@@ -55,7 +57,18 @@ export function parseProjectConfig(files: { config?: string; local?: string }): 
   if (typeof committed === "string") return { config: null, problem: committed };
   const local = files.local === undefined ? {} : parseFile(LOCAL_FILE, files.local);
   if (typeof local === "string") return { config: null, problem: local };
-  return { config: mergeConfig(committed, local), problem: null };
+  const merged = mergeConfig(committed, local);
+  // local.json may override part of an automation; the merged one must be whole.
+  const automations = checkAutomations(merged);
+  if (typeof automations === "string") return { config: null, problem: automations };
+  return { config: merged, problem: null };
+}
+
+/** The config's automations, each with its prompt; none when the config can't be read. */
+export function automationsOf(read: ConfigRead): Record<string, Automation> {
+  if (!read.config) return {};
+  const automations = checkAutomations(read.config);
+  return typeof automations === "string" ? {} : automations;
 }
 
 /** One file's settings, or what is wrong with it (naming the file and the key). */

@@ -209,6 +209,12 @@ describe('originOf', () => {
 		const [group] = groupThreads([parent, child], [], now);
 		expect(group?.rows.map((r) => r.origin?.label ?? null)).toEqual([null, 'from Refresh tokens']);
 	});
+
+	it('names the automation a run belongs to', () => {
+		const run = thread('r', { origin: 'automation', automation: 'nightly' });
+		expect(originOf(run, [run])).toEqual({ kind: 'automation', label: 'automation: nightly' });
+		expect(rowOf(run, []).origin?.label).toBe('automation: nightly');
+	});
 });
 
 describe('entriesOf', () => {

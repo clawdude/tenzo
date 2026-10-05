@@ -153,6 +153,71 @@ Before each turn the daemon works out what the thread should run with now (its o
 
 An invalid file never stops a thread: its threads run on the defaults, and one error card per project says which file and key is wrong. *Retry* reads the file again, *Dismiss* puts the card away until something else is wrong, and the card goes by itself once a turn starts with the file fixed.
 
+### Automations
+
+An automation is a saved thread recipe in the same config, under `automations`, by name (`a-z`, `0-9`, `-`, at most 40; at most 20 per project):
+
+```json
+{
+  "automations": {
+    "review-prs": {
+      "prompt": "List open PRs with gh. For each one you haven't reviewed, run /code-review and post findings as a PR comment.",
+      "trigger": { "schedule": "every 1h", "timeZone": "Europe/Rome" },
+      "budget": { "wallClock": "30m", "costUsd": 2 },
+      "model": "haiku",
+      "thinking": "low"
+    }
+  }
+}
+```
+
+| Key | |
+|---|---|
+| `prompt` | what the thread starts with (at most 8000 characters) |
+| `trigger.schedule` | `every 15m` / `2h` / `1d` (a fixed interval, at least 5 minutes); `hourly`; `daily 09:00`, `weekdays 09:00`; or a five-field cron line (`*/30 8-18 * * 1-5`: numbers, `*`, ranges, steps, lists). The day fields combine as in Vixie cron and cronie: when either starts with `*` (`*`, `*/2`) a day must match both, otherwise either is enough. None: it runs only when you run it |
+| `trigger.timeZone` | the IANA zone clock times are read in; default the machine's. A time a spring-forward day skips runs as the clocks jump past it (02:30 at 03:30); a time a fall-back day repeats runs once, the first time. So `hourly` leaves a two-hour gap on a fall-back night (Rome, 2026-10-25: 02:00 CEST, then 03:00 CET); `every 1h` doesn't |
+| `budget.wallClock`, `budget.costUsd` | what one run may use before it pauses and asks: wall clock (`1m` to `24h`, default `1h`) and Claude's own spend estimate in USD (at most `20`, default `2`) |
+| `model`, `thinking` | the run's model and thinking in every phase, as the thread's own choice (its "⋯" shows it) |
+| `enabled` | `false` switches its schedule off (`local.json` can, for one you don't want to run on your machine) |
+
+```bash
+pnpm tenzo automation list [project]          # schedule, next run, last run (thread, cost, how it went)
+pnpm tenzo automation run <project> <name>    # run it now
+pnpm tenzo automation pause | resume          # the off switch: no schedule starts a run while paused
+```
+
+- **A run is an ordinary thread**: the normal create path, its own worktree and branch (`tenzo/<name>-<date>`), discuss first, your own permissions and settings. Its origin is `automation` (the Threads list says "automation: <name>"; `ThreadView.automation`), and its cards land on the Pass like any other. It can start threads with `start_thread`.
+- **Bounded, because the repo writes it.** A schedule in the config just runs, so a file in the repo (a pull, a teammate's commit) decides what starts by itself. What it can make Tenzo do is bounded where the repo can't reach:
+  - A definition can't set a permission mode, or anything else a thread you start yourself wouldn't get. It is checked like the rest of the file: strict keys, sizes, and the same plain-file rules.
+  - Every run has a budget. It is 1h and $2 when the file sets none, and at most 24h and $20 when it does. Beyond that, you decide on the card.
+  - An automation's schedule starts a run at most every 5 minutes, whatever its cron line says. Running it by hand isn't limited.
+  - At most 3 automation runs go at once, across all projects. A schedule that comes due beyond that is skipped and recorded ("too many runs going").
+  - The off switch, `tenzo automation pause`, lives in `$TENZO_HOME/automations.paused`, not in the repo, so `local.json` (which the repo can commit) is never the only brake. While it is on, due runs are skipped and recorded; running by hand still works. `snapshot.automationsPaused` shows it.
+- **Memory between runs.** The run's prompt is the automation's prompt, then what Tenzo adds:
+  - which automation and trigger this is;
+  - what its previous run said last: its latest `report`, else its last answer, quoted, at most 1500 characters;
+  - its notes file `.tenzo/automations/<name>.md`.
+
+  Tenzo never writes the notes file. The prompt lets the agent update and commit that one file without proposing first; any other change still goes through the discuss flow. A run's worktree is cut from the default branch, so Tenzo looks (with a read-only `git log`, under a timeout) for the newest version among the default branch and the earlier runs' branches. When the worktree doesn't have it, the prompt names the commit to take it from (`git checkout <commit> -- <path>`). The prompt also asks the agent to leave markers in the systems it works in.
+- **Skip if running.** A run that comes due while its previous run is still going is skipped and recorded, with the reason:
+  - "still going": working, or landing;
+  - "waiting on you": a question, a permission, a proposal, an error card, a ready PR;
+  - "paused by its budget".
+
+  A run is done once its agent ended a turn with nothing running or queued and nothing open but finished work, or once it is archived.
+- **No pile-up.** When a run starts, its automation's previous run is archived if it is done, has no open card, has a clean worktree and has no commits beyond its base; its branch stays. A run with commits, or with a finished card waiting for you, stays.
+- **Schedules survive restarts.** The next run of each automation is kept in SQLite (`automations`), and every run in `automation_runs`.
+  - Runs missed while no daemon ran come once when it starts, not once per missed time; after that the schedule goes on from now.
+  - A config that can't be read changes no schedule (its error card says why, as for any thread) and arms nothing. An automation removed from its config, or a removed project, loses its schedule.
+- **Budgets pause and ask; they never kill.**
+  - Wall clock counts from the run's start. Cost is Claude's running total for the session (`total_cost_usd`, an estimate), and Claude gets what is left of the cap as `maxBudgetUsd`, so it stops a turn there by itself. Any card of that turn goes with it.
+  - A run over either one is paused. A turn still running at its wall-clock deadline is interrupted; one waiting on your answer is left to it and looked at again a minute later. Nothing more is sent to the agent.
+  - A quick-lane card asks what to do:
+    - **Continue** grants a fresh budget from that moment: the wall clock runs one budget from now, and the cap is one budget above what was spent (one API call can go past a cap). Claude's new cap needs a new session, which resumes the conversation at the next turn.
+    - **Stop** archives the thread.
+    - Words go to the agent, with the same grant.
+  - A run's budget ends when the run is done: what you ask of the thread afterwards isn't held.
+
 ### Events and items
 
 Every event the agent reports is appended to an append-only log in SQLite (`events`), in Tenzo's own vocabulary (`packages/contracts/src/runtime.ts`): `session.*`, `turn.*`, `item.*`, `request.opened/resolved`, `user-input.requested/resolved`, `runtime.error`. Nothing above the agent adapter (`apps/daemon/src/agent/`) knows it is talking to Claude.

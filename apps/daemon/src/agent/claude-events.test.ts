@@ -193,6 +193,23 @@ describe("turns", () => {
     expect(bare.events.at(-1)?.payload).toMatchObject({ errorMessage: "error during execution" });
   });
 
+  it("calls a stop at the spend cap Tenzo set a pause, not a failure", () => {
+    const { events } = run(
+      [
+        result({
+          subtype: "error_max_budget_usd",
+          is_error: true,
+          errors: ["Reached maximum budget ($0.50)"],
+          total_cost_usd: 0.51,
+        } as never),
+      ],
+      inTurn(),
+    );
+    expect(events.map((e) => e.type)).toEqual(["turn.completed"]);
+    expect(events.at(-1)?.payload).toMatchObject({ state: "interrupted", stoppedBy: "budget", costUsd: 0.51 });
+    expect(events.at(-1)?.payload).not.toHaveProperty("errorMessage");
+  });
+
   it("calls an interrupted turn interrupted, not failed", () => {
     for (const message of [
       result({ terminal_reason: "aborted_tools", is_error: true }),

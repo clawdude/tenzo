@@ -34,7 +34,13 @@ import {
 } from "../live.ts";
 import type { ModelChoice, SessionModels } from "../project-config.ts";
 import { promptFor, proposalReply, wakePrompt } from "../prompts.ts";
-import type { AgentAdapter, AgentSession, EventDraft, StartSessionInput } from "./agent.ts";
+import type {
+  AgentAdapter,
+  AgentSession,
+  EventDraft,
+  SpendBudget,
+  StartSessionInput,
+} from "./agent.ts";
 import {
   boundedInput,
   type ClaudeTranslation,
@@ -488,6 +494,7 @@ function startSession(
     },
     ...(resumed ? { resume: sessionId } : { sessionId }),
     ...modelOptions(choiceFor(input.models, input.phase)),
+    ...budgetOptions(input.budget),
   };
 
   const run = query({ prompt: prompts, options });
@@ -507,6 +514,9 @@ function startSession(
           background = message.tasks.filter((task) => isWork(task)).length;
         }
         apply(translate(state, message));
+        // Claude ended the turn at the spend cap Tenzo set: nothing waits on a request it had
+        // open any more, so it is cancelled (its card goes; the budget card is what asks).
+        if (message.type === "result" && message.subtype === "error_max_budget_usd") cancelPending(false);
       }
       emit({ type: "session.exited", ...inTurn(), payload: { exitKind: "graceful" } });
     } catch (error) {
@@ -673,6 +683,8 @@ function startSession(
       // Fixed for the process's life: only a new session takes another.
       if (settings.permissionMode !== input.permissionMode) return "restart";
       if (settings.models.agents !== input.models?.agents) return "restart";
+      // maxBudgetUsd too: a raised (or lifted) spend cap takes a new session.
+      if (settings.budget?.capUsd !== input.budget?.capUsd) return "restart";
       const next = choiceFor(settings.models, phaseNow());
       const plan = planSwitch(running, next);
       if (plan.restart) return "restart";
@@ -772,6 +784,17 @@ export function modelOptions(choice: ModelChoice): Pick<Options, "model" | "thin
  * The project's permission mode as the SDK's option, or nothing. Only modes a repo may set
  * (`PermissionModeName`): never one that needs the SDK's dangerous opt-in.
  */
+/**
+ * An automation run's spend cap as `maxBudgetUsd`, which Claude counts from this session's start
+ * (a resumed one too): what is left of the cap. Claude ends the turn there by itself
+ * (`error_max_budget_usd`, reported as stopped by the budget). None: no option, as in a terminal.
+ */
+export function budgetOptions(budget: SpendBudget | undefined): Pick<Options, "maxBudgetUsd"> {
+  if (!budget) return {};
+  // A cent at least: nothing left is the daemon's to hold (it pauses before sending a turn).
+  return { maxBudgetUsd: Math.max(0.01, budget.capUsd - budget.spentUsd) };
+}
+
 export function permissionOptions(mode: PermissionModeName | undefined): Pick<Options, "permissionMode"> {
   return mode ? { permissionMode: mode } : {};
 }

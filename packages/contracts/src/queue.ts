@@ -90,9 +90,10 @@ export const ItemError = z.object({
    * `stalled`: a landing turn ended with nothing on the Pass and no wake. `unarchived`: the agent
    * said it landed, but the thread couldn't be archived (`landing.stuck`, engine.ts). `config`:
    * the project's `.tenzo/` config is invalid, so the thread runs on the defaults
-   * (`config.checked`); Retry reads it again.
+   * (`config.checked`); Retry reads it again. `budget`: an automation's run reached its budget
+   * and is paused (`budget.exceeded`); Retry is Continue, with as much budget again.
    */
-  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived", "config"]),
+  cause: z.enum(["turn", "crash", "start", "stalled", "unarchived", "config", "budget"]),
   /** The agent's or the daemon's own words for it, cut to size. */
   message: z.string(),
   /**
@@ -225,8 +226,11 @@ export type ItemAnswer = z.infer<typeof ItemAnswer>;
 export const ThreadPhase = z.enum(["discussing", "building", "review", "landing"]);
 export type ThreadPhase = z.infer<typeof ThreadPhase>;
 
-/** Who started a thread: you, or another thread's agent (`start_thread`). */
-export const ThreadOrigin = z.enum(["user", "agent"]);
+/**
+ * Who started a thread: you, another thread's agent (`start_thread`), or an automation (its
+ * schedule, or you running it by hand: `ThreadView.automation` names it).
+ */
+export const ThreadOrigin = z.enum(["user", "agent", "automation"]);
 export type ThreadOrigin = z.infer<typeof ThreadOrigin>;
 
 /** What a thread is doing, for lists and for the CLI to know when to stop following it. */
@@ -259,6 +263,8 @@ export const ThreadView = z.object({
   origin: ThreadOrigin.default("user"),
   /** The thread whose agent started this one (origin `agent`). */
   parentId: ThreadId.nullable().default(null),
+  /** The automation this thread is a run of (origin `automation`). */
+  automation: z.string().nullable().default(null),
   /** When the agent asked to be woken next (`wake_me`); null when it didn't. */
   wakeAt: z.iso.datetime().nullable().default(null),
   /**

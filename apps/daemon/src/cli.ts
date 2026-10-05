@@ -1,6 +1,12 @@
 #!/usr/bin/env node
 import { setTimeout as sleep } from "node:timers/promises";
-import { type Command, type CommandResult, isSnoozed, type QueueItem } from "@tenzo/contracts";
+import {
+  type AutomationView,
+  type Command,
+  type CommandResult,
+  isSnoozed,
+  type QueueItem,
+} from "@tenzo/contracts";
 import { answerFromWords, isAsk } from "./answers.ts";
 import { VERSION } from "./app.ts";
 import { parseArgs } from "./args.ts";
@@ -43,6 +49,11 @@ Usage:
                                          retry, archive, or what to tell it, for an error;
                                          merge, pr, done, or what needs changing, for
                                          finished work; merge, or what first, for a ready PR
+  tenzo automation list [<project>]      the automations the projects' .tenzo/config.json define:
+                                         schedule, next run, last run
+  tenzo automation run <project> <name>  run one now (a thread, origin automation)
+  tenzo automation pause | resume        the off switch, kept in TENZO_HOME: while paused, no
+                                         schedule starts a run (running one by hand still works)
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -228,7 +239,7 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
             t.status === "archived" ? "archived" : t.activity,
             t.phase,
             t.branch,
-            t.title,
+            t.origin === "automation" ? `${t.title} (automation: ${t.automation ?? "?"})` : t.title,
           ]),
         );
       return;
@@ -247,6 +258,81 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
     default:
       usageError(`Unknown thread command "${sub ?? ""}".`);
   }
+}
+
+async function automation([sub, ...rest]: string[]): Promise<void> {
+  const { flags, positional } = parseArgs(rest, sub === "list" || sub === "ls" ? ["--json"] : []);
+  switch (sub) {
+    case "list":
+    case "ls": {
+      const [projectRef] = positional;
+      const { automations, paused } = await call({
+        type: "automation.list",
+        ...(projectRef ? { project: projectRef } : {}),
+      });
+      if (flags.has("--json")) {
+        for (const a of automations) console.log(JSON.stringify(a));
+        return;
+      }
+      if (paused) console.log("Automations are paused: no schedule starts a run (`tenzo automation resume`).\n");
+      if (automations.length === 0) {
+        console.log("No automations. A project defines them under `automations` in .tenzo/config.json.");
+        return;
+      }
+      printTable(automations.map((a) => [a.projectName, a.name, scheduleCell(a), lastRunCell(a)]));
+      return;
+    }
+    case "pause":
+    case "resume": {
+      const { paused } = await call({ type: "automation.pause", paused: sub === "pause" });
+      console.log(
+        paused
+          ? "Automations paused: no schedule starts a run until `tenzo automation resume` (running one by hand still works)."
+          : "Automations resumed: schedules start runs again.",
+      );
+      return;
+    }
+    case "run": {
+      const [projectRef, name] = positional;
+      if (!projectRef || !name) usageError("tenzo automation run needs a project and an automation's name.");
+      const { automation: a, run, thread: t } = await call({
+        type: "automation.run",
+        project: projectRef,
+        name,
+      });
+      if (run.result === "started" && t) {
+        console.log(`Started ${t.id}: "${t.title}" on ${t.branch}\n${t.worktreePath}`);
+      } else {
+        console.log(`${run.result === "skipped" ? "Skipped" : "Couldn't start it"}: ${run.reason ?? ""}`);
+        if (run.result === "failed") process.exitCode = 1;
+      }
+      if (a.schedule && a.enabled && a.nextRunAt) {
+        console.log(`Its schedule (${a.schedule}) is on: next run ${localTime(a.nextRunAt)}.`);
+      }
+      return;
+    }
+    default:
+      usageError(`Unknown automation command "${sub ?? ""}".`);
+  }
+}
+
+function scheduleCell(a: AutomationView): string {
+  if (!a.schedule) return "run by hand";
+  if (!a.enabled) return `${a.schedule} (switched off)`;
+  return `${a.schedule}${a.nextRunAt ? `, next ${localTime(a.nextRunAt)}` : ""}`;
+}
+
+function lastRunCell(a: AutomationView): string {
+  const run = a.lastRun;
+  if (!run) return "never ran";
+  const what =
+    run.result === "started" ? `${run.state ?? "started"} ${run.threadId ?? ""}` : `${run.result}: ${run.reason ?? ""}`;
+  const cost = run.costUsd === null ? "" : ` · $${run.costUsd.toFixed(2)}`;
+  return `last ${localTime(run.at)} ${what}${cost}`;
+}
+
+function localTime(iso: string): string {
+  return new Date(iso).toLocaleString(undefined, { dateStyle: "short", timeStyle: "short" });
 }
 
 async function items(args: string[]): Promise<void> {
@@ -343,7 +429,12 @@ async function follow(
         const say = json ? console.error : console.log;
         say(`\n${thread.title} needs you:\n`);
         say(mine.map((i) => formatItem(i)).join("\n\n"));
-        const how = mine[0]?.kind === "error" ? "retry|archive|text" : "choice|text";
+        const how =
+          mine[0]?.error?.cause === "budget"
+            ? "continue|stop|text"
+            : mine[0]?.kind === "error"
+              ? "retry|archive|text"
+              : "choice|text";
         say(`\nAnswer with \`tenzo answer ${mine[0]?.id ?? "<item>"} <${how}>\`.`);
         return;
       }
@@ -374,6 +465,9 @@ async function main([command, ...args]: string[]): Promise<void> {
       return thread(args);
     case "items":
       return items(args);
+    case "automation":
+    case "automations":
+      return automation(args);
     case "answer":
       return answer(args);
     case "--version":

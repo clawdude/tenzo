@@ -258,7 +258,7 @@ export type Retry =
 	| { kind: 'resend'; prompts: string[] }
 	| { kind: 'carry-on'; began: string | null };
 
-const RESENDS: ReadonlySet<string> = new Set(['start', 'stalled', 'unarchived']);
+const RESENDS: ReadonlySet<string> = new Set(['start', 'stalled', 'unarchived', 'budget']);
 const DIDNT_FINISH = "Your last turn didn't finish";
 const BEGAN_WITH = /\nIt began with my message: "(.*)"\n/;
 const RESTARTED = 'Tenzo restarted while you were working';

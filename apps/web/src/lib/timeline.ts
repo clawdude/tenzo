@@ -278,6 +278,7 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 				push({ kind: 'landed', key: `landed:${seq}`, at, url: event.payload.url, summary: event.payload.summary ?? '' });
 				break;
 			case 'landing.stuck':
+			case 'budget.exceeded':
 				push({ kind: 'note', key: `note:${seq}`, at, text: event.payload.message, tone: 'fail' });
 				break;
 			case 'config.checked': {

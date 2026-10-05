@@ -181,6 +181,45 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE threads ADD COLUMN thinking TEXT;
     `,
   },
+  {
+    name: "automations",
+    sql: `
+      -- Origin 'automation' joins 'user' and 'agent': the automation the thread is a run of.
+      ALTER TABLE threads ADD COLUMN automation TEXT;
+
+      -- What the daemon keeps of each automation a project's .tenzo/config.json defines (the
+      -- definition itself stays in the file): its schedule's next run.
+      CREATE TABLE automations (
+        project_id     TEXT NOT NULL REFERENCES projects(id),
+        name           TEXT NOT NULL,
+        environment_id TEXT NOT NULL,
+        schedule_key   TEXT,                  -- the schedule next_run_at was worked out for
+        next_run_at    TEXT,                  -- NULL: nothing scheduled
+        PRIMARY KEY (project_id, name)
+      ) STRICT;
+
+      -- Every time an automation fired: a thread started, or skipped, or failed to start. A
+      -- started run's budget and what it has used are kept here until it finishes.
+      CREATE TABLE automation_runs (
+        id             INTEGER PRIMARY KEY AUTOINCREMENT,
+        environment_id TEXT NOT NULL,
+        project_id     TEXT NOT NULL REFERENCES projects(id),
+        name           TEXT NOT NULL,
+        trigger        TEXT NOT NULL,         -- 'schedule' | 'manual'
+        result         TEXT NOT NULL,         -- 'started' | 'skipped' | 'failed'
+        reason         TEXT,
+        thread_id      TEXT REFERENCES threads(id),
+        at             TEXT NOT NULL,
+        budget         TEXT,                  -- JSON {wallClockMs, costUsd}: one grant's worth
+        deadline_at    TEXT,                  -- wall clock: paused from then (each Continue: now + one grant)
+        cap_usd        REAL,                  -- spend: paused from then (each Continue: one grant more)
+        cost_usd       REAL,                  -- Claude's running total, the highest seen
+        finished_at    TEXT                   -- the run's agent was done: no budget after
+      ) STRICT;
+      CREATE INDEX automation_runs_by_name ON automation_runs (project_id, name, id);
+      CREATE UNIQUE INDEX automation_runs_by_thread ON automation_runs (thread_id);
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

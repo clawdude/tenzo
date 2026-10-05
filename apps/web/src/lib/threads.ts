@@ -13,13 +13,10 @@ export type GroupKey = 'needs-you' | 'working' | 'landing' | 'today' | 'earlier'
  */
 export type Tone = 'clay' | 'working' | 'done' | 'waiting' | 'quiet';
 
-/**
- * Who started a thread you didn't type: another thread's agent (`start_thread`) for now;
- * automations will be the next kind.
- */
+/** Who started a thread you didn't type: another thread's agent (`start_thread`), or an automation. */
 export interface Origin {
-	kind: 'agent';
-	/** "from Refresh tokens". */
+	kind: 'agent' | 'automation';
+	/** "from Refresh tokens", "automation: review-prs". */
 	label: string;
 }
 
@@ -165,6 +162,8 @@ export function originOf(thread: ThreadView, threads: readonly ThreadView[]): Or
 			const parent = threads.find((t) => t.id === thread.parentId);
 			return { kind: 'agent', label: parent ? `from ${parent.title}` : 'from another thread' };
 		}
+		case 'automation':
+			return { kind: 'automation', label: `automation: ${thread.automation ?? 'unnamed'}` };
 	}
 }
 

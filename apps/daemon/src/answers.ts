@@ -175,8 +175,12 @@ export function errorPrompts(
   const error = item.error;
   // Retry on a config card reads the config again (engine.ts): nothing goes to the agent.
   if (error?.cause === "config") return [];
+  // A budget card's Continue sends what it says (carry on, with as much budget again).
   const resend =
-    error?.cause === "start" || error?.cause === "stalled" || error?.cause === "unarchived";
+    error?.cause === "start" ||
+    error?.cause === "stalled" ||
+    error?.cause === "unarchived" ||
+    error?.cause === "budget";
   if (resend && error.prompts.length > 0) return error.prompts;
   return [carryOn(error)];
 }
@@ -288,6 +292,12 @@ export function answerFromWords(item: QueueItem, words: readonly string[]): Item
       if (/^(1|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
       if (/^(2|d|dismiss)$/i.test(text)) return { kind: "error", action: "dismiss" };
       throw new TenzoError("Answer with retry (once the file is fixed) or dismiss.");
+    }
+    if (item.error?.cause === "budget") {
+      if (/^(1|c|continue|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
+      if (/^(2|stop|archive)$/i.test(text)) return { kind: "error", action: "archive" };
+      if (text === "") throw new TenzoError("Answer with continue, stop, or what to tell it (it then continues).");
+      return { kind: "error", action: "tell", text };
     }
     if (/^(1|r|retry)$/i.test(text)) return { kind: "error", action: "retry" };
     if (/^(2|archive)$/i.test(text)) return { kind: "error", action: "archive" };

@@ -556,6 +556,22 @@ describe("Claude adapter: permission requests", () => {
     await session.stop();
   });
 
+  it("cancels open requests when Claude stops the turn at its spend cap", async () => {
+    let answer: PermissionResult | null = null;
+    const { session, events } = start(async function* (turn) {
+      const asked = turn.canUseTool("Write", { file_path: "notes.md", content: "x" }, "toolu_w");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      yield result({ subtype: "error_max_budget_usd", is_error: true, errors: ["budget"] } as never);
+      answer = await asked;
+    });
+    session.sendTurn("write notes");
+    await events.until("request.opened");
+    expect((await events.until("turn.completed")).payload).toMatchObject({ stoppedBy: "budget" });
+    expect((await events.until("request.resolved")).payload).toEqual({ decision: "cancel" });
+    await session.stop();
+    expect(answer).toMatchObject({ behavior: "deny" });
+  });
+
   it("keeps a bounded copy of the input on the event; Claude gets the full input back", async () => {
     const big = { file_path: "/etc/hosts", content: "1.2.3.4 x\n".repeat(1000) };
     let answer: PermissionResult | null = null;
@@ -787,6 +803,21 @@ describe("Claude adapter: models, thinking, subagents, permissions", () => {
       TENZO_LIVE_BASE: `/live/${THREAD}/`,
       CLAUDE_CODE_SUBAGENT_MODEL: "haiku",
     });
+  });
+
+  it("gives an automation run's spend cap as maxBudgetUsd: what is left of it; none otherwise", async () => {
+    expect(start(simpleTurn).fake.calls[0]).not.toHaveProperty("maxBudgetUsd");
+    const { fake, session } = start(simpleTurn, { budget: { capUsd: 1, spentUsd: 0.25 } });
+    expect(fake.calls[0]?.maxBudgetUsd).toBeCloseTo(0.75);
+    // Nothing left: a cent, never zero or less (the daemon holds the turn before that).
+    expect(start(simpleTurn, { budget: { capUsd: 1, spentUsd: 3 } }).fake.calls[0]?.maxBudgetUsd).toBe(0.01);
+    // Claude counts the cap from the session's start: another cap takes a new session; the
+    // same cap with more spent doesn't.
+    const models = { discuss: {}, build: {} };
+    expect(session.reconfigure({ models, budget: { capUsd: 1, spentUsd: 0.6 } })).toBe("unchanged");
+    expect(session.reconfigure({ models, budget: { capUsd: 2, spentUsd: 0.6 } })).toBe("restart");
+    expect(session.reconfigure({ models })).toBe("restart");
+    await session.stop();
   });
 
   it("sets the permission mode only when the project's config does, never with the dangerous opt-in", () => {
