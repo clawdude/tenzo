@@ -1,4 +1,4 @@
-import type { AutomationView, ProjectView, QueueItem, StoredEvent, ThreadView } from "@tenzo/contracts";
+import type { AutomationProblem, AutomationView, ProjectView, QueueItem, StoredEvent, ThreadView } from "@tenzo/contracts";
 
 /**
  * Test-only doubles: a WebSocket the test drives by hand, a clock the test advances, and
@@ -145,6 +145,24 @@ export function project(name: string): ProjectView {
   };
 }
 
+export function automation(name: string, overrides: Partial<AutomationView> = {}): AutomationView {
+  return {
+    projectId: id("prj", "p") as AutomationView["projectId"],
+    projectName: "app",
+    name,
+    summary: "Check the dependencies.",
+    schedule: "every 1h",
+    timeZone: "UTC",
+    enabled: true,
+    budget: { wallClockMs: 3_600_000, costUsd: 2 },
+    model: null,
+    nextRunAt: at,
+    lastRun: null,
+    finishedRuns: 0,
+    ...overrides,
+  };
+}
+
 export function item(tag: string, threadTag: string, overrides: Partial<QueueItem> = {}): QueueItem {
   return {
     id: id("itm", tag) as QueueItem["id"],
@@ -196,6 +214,15 @@ export function snapshotFrame(
 ) {
   return {
     type: "snapshot",
-    snapshot: { environmentId, threads, items, projects, live, automations: [] as AutomationView[], automationsPaused: false },
+    snapshot: {
+      environmentId,
+      threads,
+      items,
+      projects,
+      live,
+      automations: [] as AutomationView[],
+      automationsPaused: false,
+      automationProblems: [] as AutomationProblem[],
+    },
   } as const;
 }

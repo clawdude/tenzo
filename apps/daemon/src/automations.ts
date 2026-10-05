@@ -2,7 +2,9 @@ import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import {
   type Automation,
+  type AutomationProblem,
   type AutomationRunView,
+  type AutomationsState,
   type AutomationView,
   durationMs,
   localTimeZone,
@@ -409,6 +411,17 @@ function activeRunThreads(store: Store): ThreadId[] {
     .map((row) => String(row.id) as ThreadId);
 }
 
+/** The automation's runs whose thread isn't archived, oldest first. */
+export function activeRunsOf(store: Store, projectId: ProjectId, name: string): ThreadId[] {
+  return store.db
+    .prepare(
+      `SELECT r.thread_id AS id FROM automation_runs r JOIN threads t ON t.id = r.thread_id
+       WHERE r.project_id = ? AND r.name = ? AND t.status = 'active' ORDER BY r.id`,
+    )
+    .all(projectId, name)
+    .map((row) => String(row.id) as ThreadId);
+}
+
 /** Runs whose budget still applies (not finished): the engine arms their wall clocks on start. */
 export function unfinishedRuns(store: Store): AutomationRun[] {
   return store.db
@@ -474,6 +487,8 @@ export interface AutomationHost {
    * worktree, no commits beyond its base); its branch is kept. Says whether it did.
    */
   retire(threadId: ThreadId): Promise<boolean>;
+  /** Something a list of automations shows may have changed (a run, a schedule, the switch). */
+  changed(): void;
   log(message: string): void;
 }
 
@@ -527,7 +542,22 @@ export class Automations {
     if (paused) writeFileSync(this.#pausedFile, `${new Date().toISOString()}\n`);
     else rmSync(this.#pausedFile, { force: true });
     if (!paused) this.#arm(Date.now());
+    this.#host.changed();
     return this.paused;
+  }
+
+  /** Every automation, the off switch, and the projects whose config can't be read. */
+  state(): AutomationsState {
+    return { automations: this.list(), paused: this.paused, problems: this.problems() };
+  }
+
+  /** The projects whose config can't be read, so none of their automations run, and why. */
+  problems(projectRef?: string): AutomationProblem[] {
+    const projects = projectRef ? [findProject(this.#host.store, projectRef)] : listProjects(this.#host.store);
+    return projects.flatMap((project) => {
+      const { problem } = this.#host.config(project.path);
+      return problem === null ? [] : [{ projectId: project.id, projectName: project.name, problem }];
+    });
   }
 
   /** Every project's automations, or one project's. */
@@ -579,6 +609,7 @@ export class Automations {
       // Only what this look saw is armed: a stale time (a deleted automation, a broken config,
       // a removed project) can't bring the next look forward.
       this.#arm(Math.min(...upcoming));
+      this.#host.changed();
     } catch (error) {
       // The store is gone (the daemon stopping): nothing more to schedule.
       this.#host.log(`couldn't look at the automations: ${String(error)}`);
@@ -698,6 +729,7 @@ export class Automations {
         budget: null,
       });
       this.#host.log(`automation ${project.name}/${name}: ${result}: ${reason}`);
+      this.#host.changed();
       return { run, thread: null };
     };
     if (this.#starting.has(key)) return record("skipped", "A run of it was starting already.");
@@ -742,6 +774,7 @@ export class Automations {
       const run = runOfThread(store, thread.id);
       if (!run) throw new Error(`the run of ${thread.id} wasn't recorded`);
       this.#host.log(`automation ${project.name}/${name}: started ${thread.id} (${trigger})`);
+      this.#host.changed();
       return { run, thread };
     } catch (error) {
       return record("failed", error instanceof Error ? error.message : String(error));
@@ -793,6 +826,9 @@ export class Automations {
       model: automation.model ?? null,
       nextRunAt: row?.scheduleKey && row.scheduleKey === scheduled?.key ? row.nextRunAt : null,
       lastRun: last ? this.#runView(last) : null,
+      finishedRuns: activeRunsOf(this.#host.store, project.id, name).filter(
+        (id) => this.#host.state(id) === "finished",
+      ).length,
     };
   }
 
@@ -815,4 +851,24 @@ export function runThreadOptions(automation: Automation): { model?: string; thin
     ...(automation.model ? { model: automation.model } : {}),
     ...(automation.thinking ? { thinking: automation.thinking } : {}),
   };
+}
+
+/**
+ * What `tenzo project add` says about the project's automations: how many its config runs on a
+ * schedule (they start by themselves once the daemon sees the project), each with its schedule;
+ * or that its config can't be read. Null when there is nothing to say.
+ */
+export function scheduledNote(read: ConfigRead, machineZone = localTimeZone()): string | null {
+  if (read.problem !== null) {
+    return `Its Tenzo config can't be read, so its automations won't run: ${read.problem}`;
+  }
+  const scheduled = Object.entries(automationsOf(read)).filter(
+    ([, automation]) => automation.enabled !== false && scheduleOf(automation, machineZone) !== null,
+  );
+  if (scheduled.length === 0) return null;
+  const count = scheduled.length === 1 ? "1 automation" : `${scheduled.length} automations`;
+  return [
+    `${count} will run on schedule; \`tenzo automation pause\` stops them.`,
+    ...scheduled.map(([name, automation]) => `  ${name}: ${describeTrigger(automation, machineZone)}`),
+  ].join("\n");
 }

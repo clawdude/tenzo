@@ -1,4 +1,6 @@
 import type {
+	AutomationRunView,
+	AutomationView,
 	ProjectView,
 	QueueItem,
 	RuntimeEvent,
@@ -83,6 +85,37 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		openItems: 0,
 		lastSeq: 4,
 		activeAt: at,
+		...overrides
+	};
+}
+
+export function automation(name: string, overrides: Partial<AutomationView> = {}): AutomationView {
+	return {
+		projectId: 'prj_pppppppppppppppppppp',
+		projectName: 'app',
+		name,
+		summary: 'Check the dependencies.',
+		schedule: 'every 1h',
+		timeZone: 'UTC',
+		enabled: true,
+		budget: { wallClockMs: 3_600_000, costUsd: 2 },
+		model: null,
+		nextRunAt: null,
+		lastRun: null,
+		finishedRuns: 0,
+		...overrides
+	};
+}
+
+export function run(overrides: Partial<AutomationRunView> = {}): AutomationRunView {
+	return {
+		at,
+		trigger: 'schedule',
+		result: 'started',
+		reason: null,
+		threadId: 'thr_aaaaaaaaaaaaaaaaaaaa',
+		state: 'finished',
+		costUsd: null,
 		...overrides
 	};
 }

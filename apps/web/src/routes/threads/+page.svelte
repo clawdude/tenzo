@@ -64,25 +64,38 @@
 					{/if}
 				</p>
 			</div>
-			<!-- Back to the Pass; clay with the pile's height while something waits for you. -->
-			<button
-				type="button"
-				aria-label={waiting > 0 ? `The Pass, ${waiting} waiting` : 'The Pass'}
-				class={[
-					'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold',
-					// Turns clay as things come in, but is drawn clay at once on arrival.
-					moving && 'transition-colors',
-					waiting > 0 ? 'bg-clay text-on-clay' : 'bg-card text-ink'
-				]}
-				onclick={() => leaveTo('/')}
-				data-testid="to-pass"
-			>
-				{#if waiting > 0}
-					{waiting}
-				{:else}
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+			<span class="flex shrink-0 items-center gap-2.5">
+				{#if live.automations.length > 0 || live.automationProblems.length > 0}
+					<!-- The automations: what runs by itself, quietly beside the way back. -->
+					<a
+						href="/automations"
+						aria-label="Automations"
+						class="opt flex size-11 shrink-0 items-center justify-center rounded-full bg-card text-mute"
+						data-testid="to-automations"
+					>
+						<svg width="19" height="19" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3 2"></path></svg>
+					</a>
 				{/if}
-			</button>
+				<!-- Back to the Pass; clay with the pile's height while something waits for you. -->
+				<button
+					type="button"
+					aria-label={waiting > 0 ? `The Pass, ${waiting} waiting` : 'The Pass'}
+					class={[
+						'opt flex size-11 shrink-0 items-center justify-center rounded-full text-[15px] font-bold',
+						// Turns clay as things come in, but is drawn clay at once on arrival.
+						moving && 'transition-colors',
+						waiting > 0 ? 'bg-clay text-on-clay' : 'bg-card text-ink'
+					]}
+					onclick={() => leaveTo('/')}
+					data-testid="to-pass"
+				>
+					{#if waiting > 0}
+						{waiting}
+					{:else}
+						<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+					{/if}
+				</button>
+			</span>
 		</header>
 
 		{#if tenzo.seen && entries.length === 0}

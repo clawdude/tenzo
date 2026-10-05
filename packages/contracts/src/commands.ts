@@ -1,9 +1,9 @@
 import { z } from "zod";
-import { AutomationRunView, AutomationView } from "./automations.ts";
+import { AutomationProblem, AutomationRunView, AutomationsState, AutomationView } from "./automations.ts";
 import { ModelName, ThinkingLevel } from "./config.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
-import { EnvironmentId } from "./ids.ts";
+import { EnvironmentId, ThreadId } from "./ids.ts";
 import { ItemAnswer, ProjectView, QueueItem, StoredEvent, ThreadView } from "./queue.ts";
 
 /** The most events one `thread.events` or `thread.watch` answer carries. */
@@ -115,6 +115,16 @@ export const Command = z.discriminatedUnion("type", [
    * run (running one by hand still does) until it is false again.
    */
   z.object({ type: z.literal("automation.pause"), paused: z.boolean() }),
+  /**
+   * Archives the automation's finished runs (nothing running or queued, nothing open but
+   * finished work) whose worktree is clean; their branches are kept. A run that waits on you,
+   * is still going, or has uncommitted changes stays.
+   */
+  z.object({
+    type: z.literal("automation.archiveFinished"),
+    project: z.string().min(1),
+    name: z.string().min(1).max(100),
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -132,6 +142,8 @@ export const Snapshot = z.object({
   automations: z.array(AutomationView).default([]),
   /** The off switch (`automation.pause`): no schedule starts a run while it is on. */
   automationsPaused: z.boolean().default(false),
+  /** Projects whose config can't be read, so their automations don't run. */
+  automationProblems: z.array(AutomationProblem).default([]),
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 
@@ -178,13 +190,19 @@ export const CommandResults = {
   }),
   "item.snooze": z.object({ item: QueueItem, thread: ThreadView }),
   "item.unsnooze": z.object({ item: QueueItem, thread: ThreadView }),
-  "automation.list": z.object({ automations: z.array(AutomationView), paused: z.boolean() }),
+  "automation.list": AutomationsState,
   "automation.pause": z.object({ paused: z.boolean() }),
   "automation.run": z.object({
     automation: AutomationView,
     run: AutomationRunView,
     /** The run's thread; null when it was skipped. */
     thread: ThreadView.nullable(),
+  }),
+  "automation.archiveFinished": z.object({
+    /** The runs archived (their branches kept). */
+    archived: z.array(ThreadView),
+    /** Finished runs left as they were, and why (uncommitted changes, say). */
+    kept: z.array(z.object({ threadId: ThreadId, reason: z.string() })),
   }),
 } satisfies Record<CommandType, z.ZodType>;
 export type CommandResult<T extends CommandType> = z.infer<(typeof CommandResults)[T]>;

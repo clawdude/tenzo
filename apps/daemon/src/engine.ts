@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   type AgentKind,
   type AutomationRunView,
+  type AutomationsState,
   type AutomationView,
   type ItemAnswer,
   ModelName,
@@ -23,6 +24,7 @@ import {
 import type { AgentAdapter, AgentSession, SessionSettings } from "./agent/agent.ts";
 import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
 import {
+  activeRunsOf,
   type AutomationRun,
   Automations,
   finishRun,
@@ -210,7 +212,8 @@ export const WATCH_BACKLOG = 200;
 export type EngineChange =
   | ({ type: "event" } & StoredEvent)
   | { type: "item"; change: ItemChange }
-  | { type: "thread"; thread: ThreadView };
+  | { type: "thread"; thread: ThreadView }
+  | { type: "automations"; automations: AutomationsState };
 
 interface Live {
   threadId: ThreadId;
@@ -273,6 +276,10 @@ export class Engine {
   readonly #budgets = new Timers<ThreadId>();
   /** The projects' automations: their schedules and runs (automations.ts). */
   readonly #automations: Automations;
+  /** A look at the automations is due (`#automationsChanged`): changes in one tick go as one. */
+  #automationsTimer: NodeJS.Timeout | undefined;
+  /** What subscribers last heard of the automations, so the same list isn't sent twice. */
+  #automationsSent: string | null = null;
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -294,6 +301,7 @@ export class Engine {
           this.#create({ project: run.project.name, title: run.title, prompt: run.prompt, run }),
         state: (threadId) => this.#runState(threadId),
         retire: (threadId) => this.#retireRun(threadId),
+        changed: () => this.#automationsChanged(),
         log: this.#log,
       },
       { ...(options.automationTickMs ? { tickMs: options.automationTickMs } : {}) },
@@ -611,7 +619,55 @@ export class Engine {
       live: this.#liveInfo,
       automations: this.automations(),
       automationsPaused: this.automationsPaused,
+      automationProblems: this.automationProblems(),
     };
+  }
+
+  /** The projects whose config can't be read, so their automations don't run. */
+  automationProblems(project?: string) {
+    try {
+      return this.#automations.problems(project);
+    } catch (error) {
+      if (project !== undefined) throw error;
+      this.#log(`couldn't read the projects' configs: ${String(error)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Archives the automation's finished runs (their branches are kept): those with nothing
+   * running or queued and nothing open but finished work, whose worktree is clean. A run that is
+   * going, waits on you (a question, an error, its budget card) or has uncommitted changes stays.
+   */
+  async archiveFinishedRuns(
+    projectRef: string,
+    name: string,
+  ): Promise<{ archived: ThreadView[]; kept: { threadId: ThreadId; reason: string }[] }> {
+    const project = findProject(this.store, projectRef);
+    const archived: ThreadView[] = [];
+    const kept: { threadId: ThreadId; reason: string }[] = [];
+    for (const threadId of activeRunsOf(this.store, project.id, name)) {
+      if (this.#runState(threadId) !== "finished") continue;
+      const thread = getThread(this.store, threadId);
+      if (existsSync(thread.worktreePath) && (await hasChanges(thread.worktreePath))) {
+        kept.push({ threadId, reason: "Its worktree has uncommitted changes." });
+        continue;
+      }
+      // Looked at again after the wait: a message sent meanwhile makes it go again.
+      if (this.#runState(threadId) !== "finished") continue;
+      try {
+        archived.push(await this.archive(threadId));
+      } catch (error) {
+        // One run that won't archive (a gone repo, git failing) doesn't stop the others.
+        if (!(error instanceof TenzoError)) this.#log(`couldn't archive ${threadId}: ${String(error)}`);
+        kept.push({ threadId, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (archived.length > 0) {
+      this.#log(`automation ${project.name}/${name}: archived ${archived.length} finished run(s)`);
+    }
+    this.#automationsChanged();
+    return { archived, kept };
   }
 
   /** The automations the projects' configs define, with their next and last runs. */
@@ -637,6 +693,37 @@ export class Engine {
 
   pauseAutomations(paused: boolean): boolean {
     return this.#automations.setPaused(paused);
+  }
+
+  /** The automations as a list draws them: each one, the off switch, broken configs. */
+  automationsState(): AutomationsState {
+    return {
+      automations: this.automations(),
+      paused: this.automationsPaused,
+      problems: this.automationProblems(),
+    };
+  }
+
+  /**
+   * Something the automations list shows may have changed: a run started or skipped, a run's
+   * thread moved on, a schedule was worked out, the off switch flipped. Subscribers hear the
+   * whole list once this tick's changes are in, and only when it differs from the last they heard.
+   */
+  #automationsChanged(): void {
+    if (this.#closing || this.#automationsTimer) return;
+    this.#automationsTimer = setTimeout(() => {
+      this.#automationsTimer = undefined;
+      if (this.#closing) return;
+      try {
+        const automations = this.automationsState();
+        const json = JSON.stringify(automations);
+        if (json === this.#automationsSent) return;
+        this.#automationsSent = json;
+        this.#emit({ type: "automations", automations });
+      } catch (error) {
+        this.#log(`couldn't look at the automations: ${String(error)}`);
+      }
+    }, 0);
   }
 
   /** Looks at the automations' schedules now (tests; the daemon does it on its own). */
@@ -748,6 +835,8 @@ export class Engine {
     this.#snoozes.clearAll();
     this.#wakes.clearAll();
     this.#budgets.clearAll();
+    clearTimeout(this.#automationsTimer);
+    this.#automationsTimer = undefined;
     this.#stopNaming.abort();
     stopDetachedGit(); // a `landed` check still fetching
     await this.#automations.close();
@@ -1751,6 +1840,8 @@ export class Engine {
   #changed(threadId: ThreadId): ThreadView {
     const view = this.view(threadId);
     this.#emit({ type: "thread", thread: view });
+    // A run's thread moving on is its automation's last run (or finished runs) changing.
+    if (view.origin === "automation") this.#automationsChanged();
     return view;
   }
 

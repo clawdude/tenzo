@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { AutomationView, type Automation, ThreadView } from "@tenzo/contracts";
+import { type AutomationsState, AutomationView, type Automation, ThreadView } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeAdapter } from "./agent/fake-agent.ts";
 import {
@@ -13,6 +13,7 @@ import {
   runPrompt,
   runSummary,
   runTitle,
+  scheduledNote,
   scheduleOf,
 } from "./automations.ts";
 import { executeCommand } from "./commands.ts";
@@ -634,5 +635,133 @@ describe("automations: budgets", () => {
     expect(second.adapter.sessions).toHaveLength(0);
     expect(budgetCard(second)).toBeDefined();
     expect(second.engine.view(thread?.id ?? "")).toMatchObject({ origin: "automation", queued: 1 });
+  });
+});
+
+describe("automations: the list", () => {
+  it("says why a broken config runs nothing, in the snapshot and over the wire", async () => {
+    config({ nightly: { ...NIGHTLY, trigger: { schedule: "every 1m" } } });
+    const d = daemon();
+    const snapshot = d.engine.snapshot();
+    expect(snapshot.automations).toEqual([]);
+    expect(snapshot.automationProblems).toEqual([
+      { projectId: expect.any(String), projectName: "app", problem: expect.stringContaining("at most every 5 minutes") },
+    ]);
+    const listed = await executeCommand(d.engine, { type: "automation.list" });
+    expect(listed).toMatchObject({ ok: true, result: { automations: [], problems: [{ projectName: "app" }] } });
+    config({ nightly: NIGHTLY });
+    expect(d.engine.snapshot().automationProblems).toEqual([]);
+  });
+
+  it("tells subscribers when a run starts and moves on, the switch flips, or a config breaks; once each", async () => {
+    config({ nightly: NIGHTLY });
+    const d = daemon();
+    await d.engine.tickAutomations();
+    const heard: AutomationsState[] = [];
+    d.engine.subscribe((change) => {
+      if (change.type === "automations") heard.push(change.automations);
+    });
+    const last = () => heard.at(-1);
+    const nightly = () => last()?.automations.find((a) => a.name === "nightly");
+
+    const { thread } = await d.engine.runAutomation("app", "nightly");
+    await until(() => nightly()?.lastRun?.threadId === thread?.id, "the run's frame");
+    expect(nightly()?.lastRun).toMatchObject({ result: "started", state: "going" });
+    d.adapter.last.report("Bumped zod.");
+    d.adapter.last.complete();
+    await until(() => nightly()?.lastRun?.state === "finished", "the finished run's frame");
+    expect(nightly()?.finishedRuns).toBe(1);
+
+    d.engine.pauseAutomations(true);
+    await until(() => last()?.paused === true, "the paused frame");
+    // Due while paused: skipped, and its next run moves on.
+    const before = nightly()?.nextRunAt;
+    await due(d);
+    await until(() => nightly()?.lastRun?.result === "skipped", "the skipped frame");
+    expect(nightly()?.nextRunAt).not.toBe(before);
+
+    // Nothing changed: nothing is sent again.
+    const count = heard.length;
+    await d.engine.tickAutomations();
+    await settle();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(heard).toHaveLength(count);
+
+    config({ nightly: { ...NIGHTLY, oops: true } });
+    await d.engine.tickAutomations();
+    await until(() => (last()?.problems.length ?? 0) === 1, "the broken config's frame");
+    expect(last()?.automations).toEqual([]);
+  });
+});
+
+describe("automations: archiving finished runs", () => {
+  it("archives finished runs with a clean worktree, commits and finished cards too; never one going, waiting or dirty", async () => {
+    config({ nightly: NIGHTLY, weekly: NIGHTLY });
+    const d = daemon();
+    // Run 1: committed work and a finished card. Finished; archived, its branch kept.
+    const first = await d.engine.runAutomation("app", "nightly");
+    const one = first.thread?.worktreePath ?? "";
+    writeFileSync(join(one, "CHANGES.md"), "upgraded\n");
+    sh(one, "add", ".");
+    sh(one, "commit", "--quiet", "-m", "upgrade");
+    d.adapter.last.report("Upgraded.");
+    d.adapter.last.complete();
+    await settle();
+    // Run 2: finished, but its worktree has a file nobody committed. Kept.
+    const second = await d.engine.runAutomation("app", "nightly");
+    writeFileSync(join(second.thread?.worktreePath ?? "", "scratch.txt"), "wip\n");
+    d.adapter.last.complete();
+    await settle();
+    // Run 3: still going.
+    const third = await d.engine.runAutomation("app", "nightly");
+    // Another automation's finished run: not this one's to archive.
+    const other = await d.engine.runAutomation("app", "weekly");
+    d.adapter.last.report("Weekly done.");
+    d.adapter.last.complete();
+    await settle();
+    expect(view(d).finishedRuns).toBe(2);
+
+    const going = await executeCommand(d.engine, { type: "automation.archiveFinished", project: "app", name: "nightly" });
+    expect(going).toMatchObject({
+      ok: true,
+      result: {
+        archived: [{ id: first.thread?.id, status: "archived" }],
+        kept: [{ threadId: second.thread?.id, reason: expect.stringContaining("uncommitted") }],
+      },
+    });
+    expect(sh(repo, "branch", "--list", first.thread?.branch ?? "")).not.toBe("");
+    expect(d.engine.snapshot().items.filter((i) => i.threadId === first.thread?.id)).toEqual([]);
+    expect(d.engine.view(third.thread?.id ?? "").status).toBe("active");
+    expect(d.engine.view(other.thread?.id ?? "").status).toBe("active");
+    expect(view(d).finishedRuns).toBe(1);
+
+    // Run 3 fails: an error card waits on you. Still not archived.
+    d.adapter.sessions.find((s) => s.input.cwd === third.thread?.worktreePath)?.complete("failed");
+    await settle();
+    expect(view(d).lastRun?.state).toBe("waiting");
+    const waiting = await d.engine.archiveFinishedRuns("app", "nightly");
+    expect(waiting.archived).toEqual([]);
+    expect(d.engine.view(third.thread?.id ?? "").status).toBe("active");
+    expect(d.engine.view(second.thread?.id ?? "").status).toBe("active");
+  });
+});
+
+describe("automations: tenzo project add", () => {
+  it("says how many automations will run on schedule, and how to stop them", () => {
+    const read = parseProjectConfig({
+      config: JSON.stringify({
+        automations: {
+          nightly: NIGHTLY,
+          morning: { prompt: "x", trigger: { schedule: "daily 09:00" } },
+          off: { ...NIGHTLY, enabled: false },
+          manual: { prompt: "x" },
+        },
+      }),
+    });
+    expect(scheduledNote(read, "UTC")).toBe(
+      "2 automations will run on schedule; `tenzo automation pause` stops them.\n  nightly: every 1h\n  morning: daily 09:00 (UTC)",
+    );
+    expect(scheduledNote(parseProjectConfig({}), "UTC")).toBeNull();
+    expect(scheduledNote(parseProjectConfig({ config: "{" }), "UTC")).toMatch(/can't be read.*isn't valid JSON/);
   });
 });

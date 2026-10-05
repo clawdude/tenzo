@@ -49,5 +49,30 @@ export const AutomationView = z.object({
   /** When its schedule runs it next; null when nothing is scheduled. */
   nextRunAt: z.iso.datetime().nullable(),
   lastRun: AutomationRunView.nullable(),
+  /**
+   * Its runs that are finished (`AutomationRunView.state`) and not archived yet: what
+   * `automation.archiveFinished` would look at.
+   */
+  finishedRuns: z.number().int().nonnegative().default(0),
 });
 export type AutomationView = z.infer<typeof AutomationView>;
+
+/**
+ * A project whose `.tenzo/config.json` (or `local.json`) can't be read: none of its automations
+ * run, by schedule or by hand, until it is fixed. `problem` says what is wrong.
+ */
+export const AutomationProblem = z.object({
+  projectId: ProjectId,
+  projectName: z.string(),
+  problem: z.string(),
+});
+export type AutomationProblem = z.infer<typeof AutomationProblem>;
+
+/** Everything a list of automations draws: each one, the off switch, and broken configs. */
+export const AutomationsState = z.object({
+  automations: z.array(AutomationView),
+  /** The off switch (`automation.pause`): no schedule starts a run while it is on. */
+  paused: z.boolean(),
+  problems: z.array(AutomationProblem).default([]),
+});
+export type AutomationsState = z.infer<typeof AutomationsState>;

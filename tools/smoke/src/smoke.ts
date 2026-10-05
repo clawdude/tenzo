@@ -60,11 +60,18 @@ function freePort(): Promise<number> {
   });
 }
 
-/** A scratch repo with one commit; git without the developer's config. */
+/**
+ * A scratch repo with one commit; git without the developer's config. Its config defines one
+ * automation, scheduled a day away: the list has something to show, and nothing runs.
+ */
 function scratchRepo(dir: string): string {
   const repo = join(dir, "app");
-  mkdirSync(repo);
+  mkdirSync(join(repo, ".tenzo"), { recursive: true });
   writeFileSync(join(repo, "README.md"), "# app\n");
+  writeFileSync(
+    join(repo, ".tenzo/config.json"),
+    JSON.stringify({ automations: { nightly: { prompt: "Check the dependencies.", trigger: { schedule: "every 1d" } } } }),
+  );
   const env = {
     ...process.env,
     GIT_CONFIG_GLOBAL: "/dev/null",
@@ -252,6 +259,51 @@ async function thread(browser: Browser, base: string, id: string, direct: boolea
 }
 
 /**
+ * The Automations list: loaded directly (Close goes to the Pass), or from Threads (Close goes
+ * back there). It shows the scratch repo's automation with its next run, and the off switch
+ * flips both ways, live.
+ */
+async function automations(browser: Browser, base: string, direct: boolean): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    if (direct) {
+      await page.goto(`${base}/automations`);
+    } else {
+      await page.goto(`${base}/threads`);
+      await page.getByTestId("to-automations").tap();
+    }
+    await page.getByTestId("automations-list").waitFor();
+    if (path(page) !== "/automations") problems.push(`opened ${path(page)}`);
+    const row = page.locator('[data-testid="automation"][data-name="nightly"]');
+    await row.waitFor();
+    const next = (await row.getByTestId("next").textContent())?.trim();
+    if (next !== "in 1d") problems.push(`its next run read "${next}"`);
+    const schedule = (await row.getByTestId("schedule").textContent())?.trim();
+    if (schedule !== "every day") problems.push(`its schedule read "${schedule}"`);
+    if (direct) {
+      await page.getByTestId("pause").tap();
+      await page.locator('[data-testid="pause"][data-paused="true"]').waitFor();
+      await row.locator('[data-testid="next"]', { hasText: "paused" }).waitFor();
+      await page.getByTestId("pause").tap();
+      await page.locator('[data-testid="pause"][data-paused="false"]').waitFor();
+    }
+    await page.getByTestId("close").tap();
+    await page.getByTestId(direct ? "pass" : "threads-list").waitFor();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  if (seen.sockets !== 1) problems.push(`${seen.sockets} WebSockets, not 1`);
+  if (seen.documents !== 1) problems.push(`${seen.documents} page loads, not 1`);
+  return problems;
+}
+
+/**
  * A long, busy thread, read further up: the feed is full (2000 events) and new ones keep coming,
  * so the oldest drop off. Whatever row you're reading must not move. The daemon is played by a
  * routed WebSocket, which streams the events; scroll anchoring is off on the timeline (as on iOS
@@ -409,6 +461,8 @@ async function main(): Promise<number> {
       ["a Threads row opens its timeline, and back", () => thread(launched, base, threadId, false)],
       ["start at a thread's timeline, back to the Pass", () => thread(launched, base, threadId, true)],
       ["a long timeline holds your place as the full feed moves on", () => heldPlace(launched, base)],
+      ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
+      ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
     ];
     let failed = false;
     for (const [name, check] of checks) {

@@ -13,7 +13,7 @@ import { TenzoError } from "./errors.ts";
 
 /**
  * The daemon's side of `/ws` (the protocol is in contracts' frames.ts). Each socket gets a hello
- * and a snapshot, then every thread and item change the engine announces, in order; commands
+ * and a snapshot, then every thread, item and automations change the engine announces, in order; commands
  * run through `executeCommand`, as `POST /api/commands` does, and are answered by id.
  *
  * There is no replay: a client that loses its socket reconnects and gets a fresh snapshot, so a
@@ -150,6 +150,8 @@ function frameOf(change: EngineChange, watching: ReadonlySet<string>): ServerFra
       return { type: "thread", thread: change.thread };
     case "item":
       return { type: "item", change: change.change.type, item: change.change.item };
+    case "automations":
+      return { type: "automations", ...change.automations };
     case "event": {
       if (!watching.has(change.event.threadId)) return null;
       const { seq, environmentId, event } = change;

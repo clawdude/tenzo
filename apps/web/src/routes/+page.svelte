@@ -5,6 +5,7 @@
 	import Card from '#lib/Card.svelte';
 	import SnoozeToast from '#lib/SnoozeToast.svelte';
 	import type { Failure } from '#lib/answering.ts';
+	import { automationsSummary } from '#lib/automations.ts';
 	import { meanwhileOf } from '#lib/meanwhile.ts';
 	import { arrive, type Departure, leave } from '#lib/motion.ts';
 	import { MAX_EDGES, pileEdges, pileOf, snoozedLabel } from '#lib/pass.ts';
@@ -48,6 +49,9 @@
 	/** The daemon's clock, for counting down to the times it sets: this device's may be off. */
 	const daemonNow = $derived(now + live.connection.clockOffset);
 	const meanwhile = $derived(meanwhileOf(live.threads, live.items, daemonNow));
+	const automations = $derived(
+		automationsSummary(live.automations, live.automationsPaused, daemonNow)
+	);
 	/** Darker the further back, from the mock-up. */
 	const SHADES = ['#19191B', '#151517', '#121214', '#0F0F11'];
 	const edgeDepths = $derived(Array.from({ length: edges }, (_, i) => edges - i));
@@ -292,7 +296,7 @@
 			{/each}
 
 			{#if tenzo.seen && !current}
-				<AllClear {meanwhile} onwake={(id) => wake(id)} />
+				<AllClear {meanwhile} {automations} onwake={(id) => wake(id)} />
 			{/if}
 		</section>
 
