@@ -401,7 +401,7 @@ function lastScheduledStart(store: Store, projectId: ProjectId, name: string): n
 }
 
 /** Threads of automation runs that aren't archived: the ones that may still be going. */
-function activeRunThreads(store: Store): ThreadId[] {
+export function activeRunThreads(store: Store): ThreadId[] {
   return store.db
     .prepare(
       `SELECT r.thread_id AS id FROM automation_runs r JOIN threads t ON t.id = r.thread_id
@@ -482,6 +482,11 @@ export interface AutomationHost {
   start(input: RunStart): Promise<ThreadView>;
   /** Where a run's thread is. */
   state(threadId: ThreadId): RunState;
+  /**
+   * Whether a run's worktree was clean when last looked at (true when not looked at yet): a
+   * finished run with uncommitted changes is never archived, so it isn't offered.
+   */
+  clean(threadId: ThreadId): boolean;
   /**
    * Archives a finished run's thread when nothing would be lost (no open item, a clean
    * worktree, no commits beyond its base); its branch is kept. Says whether it did.
@@ -827,7 +832,7 @@ export class Automations {
       nextRunAt: row?.scheduleKey && row.scheduleKey === scheduled?.key ? row.nextRunAt : null,
       lastRun: last ? this.#runView(last) : null,
       finishedRuns: activeRunsOf(this.#host.store, project.id, name).filter(
-        (id) => this.#host.state(id) === "finished",
+        (id) => this.#host.state(id) === "finished" && this.#host.clean(id),
       ).length,
     };
   }
@@ -866,9 +871,11 @@ export function scheduledNote(read: ConfigRead, machineZone = localTimeZone()): 
     ([, automation]) => automation.enabled !== false && scheduleOf(automation, machineZone) !== null,
   );
   if (scheduled.length === 0) return null;
-  const count = scheduled.length === 1 ? "1 automation" : `${scheduled.length} automations`;
+  const one = scheduled.length === 1;
   return [
-    `${count} will run on schedule; \`tenzo automation pause\` stops them.`,
+    one
+      ? "1 automation will run on schedule; `tenzo automation pause` stops it."
+      : `${scheduled.length} automations will run on schedule; \`tenzo automation pause\` stops them.`,
     ...scheduled.map(([name, automation]) => `  ${name}: ${describeTrigger(automation, machineZone)}`),
   ].join("\n");
 }

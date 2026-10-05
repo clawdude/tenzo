@@ -23,7 +23,14 @@
 	const groups = $derived(
 		automationGroups(live.automations, live.automationProblems, live.automationsPaused, daemonNow)
 	);
-	const summary = $derived(automationsSummary(live.automations, live.automationsPaused, daemonNow));
+	const summary = $derived(
+		automationsSummary(
+			live.automations,
+			live.automationsPaused,
+			daemonNow,
+			live.automationProblems.length
+		)
+	);
 	/** Automations being started, archived, or the switch being flipped: their buttons wait. */
 	let busy = $state.raw<ReadonlySet<string>>(new Set());
 	/** What the last Run now or archive of an automation said, by key. */
@@ -172,7 +179,7 @@
 						disabled={!tenzo.online || busy.has('switch')}
 						class={[
 							'relative h-[31px] w-[51px] shrink-0 rounded-full transition-colors duration-200 disabled:opacity-50 motion-reduce:transition-none',
-							live.automationsPaused ? 'bg-fill-strong' : 'bg-done'
+							live.automationsPaused ? 'bg-fill-strong' : 'bg-mute'
 						]}
 						onclick={toggle}
 						data-testid="pause"
@@ -229,7 +236,7 @@
 									{row.schedule}{a.model ? ` · ${a.model}` : ''}
 								</p>
 								{#if a.summary}
-									<p class="line-clamp-2 text-[14px] leading-[1.35] text-faint">{a.summary}</p>
+									<p class="line-clamp-2 text-[14px] leading-[1.35] break-words text-faint">{a.summary}</p>
 								{/if}
 
 								<!-- The last run in a line; its thread a tap away. -->
@@ -255,7 +262,7 @@
 									</p>
 								{/if}
 
-								{#if confirming === row.key}
+								{#if confirming === row.key && a.finishedRuns > 0}
 									<div class="mt-1 flex flex-col gap-2.5" data-testid="confirm-archive">
 										<p class="text-[15px] leading-[1.35]">
 											{#if a.finishedRuns === 1}

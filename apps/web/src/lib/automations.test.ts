@@ -140,6 +140,8 @@ describe('automationsSummary', () => {
 			'by hand'
 		);
 		expect(automationsSummary([], false, t0)).toBeNull();
+		// None listed because a config is broken: still worth the link.
+		expect(automationsSummary([], false, t0, 1)).toBe("config can't be read");
 	});
 });
 

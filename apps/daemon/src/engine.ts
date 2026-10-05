@@ -25,6 +25,7 @@ import type { AgentAdapter, AgentSession, SessionSettings } from "./agent/agent.
 import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
 import {
   activeRunsOf,
+  activeRunThreads,
   type AutomationRun,
   Automations,
   finishRun,
@@ -75,6 +76,7 @@ import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } 
 import { branchExists, commitsAhead, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
+  automationsOf,
   type ConfigRead,
   landingOf,
   permissionsOf,
@@ -280,6 +282,10 @@ export class Engine {
   #automationsTimer: NodeJS.Timeout | undefined;
   /** What subscribers last heard of the automations, so the same list isn't sent twice. */
   #automationsSent: string | null = null;
+  /** Each look at the automations, numbered: only the latest one's list is sent. */
+  #automationsLook = 0;
+  /** Finished runs whose worktree had uncommitted changes when last looked at. */
+  readonly #dirty = new Set<ThreadId>();
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -300,6 +306,7 @@ export class Engine {
         start: (run) =>
           this.#create({ project: run.project.name, title: run.title, prompt: run.prompt, run }),
         state: (threadId) => this.#runState(threadId),
+        clean: (threadId) => !this.#dirty.has(threadId),
         retire: (threadId) => this.#retireRun(threadId),
         changed: () => this.#automationsChanged(),
         log: this.#log,
@@ -451,6 +458,9 @@ export class Engine {
         `${thread.id} has landed and is being archived; start a new thread for more work.`,
       );
     }
+    if (this.#archiving.has(thread.id)) {
+      throw new TenzoError(`${thread.id} is being archived; start a new thread for more work.`);
+    }
     enqueuePrompt(this.store, thread.id, text);
     this.#pump(thread.id);
     return this.#changed(thread.id);
@@ -482,13 +492,24 @@ export class Engine {
     return this.#changed(thread.id);
   }
 
-  /** Stops the thread's agent, removes its worktree, and takes its items off the queue. */
-  async archive(threadId: string, options: { force?: boolean } = {}): Promise<ThreadView> {
+  /**
+   * Stops the thread's agent, removes its worktree, and takes its items off the queue.
+   * `unless`: why not to after all (a run that is no longer finished), asked once the checks'
+   * waits are over and in the same tick as archiving starts, so nothing can come in between; a
+   * reason refuses with `ArchiveHeld`. From then on, nothing new is sent to the thread (`send`).
+   */
+  async archive(
+    threadId: string,
+    options: { force?: boolean; unless?: () => string | null } = {},
+  ): Promise<ThreadView> {
     const thread = getThread(this.store, threadId);
     if (thread.status === "archived") return this.view(thread.id);
     // Refuse before stopping anything: a refused archive must not kill the running turn.
     await checkArchivable(this.store, thread, options);
-    this.#archiving.add(thread.id); // no new session while its worktree goes away
+    if (getThread(this.store, thread.id).status === "archived") return this.view(thread.id);
+    const held = options.unless?.() ?? null;
+    if (held !== null) throw new ArchiveHeld(held);
+    this.#archiving.add(thread.id); // no new session (nor prompt) while its worktree goes away
     let cutShort = false;
     try {
       const live = this.#live.get(thread.id);
@@ -644,20 +665,26 @@ export class Engine {
     name: string,
   ): Promise<{ archived: ThreadView[]; kept: { threadId: ThreadId; reason: string }[] }> {
     const project = findProject(this.store, projectRef);
+    const runs = activeRunsOf(this.store, project.id, name);
+    if (runs.length === 0 && !automationsOf(this.#readConfig(project.path))[name]) {
+      throw new TenzoError(`No automation "${name.slice(0, 100)}" in ${project.name}.`);
+    }
     const archived: ThreadView[] = [];
     const kept: { threadId: ThreadId; reason: string }[] = [];
-    for (const threadId of activeRunsOf(this.store, project.id, name)) {
+    for (const threadId of runs) {
       if (this.#runState(threadId) !== "finished") continue;
       const thread = getThread(this.store, threadId);
       if (existsSync(thread.worktreePath) && (await hasChanges(thread.worktreePath))) {
+        this.#dirty.add(threadId);
         kept.push({ threadId, reason: "Its worktree has uncommitted changes." });
         continue;
       }
-      // Looked at again after the wait: a message sent meanwhile makes it go again.
-      if (this.#runState(threadId) !== "finished") continue;
       try {
-        archived.push(await this.archive(threadId));
+        // Looked at again once archive's own checks are done, in the tick it starts: a message
+        // sent meanwhile makes the run go again, and it stays.
+        archived.push(await this.archive(threadId, { unless: () => this.#unfinished(threadId) }));
       } catch (error) {
+        if (error instanceof ArchiveHeld) continue;
         // One run that won't archive (a gone repo, git failing) doesn't stop the others.
         if (!(error instanceof TenzoError)) this.#log(`couldn't archive ${threadId}: ${String(error)}`);
         kept.push({ threadId, reason: error instanceof Error ? error.message : String(error) });
@@ -711,10 +738,13 @@ export class Engine {
    */
   #automationsChanged(): void {
     if (this.#closing || this.#automationsTimer) return;
-    this.#automationsTimer = setTimeout(() => {
+    this.#automationsTimer = setTimeout(async () => {
       this.#automationsTimer = undefined;
       if (this.#closing) return;
+      const look = ++this.#automationsLook;
       try {
+        await this.#lookAtWorktrees();
+        if (this.#closing || look !== this.#automationsLook) return; // a newer look sends
         const automations = this.automationsState();
         const json = JSON.stringify(automations);
         if (json === this.#automationsSent) return;
@@ -724,6 +754,19 @@ export class Engine {
         this.#log(`couldn't look at the automations: ${String(error)}`);
       }
     }, 0);
+  }
+
+  /** Which finished runs have uncommitted changes (`#dirty`), so they aren't offered to archive. */
+  async #lookAtWorktrees(): Promise<void> {
+    const finished = activeRunThreads(this.store).filter((id) => this.#runState(id) === "finished");
+    const dirty = await Promise.all(
+      finished.map(async (id) => {
+        const path = getThread(this.store, id).worktreePath;
+        return existsSync(path) && (await hasChanges(path).catch(() => false)) ? id : null;
+      }),
+    );
+    this.#dirty.clear();
+    for (const id of dirty) if (id) this.#dirty.add(id);
   }
 
   /** Looks at the automations' schedules now (tests; the daemon does it on its own). */
@@ -1192,8 +1235,21 @@ export class Engine {
     const project = projectOf(this.store, thread);
     const base = await resolveBase(project.path, project.defaultBranch);
     if ((await commitsAhead(project.path, base, `refs/heads/${thread.branch}`)) > 0) return false;
-    await this.archive(threadId);
+    try {
+      await this.archive(threadId, {
+        unless: () => this.#unfinished(threadId) ?? (openItems(this.store, threadId).length > 0 ? "It has an open item." : null),
+      });
+    } catch (error) {
+      if (error instanceof ArchiveHeld) return false;
+      throw error;
+    }
     return true;
+  }
+
+  /** Why a run isn't finished any more (a message came, a card opened), or null while it is. */
+  #unfinished(threadId: ThreadId): string | null {
+    const state = this.#runState(threadId);
+    return state === "finished" ? null : `It is ${state} again.`;
   }
 
   /** The models: the thread's own choice, then its project's config, then the default. */
@@ -1907,6 +1963,11 @@ export class Engine {
       }
     }
   }
+}
+
+/** An archive called off by its `unless`: the thread is no longer what the caller looked at. */
+export class ArchiveHeld extends TenzoError {
+  override name = "ArchiveHeld";
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

@@ -719,7 +719,8 @@ describe("automations: archiving finished runs", () => {
     d.adapter.last.report("Weekly done.");
     d.adapter.last.complete();
     await settle();
-    expect(view(d).finishedRuns).toBe(2);
+    // Two finished; the dirty one is never offered, once its worktree has been looked at.
+    await until(() => view(d).finishedRuns === 1, "the dirty run left out");
 
     const going = await executeCommand(d.engine, { type: "automation.archiveFinished", project: "app", name: "nightly" });
     expect(going).toMatchObject({
@@ -733,7 +734,7 @@ describe("automations: archiving finished runs", () => {
     expect(d.engine.snapshot().items.filter((i) => i.threadId === first.thread?.id)).toEqual([]);
     expect(d.engine.view(third.thread?.id ?? "").status).toBe("active");
     expect(d.engine.view(other.thread?.id ?? "").status).toBe("active");
-    expect(view(d).finishedRuns).toBe(1);
+    expect(view(d).finishedRuns).toBe(0);
 
     // Run 3 fails: an error card waits on you. Still not archived.
     d.adapter.sessions.find((s) => s.input.cwd === third.thread?.worktreePath)?.complete("failed");
@@ -743,6 +744,8 @@ describe("automations: archiving finished runs", () => {
     expect(waiting.archived).toEqual([]);
     expect(d.engine.view(third.thread?.id ?? "").status).toBe("active");
     expect(d.engine.view(second.thread?.id ?? "").status).toBe("active");
+    // A name nothing defines and no run has: said so.
+    await expect(d.engine.archiveFinishedRuns("app", "weekley")).rejects.toThrow('No automation "weekley" in app.');
   });
 });
 
@@ -761,6 +764,8 @@ describe("automations: tenzo project add", () => {
     expect(scheduledNote(read, "UTC")).toBe(
       "2 automations will run on schedule; `tenzo automation pause` stops them.\n  nightly: every 1h\n  morning: daily 09:00 (UTC)",
     );
+    const one = parseProjectConfig({ config: JSON.stringify({ automations: { nightly: NIGHTLY } }) });
+    expect(scheduledNote(one, "UTC")).toMatch(/^1 automation will run on schedule; `tenzo automation pause` stops it\.\n/);
     expect(scheduledNote(parseProjectConfig({}), "UTC")).toBeNull();
     expect(scheduledNote(parseProjectConfig({ config: "{" }), "UTC")).toMatch(/can't be read.*isn't valid JSON/);
   });

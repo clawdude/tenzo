@@ -168,14 +168,16 @@ export function automationGroups(
 
 /**
  * The list in a few words, for the screens that link to it: "paused", "next in 12m" (the
- * soonest scheduled run), "by hand" (nothing scheduled); null when there are none.
+ * soonest scheduled run), "by hand" (nothing scheduled), "config can't be read" (none listed,
+ * but a project's config is broken); null when there is nothing to show.
  */
 export function automationsSummary(
 	automations: readonly AutomationView[],
 	paused: boolean,
-	now: number
+	now: number,
+	problems = 0
 ): string | null {
-	if (automations.length === 0) return null;
+	if (automations.length === 0) return problems > 0 ? "config can't be read" : null;
 	const scheduled = automations.filter((a) => a.schedule !== null && a.enabled);
 	if (paused && scheduled.length > 0) return 'paused';
 	const times = scheduled

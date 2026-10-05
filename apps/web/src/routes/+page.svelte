@@ -50,7 +50,12 @@
 	const daemonNow = $derived(now + live.connection.clockOffset);
 	const meanwhile = $derived(meanwhileOf(live.threads, live.items, daemonNow));
 	const automations = $derived(
-		automationsSummary(live.automations, live.automationsPaused, daemonNow)
+		automationsSummary(
+			live.automations,
+			live.automationsPaused,
+			daemonNow,
+			live.automationProblems.length
+		)
 	);
 	/** Darker the further back, from the mock-up. */
 	const SHADES = ['#19191B', '#151517', '#121214', '#0F0F11'];
