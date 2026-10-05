@@ -32,8 +32,8 @@ export interface DaemonConfig {
   allowedHosts: string[];
   /**
    * Where devices elsewhere reach Tenzo, e.g. the Tailscale Serve route
-   * `https://my-mac.tailnet.ts.net:8443`: `tenzo pair` makes its links on it. `TENZO_PUBLIC_URL`;
-   * unset, `https://` and the first of `allowedHosts`.
+   * `https://my-mac.tailnet.ts.net:8443`, port included: the daemon gives it to `tenzo pair` for
+   * its links. `TENZO_PUBLIC_URL`; unset, `tenzo pair` needs `--url` (no guessing a port).
    */
   publicUrl?: string;
   /**

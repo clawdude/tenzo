@@ -14,15 +14,14 @@ import {
 } from "@tenzo/contracts";
 import { type Context, Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
-import { accessGuard } from "./access.ts";
+import { accessGuard, securityHeaders } from "./access.ts";
 import { storedAttachment } from "./attachments.ts";
 import {
   DEVICE_COOKIE,
   deviceCookie,
   factsOf,
   fromOwnPage,
-  RateLimit,
-  readCookie,
+  readCookies,
   requestMode,
 } from "./auth.ts";
 import { type Caller, executeCommand } from "./commands.ts";
@@ -45,10 +44,9 @@ export interface AppOptions {
   devOrigins?: readonly string[];
   /** Paired devices (devices.ts). Without them, nothing from elsewhere gets in. */
   devices?: Devices | undefined;
+  /** How often a paired device's socket gets a fresh Open live grant; tests shorten it. */
+  liveGrantRenewMs?: number | undefined;
 }
-
-/** Pairing attempts, all devices together (auth.ts). */
-export const PAIR_ATTEMPTS = { limit: 10, windowMs: 60_000 };
 
 /** What a request carries through the app: who asked (set for the API and /ws). */
 export type AppEnv = { Variables: { caller: Caller | undefined } };
@@ -63,8 +61,12 @@ const UNPAIRED =
 function callerOf(c: Context, devices: Devices | undefined): Caller | null {
   if (requestMode(factsOf(c)) === "local") return { mode: "local", device: null };
   if (!devices || !fromOwnPage(c.req.header("sec-fetch-site"))) return null;
-  const device = devices.authenticate(readCookie(c.req.header("cookie"), DEVICE_COOKIE));
-  return device ? { mode: "remote", device } : null;
+  // Every value under the name: a cookie planted beside ours must not shadow the one that verifies.
+  for (const token of readCookies(c.req.header("cookie"), DEVICE_COOKIE)) {
+    const device = devices.authenticate(token);
+    if (device) return { mode: "remote", device };
+  }
+  return null;
 }
 
 /**
@@ -81,11 +83,13 @@ export function createApp({
   allowedHosts = [],
   devOrigins = [],
   devices,
+  liveGrantRenewMs,
 }: AppOptions): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
-  const pairing = new RateLimit(PAIR_ATTEMPTS.limit, PAIR_ATTEMPTS.windowMs);
 
   app.use("*", markDaemon());
+  // No page frames the Pass: not a live page, not any website (access.ts).
+  app.use("*", securityHeaders());
   app.use(
     "*",
     accessGuard(
@@ -160,10 +164,12 @@ export function createApp({
     const mediaType = c.req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (mediaType !== "application/json") return fail("Send the code as application/json.", 415);
     if (!devices) return fail("This daemon pairs no devices.", 503);
-    if (!pairing.take()) {
-      return fail("Too many pairing attempts. Wait a minute, then try again.", 429, {
-        "Retry-After": String(pairing.retryAfter()),
-      });
+    if (devices.pairingAttempts.blocked()) {
+      return fail(
+        "Too many failed pairing attempts. On the Mac, run `tenzo pair` for a new link (that lifts this), or wait a minute.",
+        429,
+        { "Retry-After": String(devices.pairingAttempts.retryAfter()) },
+      );
     }
     let body: unknown;
     try {
@@ -176,6 +182,7 @@ export function createApp({
     const name = parsed.data?.name ?? nameFromUserAgent(c.req.header("user-agent"));
     const paired = code ? devices.exchange(code, name) : null;
     if (!paired) {
+      devices.pairingAttempts.fail();
       return fail(
         "This pairing link has expired or was already used. On the Mac, run `tenzo pair` for a new one.",
         400,
@@ -218,7 +225,14 @@ export function createApp({
   app.get(
     "/ws",
     upgradeWebSocket((c) =>
-      socketHandlers({ environmentId, version: VERSION, engine, devices, caller: c.var.caller }),
+      socketHandlers({
+        environmentId,
+        version: VERSION,
+        engine,
+        devices,
+        caller: c.var.caller,
+        liveGrantRenewMs,
+      }),
     ),
   );
 

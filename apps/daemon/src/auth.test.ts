@@ -10,6 +10,7 @@ import {
   newToken,
   RateLimit,
   readCookie,
+  readCookies,
   readLivePass,
   type RequestFacts,
   requestMode,
@@ -79,9 +80,17 @@ describe("cookies", () => {
       expect(cookie.split("; "), attribute).toContain(attribute);
     }
     expect(cookie).not.toMatch(/Domain=/i);
-    expect(liveCookie("pass").split("; ")).toEqual(
+    expect(liveCookie("pass", 10_000, 0).split("; ")).toEqual(
       expect.arrayContaining(["__Host-tenzo-live=pass", "Path=/", "Secure", "HttpOnly", "SameSite=Strict"]),
     );
+    // The cookie lives no longer than the pass in it.
+    expect(liveCookie("pass", 10_999, 0)).toContain("Max-Age=10;");
+    expect(liveCookie("pass", 0, 5_000)).toContain("Max-Age=0;");
+  });
+
+  it("reads every value under a name, so a planted one can't shadow ours", () => {
+    expect(readCookies("__Host-tenzo=bad; a=1; __Host-tenzo=good", "__Host-tenzo")).toEqual(["bad", "good"]);
+    expect(readCookies("a=1", "__Host-tenzo")).toEqual([]);
   });
 
   it("reads one cookie by its exact name", () => {
@@ -107,6 +116,10 @@ describe("cookies", () => {
     expect(setsTenzoCookie("__host-tenzo-live=x")).toBe(true);
     expect(setsTenzoCookie("session=abc; Path=/")).toBe(false);
     expect(setsTenzoCookie("__Host-tenzo-other=1")).toBe(false);
+    // Nameless: some browsers store `=__Host-tenzo=x` as `__Host-tenzo=x`.
+    expect(setsTenzoCookie("=__Host-tenzo=x; Path=/")).toBe(true);
+    expect(setsTenzoCookie(" = __host-tenzo-live=x")).toBe(true);
+    expect(setsTenzoCookie("=plain")).toBe(false);
   });
 
   it("takes the device cookie from Tenzo's own pages only", () => {
@@ -146,14 +159,24 @@ describe("tokens", () => {
 });
 
 describe("rate limit", () => {
-  it("takes so many attempts per window, for everyone together", () => {
+  it("counts failures per window, for everyone together, until reset", () => {
     let now = 0;
     const limit = new RateLimit(3, 60_000, () => now);
-    expect([limit.take(), limit.take(), limit.take(), limit.take()]).toEqual([true, true, true, false]);
+    expect(limit.blocked()).toBe(false);
+    limit.fail();
+    limit.fail();
+    expect(limit.blocked()).toBe(false);
+    limit.fail();
+    expect(limit.blocked()).toBe(true);
     expect(limit.retryAfter()).toBe(60);
     now = 59_999;
-    expect(limit.take()).toBe(false);
+    expect(limit.blocked()).toBe(true);
     now = 60_000;
-    expect(limit.take()).toBe(true);
+    expect(limit.blocked()).toBe(false);
+    for (let i = 0; i < 3; i++) limit.fail();
+    expect(limit.blocked()).toBe(true);
+    limit.reset();
+    expect(limit.blocked()).toBe(false);
+    expect(limit.retryAfter()).toBe(0);
   });
 });

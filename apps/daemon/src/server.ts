@@ -40,6 +40,8 @@ export interface DaemonDeps {
    * where threads then keep the prompt's first words: a test never spawns `claude` unasked.
    */
   titler?: Titler;
+  /** How often a paired device's socket gets a fresh Open live grant (auth.ts). Tests shorten it. */
+  liveGrantRenewMs?: number;
 }
 
 /** Starts listening, with a plain message when the port is taken. */
@@ -96,7 +98,7 @@ export async function startDaemon(
     ...(config.snoozeMs ? { snoozeMs: config.snoozeMs } : {}),
   });
   const environmentId = store.environmentId;
-  const devices = new Devices(store);
+  const devices = new Devices(store, { publicOrigin: config.publicUrl ?? null });
   const app = createApp({
     environmentId,
     webDir: config.webDir,
@@ -104,6 +106,7 @@ export async function startDaemon(
     allowedHosts: config.allowedHosts,
     devOrigins: config.devOrigins,
     devices,
+    liveGrantRenewMs: deps.liveGrantRenewMs,
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.

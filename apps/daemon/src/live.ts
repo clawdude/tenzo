@@ -13,7 +13,7 @@ import {
   LIVE_COOKIE,
   liveCookie,
   type RequestFacts,
-  readCookie,
+  readCookies,
   requestMode,
   setsTenzoCookie,
   withoutTenzoCookies,
@@ -221,15 +221,36 @@ export function liveCaller(
   devices: Devices | undefined,
 ): { mode: "local" } | { mode: "remote"; device: Device } | null {
   if (requestMode(facts) === "local") return { mode: "local" };
-  const device = devices?.checkLivePass(readCookie(facts.header("cookie"), LIVE_COOKIE)) ?? null;
+  const device = liveCookieDevice(facts, devices);
   return device ? { mode: "remote", device } : null;
 }
 
+/** The device the request's live cookie names, trying each one under the name; null if none. */
+function liveCookieDevice(facts: RequestFacts, devices: Devices | undefined): Device | null {
+  for (const pass of readCookies(facts.header("cookie"), LIVE_COOKIE)) {
+    const device = devices?.checkLivePass(pass);
+    if (device) return device;
+  }
+  return null;
+}
+
+/**
+ * Where the door may send the browser: a page under some thread's live base, as a plain path
+ * (no `..` or `.` segment, encoded or not, no backslash, no control characters or spaces).
+ */
+export function doorTarget(to: string | undefined): string | null {
+  if (!to || !/^\/live\/thr_[a-z0-9]{20}\/[^\\\s\u0000-\u001f\u007f]*$/.test(to)) return null;
+  const path = to.split(/[?#]/)[0] ?? "";
+  if (/%2e|%2f|%5c/i.test(path)) return null;
+  if (path.split("/").some((segment) => segment === ".." || segment === ".")) return null;
+  return to;
+}
+
 /** What a browser from elsewhere gets without the live origin's cookie. */
-function notPaired(c: Context, why: string): Response {
+function notPaired(c: Context, why: string, status: 401 | 403 = 401): Response {
   return c.html(
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tenzo · live app</title><body style="margin:0;padding:32px 24px;background:#000;color:#f5f5f7;font:17px/1.4 -apple-system,system-ui,sans-serif"><h1 style="font-size:28px">Open it from Tenzo</h1><p style="color:#8e8e93">${why} Open live on a finished card opens it, on a device paired with <code>tenzo pair</code>.</p></body>`,
-    401,
+    status,
     { "Cache-Control": "no-store" },
   );
 }
@@ -316,25 +337,35 @@ export function createLiveApp(options: {
   // The door: an Open live link's grant (a paired device's, from its snapshot) for the live
   // origin's cookie, then on to the page. Nothing else here sets a cookie.
   app.get(LIVE_DOOR, (c) => {
-    const to = c.req.query("to") ?? "";
-    if (!/^\/live\/thr_[a-z0-9]{20}\/[^\\\s\u0000-\u001f\u007f]*$/.test(to)) {
-      return c.text("Open live links go to a thread's live app.\n", 400);
-    }
+    const to = doorTarget(c.req.query("to"));
+    if (!to) return c.text("Open live links go to a thread's live app.\n", 400);
     const facts = factsOf(c);
     if (requestMode(facts) === "local") return c.redirect(to, 303);
-    const device = options.devices?.checkLivePass(c.req.query("grant")) ?? null;
-    if (!device || !options.devices) {
-      return notPaired(c, "This link has expired, or this device isn't paired.");
+    const devices = options.devices;
+    const granted = devices?.checkLivePass(c.req.query("grant")) ?? null;
+    const holding = liveCookieDevice(facts, devices);
+    const onward = (setCookie?: string) =>
+      new Response(null, {
+        status: 303,
+        headers: {
+          location: to,
+          ...(setCookie ? { "set-cookie": setCookie } : {}),
+          "cache-control": "no-store",
+          "referrer-policy": "no-referrer",
+        },
+      });
+    if (granted && devices) {
+      // A grant is one device's: a browser that already opens live apps as another device keeps
+      // that (a link someone shared doesn't switch it over).
+      if (holding && holding.id !== granted.id) {
+        return notPaired(c, "This Open live link belongs to another device.", 403);
+      }
+      const { pass, expiresAt } = devices.livePass(granted.id);
+      return onward(liveCookie(pass, expiresAt));
     }
-    return new Response(null, {
-      status: 303,
-      headers: {
-        location: to,
-        "set-cookie": liveCookie(options.devices.livePass(device.id)),
-        "cache-control": "no-store",
-        "referrer-policy": "no-referrer",
-      },
-    });
+    // The grant ran out (a page left open for long), but this browser holds a good live cookie.
+    if (holding) return onward();
+    return notPaired(c, "This link has expired, or this device isn't paired.");
   });
   app.use("/live/*", async (c, next) => {
     if (!liveCaller(factsOf(c), options.devices)) {

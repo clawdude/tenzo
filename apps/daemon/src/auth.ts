@@ -19,9 +19,12 @@ import { LOOPBACK_HOSTS } from "./access.ts";
  * - it carries no proxy's forwarding header (`X-Forwarded-For`, `Forwarded`, Tailscale's
  *   `Tailscale-User-*`, …). Tailscale Serve sets `X-Forwarded-For` and `X-Forwarded-Host` on every
  *   request, so a phone that sends `Host: localhost` through it is still remote. A proxy that
- *   rewrites Host to loopback *and* drops every forwarding header would make its clients local:
- *   don't put one in front of Tenzo (an SSH tunnel is the one that does, and it is the Mac's own
- *   login).
+ *   rewrites Host to loopback *and* drops every forwarding header would make its clients local.
+ *   So does anything that forwards raw TCP: `tailscale serve --tcp` or `--tls-terminated-tcp`,
+ *   `socat`, `ssh -R`, an ngrok TCP tunnel. They add no headers and let the client say
+ *   `Host: localhost`, so **every** client through them is local, with no pairing. Put Tenzo
+ *   behind `tailscale serve --https` (an HTTP proxy) only. (`ssh -L` from elsewhere is local too:
+ *   that is the Mac's own login.)
  *
  * Spoofing the other way, a local process sending a tailnet Host or a forwarding header, only
  * makes it remote: it then needs a paired device's token like anyone else. Nothing is trusted
@@ -125,21 +128,30 @@ export const LIVE_COOKIE = "__Host-tenzo-live";
 /** Cookies that are Tenzo's: never forwarded to a dev server, never set by one. */
 export const TENZO_COOKIES: readonly string[] = [DEVICE_COOKIE, LIVE_COOKIE];
 
-/** Long enough not to matter; browsers cap it at 400 days anyway. Revoking ends it sooner. */
-const DEVICE_COOKIE_MAX_AGE_S = 400 * 24 * 60 * 60;
+/**
+ * How long a device's cookie lasts from pairing: long enough not to matter (browsers cap cookies
+ * at 400 days anyway). Revoking ends it sooner.
+ */
+export const DEVICE_TTL_MS = 400 * 24 * 60 * 60_000;
 
-/** How long the live origin's cookie lasts; Open live renews it. */
+/** How long the live origin's cookie lasts at most (never past the device's own); Open live renews it. */
 export const LIVE_COOKIE_TTL_MS = 30 * 24 * 60 * 60_000;
 
-/** How long an Open live grant works (it is renewed with every snapshot). */
-export const LIVE_GRANT_TTL_MS = 24 * 60 * 60_000;
+/**
+ * How long an Open live grant works. Short, so a shared Open live link is soon worthless; a paired
+ * device's socket gets a fresh one every `LIVE_GRANT_RENEW_MS`.
+ */
+export const LIVE_GRANT_TTL_MS = 60 * 60_000;
+export const LIVE_GRANT_RENEW_MS = 20 * 60_000;
 
 export function deviceCookie(token: string): string {
-  return `${DEVICE_COOKIE}=${token}; Path=/; Max-Age=${DEVICE_COOKIE_MAX_AGE_S}; Secure; HttpOnly; SameSite=Strict`;
+  return `${DEVICE_COOKIE}=${token}; Path=/; Max-Age=${Math.floor(DEVICE_TTL_MS / 1000)}; Secure; HttpOnly; SameSite=Strict`;
 }
 
-export function liveCookie(pass: string): string {
-  return `${LIVE_COOKIE}=${pass}; Path=/; Max-Age=${Math.floor(LIVE_COOKIE_TTL_MS / 1000)}; Secure; HttpOnly; SameSite=Strict`;
+/** The live origin's cookie with a pass that expires at `expiresAt` (ms), and not a moment later. */
+export function liveCookie(pass: string, expiresAt: number, now: number = Date.now()): string {
+  const maxAge = Math.max(0, Math.floor((expiresAt - now) / 1000));
+  return `${LIVE_COOKIE}=${pass}; Path=/; Max-Age=${maxAge}; Secure; HttpOnly; SameSite=Strict`;
 }
 
 /**
@@ -166,6 +178,16 @@ export function readCookie(header: string | undefined, name: string): string | n
   return cookiePairs(header).find((pair) => pair.name === name)?.value ?? null;
 }
 
+/**
+ * Every value of cookie `name` in a `Cookie` header, in order: a cookie planted beside Tenzo's
+ * (another path, say) must not shadow the one that verifies, so each is tried.
+ */
+export function readCookies(header: string | undefined, name: string): string[] {
+  return cookiePairs(header)
+    .filter((pair) => pair.name === name)
+    .map((pair) => pair.value);
+}
+
 /** True for one of Tenzo's cookie names, in any case (browsers match `__Host-` so). */
 function isTenzoCookie(name: string): boolean {
   return TENZO_COOKIES.some((ours) => ours.toLowerCase() === name.toLowerCase());
@@ -179,14 +201,21 @@ export function withoutTenzoCookies(header: string | undefined): string | null {
 
 /** True when a `Set-Cookie` header sets one of Tenzo's cookies. */
 export function setsTenzoCookie(setCookie: string): boolean {
-  const eq = setCookie.indexOf("=");
-  return isTenzoCookie((eq < 0 ? setCookie : setCookie.slice(0, eq)).trim());
+  const pair = setCookie.split(";")[0] ?? "";
+  const eq = pair.indexOf("=");
+  const name = (eq < 0 ? pair : pair.slice(0, eq)).trim();
+  if (isTenzoCookie(name)) return true;
+  // Nameless (`=__Host-tenzo=x`): some browsers store it as `__Host-tenzo=x`.
+  return name === "" && eq >= 0 && setsTenzoCookie(pair.slice(eq + 1));
 }
 
 /**
  * True when a request is from the daemon's own page (or no page: typed, a bookmark, the CLI), by
  * the browser's `Sec-Fetch-Site`. A live page is same-site but another origin: its requests say
  * `same-site`, and the device cookie they carry (cookies ignore ports) is not taken.
+ *
+ * Chromium sends no `Sec-Fetch-Site` on WebSocket handshakes, so for `/ws` the Origin check
+ * (access.ts) is what refuses a live page. Framing is refused by `frame-ancestors` (access.ts).
  */
 export function fromOwnPage(secFetchSite: string | undefined): boolean {
   return secFetchSite === undefined || secFetchSite === "same-origin" || secFetchSite === "none";
@@ -226,15 +255,17 @@ function mac(key: Buffer, body: string): string {
 }
 
 /**
- * At most `limit` attempts per `windowMs`, counted together for everyone: behind Tailscale Serve
- * every request comes from 127.0.0.1, and a client address from a header is the client's to
- * choose. Pairing codes are long enough that this is about cost, not guessing.
+ * At most `limit` failed attempts per `windowMs`, counted together for everyone: behind Tailscale
+ * Serve every request comes from 127.0.0.1, and a client address from a header is the client's to
+ * choose. Pairing codes are long enough that this is about cost, not guessing. Only failures
+ * count, and the Mac lifts it (`reset`, on every `tenzo pair`), so a peer that keeps failing can't
+ * lock the owner out.
  */
 export class RateLimit {
   readonly #limit: number;
   readonly #windowMs: number;
   readonly #now: () => number;
-  #times: number[] = [];
+  #failures: number[] = [];
 
   constructor(limit: number, windowMs: number, now: () => number = Date.now) {
     this.#limit = limit;
@@ -242,19 +273,27 @@ export class RateLimit {
     this.#now = now;
   }
 
-  /** Counts an attempt; false when over the limit (then it isn't counted). */
-  take(): boolean {
+  /** True while `limit` failures fall within the window: attempts wait. */
+  blocked(): boolean {
     const now = this.#now();
-    this.#times = this.#times.filter((t) => now - t < this.#windowMs);
-    if (this.#times.length >= this.#limit) return false;
-    this.#times.push(now);
-    return true;
+    this.#failures = this.#failures.filter((t) => now - t < this.#windowMs);
+    return this.#failures.length >= this.#limit;
+  }
+
+  /** Counts a failed attempt. */
+  fail(): void {
+    this.#failures.push(this.#now());
+  }
+
+  /** Forgets every failure. */
+  reset(): void {
+    this.#failures = [];
   }
 
   /** Seconds until an attempt would be taken again. */
   retryAfter(): number {
-    const oldest = this.#times[0];
-    if (oldest === undefined || this.#times.length < this.#limit) return 0;
+    const oldest = this.#failures[0];
+    if (oldest === undefined || !this.blocked()) return 0;
     return Math.max(1, Math.ceil((oldest + this.#windowMs - this.#now()) / 1000));
   }
 }

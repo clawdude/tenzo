@@ -1,16 +1,21 @@
 import { randomBytes } from "node:crypto";
 import { type Device, DeviceId, PAIRING_TTL_MS } from "@tenzo/contracts";
 import {
+  DEVICE_TTL_MS,
   hashToken,
   LIVE_COOKIE_TTL_MS,
   LIVE_GRANT_TTL_MS,
   newToken,
+  RateLimit,
   readLivePass,
   signLivePass,
 } from "./auth.ts";
 import { TenzoError } from "./errors.ts";
 import { randomId } from "./ids.ts";
 import { type Store, transaction } from "./store.ts";
+
+/** Failed pairing attempts, all devices together, before attempts wait (auth.ts). */
+export const PAIR_ATTEMPTS = { limit: 10, windowMs: 60_000 };
 
 /** How often a device's "last seen" is written, at most. */
 const SEEN_EVERY_MS = 60_000;
@@ -32,14 +37,27 @@ export class Devices {
   readonly #open = new Map<string, Set<() => void>>();
   readonly #seen = new Map<string, number>();
   #key: Buffer | undefined;
+  /** Where devices reach the daemon (`TENZO_PUBLIC_URL`), for pairing links; null: not said. */
+  readonly #publicOrigin: string | null;
+  /** Failed pairing attempts (`POST /api/pair`); every new code lifts the limit. */
+  readonly pairingAttempts: RateLimit;
 
-  constructor(store: Store, { now = Date.now }: { now?: () => number } = {}) {
+  constructor(
+    store: Store,
+    { now = Date.now, publicOrigin = null }: { now?: () => number; publicOrigin?: string | null } = {},
+  ) {
     this.#store = store;
     this.#now = now;
+    this.#publicOrigin = publicOrigin;
+    this.pairingAttempts = new RateLimit(PAIR_ATTEMPTS.limit, PAIR_ATTEMPTS.windowMs, now);
   }
 
-  /** A new one-time pairing code; `name` is what the device will be called. */
-  pair(name?: string): { code: string; expiresAt: string } {
+  /**
+   * A new one-time pairing code; `name` is what the device will be called. `origin` is where the
+   * link points (`TENZO_PUBLIC_URL`), null when the daemon wasn't told. Lifts the limit on failed
+   * attempts: the Mac asked, so pairing must work now.
+   */
+  pair(name?: string): { code: string; expiresAt: string; origin: string | null } {
     const code = randomCode();
     const now = this.#now();
     const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
@@ -48,7 +66,8 @@ export class Devices {
         "INSERT INTO pairings (code_hash, environment_id, name, created_at, expires_at) VALUES (?, ?, ?, ?, ?)",
       )
       .run(hashToken(code), this.#store.environmentId, name ?? null, iso(now), expiresAt);
-    return { code, expiresAt };
+    this.pairingAttempts.reset();
+    return { code, expiresAt, origin: this.#publicOrigin };
   }
 
   /**
@@ -152,9 +171,15 @@ export class Devices {
     return signLivePass(this.#liveKey(), deviceId, this.#now() + LIVE_GRANT_TTL_MS);
   }
 
-  /** The live origin's cookie value for a device. */
-  livePass(deviceId: string): string {
-    return signLivePass(this.#liveKey(), deviceId, this.#now() + LIVE_COOKIE_TTL_MS);
+  /**
+   * The live origin's cookie for a device: a pass that lasts 30 days, never longer than the
+   * device's own cookie. `expiresAt` is for the cookie's Max-Age.
+   */
+  livePass(deviceId: string): { pass: string; expiresAt: number } {
+    const device = this.find(deviceId);
+    const end = device ? Date.parse(device.createdAt) + DEVICE_TTL_MS : 0;
+    const expiresAt = Math.min(this.#now() + LIVE_COOKIE_TTL_MS, end);
+    return { pass: signLivePass(this.#liveKey(), deviceId, expiresAt), expiresAt };
   }
 
   /** The active device a live pass or grant names, or null. */
@@ -198,13 +223,11 @@ export class Devices {
 }
 
 /**
- * Where `tenzo pair`'s link points: `--url`, else `TENZO_PUBLIC_URL`, else https on the first
- * allowed host (Tailscale Serve's default route). A TenzoError when remote access isn't set up.
+ * Where `tenzo pair`'s link points: `--url`, else where the daemon says devices reach it
+ * (its `TENZO_PUBLIC_URL`). Never a guess: a Serve route on another port than 443 would make a
+ * portless guess a dead link. A TenzoError says what to set.
  */
-export function pairingOrigin(
-  config: { allowedHosts: readonly string[]; publicUrl?: string | undefined },
-  flag?: string,
-): string {
+export function pairingOrigin(daemonOrigin: string | null, flag?: string): string {
   if (flag !== undefined) {
     let url: URL | undefined;
     try {
@@ -219,14 +242,10 @@ export function pairingOrigin(
     }
     return url.origin;
   }
-  if (config.publicUrl) return config.publicUrl;
-  const host = config.allowedHosts[0];
-  if (!host) {
-    throw new TenzoError(
-      "Remote access isn't set up: a device elsewhere reaches Tenzo through a name in TENZO_ALLOWED_HOSTS (e.g. its Tailscale Serve name). Set it and restart the daemon, or say where the device reaches Tenzo with --url.",
-    );
-  }
-  return `https://${host}`;
+  if (daemonOrigin) return daemonOrigin;
+  throw new TenzoError(
+    "The daemon doesn't know where devices reach it. Set TENZO_PUBLIC_URL to its Tailscale Serve address, port included (e.g. https://my-mac.tailnet.ts.net:8443), and restart the daemon; or pass it now with --url.",
+  );
 }
 
 /** A name for a device that pairs without one, from its browser's User-Agent. */

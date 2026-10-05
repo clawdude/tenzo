@@ -219,6 +219,8 @@ export const CommandResults = {
     /** Goes in the link's fragment (`pairingUrl`); the daemon keeps only its hash. */
     code: z.string(),
     expiresAt: z.string(),
+    /** Where devices reach this daemon (`TENZO_PUBLIC_URL`), for the link; null: it wasn't told. */
+    origin: z.string().nullable(),
   }),
   "device.list": z.object({
     devices: z.array(Device),

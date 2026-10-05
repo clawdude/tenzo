@@ -13,7 +13,7 @@ import {
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import { FakeAdapter } from "./agent/fake-agent.ts";
-import { PAIR_ATTEMPTS } from "./app.ts";
+import { PAIR_ATTEMPTS } from "./devices.ts";
 import { addProject } from "./projects.ts";
 import { type RunningDaemon, startDaemon } from "./server.ts";
 import { REVOKED_CODE } from "./socket.ts";
@@ -76,7 +76,7 @@ async function devServer() {
   };
 }
 
-async function start(): Promise<RunningDaemon> {
+async function start(deps: { liveGrantRenewMs?: number } = {}): Promise<RunningDaemon> {
   const adapter = new FakeAdapter();
   adapter.onStart = (session) => {
     session.onPrompt = () => {
@@ -94,7 +94,7 @@ async function start(): Promise<RunningDaemon> {
       devOrigins: [],
       liveOrigins: [LIVE],
     },
-    { adapters: { claude: adapter } },
+    { adapters: { claude: adapter }, ...deps },
   );
 }
 
@@ -268,17 +268,24 @@ describe("pairing", () => {
     expect(daemon.devices.exchange(code, "x")).not.toBeNull();
   });
 
-  it("limits attempts", async () => {
-    const attempt = () =>
-      call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code: "a".repeat(26) } });
-    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) expect((await attempt()).status).toBe(400);
-    const limited = await attempt();
+  it("limits failed attempts, and a new tenzo pair lifts the limit", async () => {
+    const pair = (code: string) =>
+      call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code } });
+    const early = daemon.devices.pair();
+    // Successes don't count.
+    expect((await pair(daemon.devices.pair().code)).status).toBe(200);
+    // A peer that keeps failing: 12 bad posts.
+    const statuses: number[] = [];
+    for (let i = 0; i < PAIR_ATTEMPTS.limit + 2; i++) statuses.push((await pair("a".repeat(26))).status);
+    expect(statuses).toEqual([...Array(PAIR_ATTEMPTS.limit).fill(400), 429, 429]);
+    const limited = await pair(early.code);
     expect(limited.status).toBe(429);
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
-    // Even a good code waits.
-    const { code } = daemon.devices.pair();
-    const good = await call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code } });
-    expect(good.status).toBe(429);
+    expect(JSON.parse(limited.body).error).toMatch(/tenzo pair/);
+    // The owner runs tenzo pair on the Mac: the new link works at once.
+    const fresh = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "device.pair" });
+    const { code } = JSON.parse(fresh.body).result as { code: string };
+    expect((await pair(code)).status).toBe(200);
   });
 
   it("makes links on the Mac only", async () => {
@@ -298,7 +305,60 @@ describe("pairing", () => {
   });
 });
 
+describe("framing", () => {
+  it("no page may frame anything of the daemon's: the Pass, the pair page, the API, attachments", async () => {
+    const { cookie } = pairDevice(daemon.devices);
+    mkdirSync(join(home, "attachments", thread.id), { recursive: true });
+    writeFileSync(join(home, "attachments", thread.id, "att_aaaaaaaaaaaaaaaaaaaa.png"), "png");
+    const image = attachmentUrl(thread.id, { file: "att_aaaaaaaaaaaaaaaaaaaa.png" });
+    for (const [path, headers] of [
+      ["/", remote({ cookie })],
+      ["/", {}],
+      ["/pair", remote()],
+      ["/threads/whatever", remote({ cookie })],
+      ["/health", {}],
+      ["/api/session", remote()],
+      ["/api/commands", remote()],
+      [image, remote({ cookie })],
+      ["/_app/immutable/missing.js", {}],
+    ] as const) {
+      const res = await call(path, { headers });
+      expect(res.headers["content-security-policy"], path).toMatch(/frame-ancestors 'none'/);
+      expect(res.headers["x-frame-options"], path).toBe("DENY");
+      expect(res.headers["x-content-type-options"], path).toBe("nosniff");
+      expect(res.headers["referrer-policy"], path).toBe("no-referrer");
+    }
+    // The attachment keeps its own policy, framing refused on top.
+    const shot = await call(image, { headers: remote({ cookie }) });
+    expect(shot.headers["content-security-policy"]).toBe("default-src 'none'; sandbox; frame-ancestors 'none'");
+  });
+});
+
 describe("a paired device", () => {
+  it("is taken by the cookie that verifies, whatever is planted beside it", async () => {
+    const { cookie } = pairDevice(daemon.devices);
+    const token = cookie.split("=")[1];
+    expect((await command(remote({ cookie: `__Host-tenzo=planted; __Host-tenzo=${token}` }))).status).toBe(200);
+  });
+
+  it("gets a fresh Open live grant now and then while its socket is open", async () => {
+    await daemon.close();
+    daemon = await start({ liveGrantRenewMs: 50 });
+    const { cookie } = pairDevice(daemon.devices);
+    const frame = await new Promise<Extract<ServerFrame, { type: "live" }>>((resolve, reject) => {
+      const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}/ws`, { headers: remote({ cookie }) });
+      ws.on("message", (data) => {
+        const parsed = ServerFrame.parse(JSON.parse(String(data)));
+        if (parsed.type !== "live") return;
+        ws.close();
+        resolve(parsed);
+      });
+      ws.on("error", reject);
+    });
+    expect(frame.live.origins).toEqual([LIVE]);
+    expect(daemon.devices.checkLivePass(frame.live.grant)).not.toBeNull();
+  });
+
   it("is taken by its device cookie from Tenzo's own pages only", async () => {
     const { id, cookie } = pairDevice(daemon.devices);
     expect((await command(remote({ cookie }))).status).toBe(200);
@@ -308,7 +368,7 @@ describe("a paired device", () => {
     const { origin: _, ...noOrigin } = remote({ cookie, "sec-fetch-site": "same-site" });
     expect((await call(attachmentUrl(thread.id, { file: "att_aaaaaaaaaaaaaaaaaaaa.png" }), { headers: noOrigin })).status).toBe(401);
     // The live origin's credential is no good here.
-    const live = `__Host-tenzo-live=${daemon.devices.livePass(id)}`;
+    const live = `__Host-tenzo-live=${daemon.devices.livePass(id).pass}`;
     expect((await command(remote({ cookie: live }))).status).toBe(401);
     expect((await socket(remote({ cookie: live }))).status).toBe(401);
   });
@@ -389,7 +449,7 @@ describe("the live origin", () => {
 
   it("strips Tenzo's cookies from a live WebSocket, both ways, and closes it on revoke", async () => {
     const { id, cookie } = pairDevice(daemon.devices);
-    const live = `__Host-tenzo-live=${daemon.devices.livePass(id)}`;
+    const live = `__Host-tenzo-live=${daemon.devices.livePass(id).pass}`;
     let handshake: IncomingHttpHeaders = {};
     const opened = await new Promise<{ ws: WebSocket; first: string }>((resolve, reject) => {
       const ws = new WebSocket(`ws://127.0.0.1:${daemon.livePort}${liveBase(thread.id)}`, {
@@ -408,6 +468,39 @@ describe("the live origin", () => {
     await closed;
   });
 
+  it("lets a browser holding a good live cookie through even when the link's grant ran out", async () => {
+    const { id } = pairDevice(daemon.devices);
+    const live = `__Host-tenzo-live=${daemon.devices.livePass(id).pass}`;
+    const to = encodeURIComponent(page());
+    const door = await call(`${LIVE_DOOR}?grant=dev_x.1.expired&to=${to}`, {
+      port: daemon.livePort,
+      headers: fromLive({ cookie: live }),
+    });
+    expect(door.status).toBe(303);
+    expect(door.headers.location).toBe(page());
+    expect(door.headers["set-cookie"]).toBeUndefined();
+  });
+
+  it("won't switch a browser over to another device's live access with a shared link", async () => {
+    const mine = pairDevice(daemon.devices, "mine");
+    const theirs = pairDevice(daemon.devices, "theirs");
+    const live = `__Host-tenzo-live=${daemon.devices.livePass(mine.id).pass}`;
+    const shared = daemon.devices.liveGrant(theirs.id);
+    const door = await call(`${LIVE_DOOR}?grant=${encodeURIComponent(shared)}&to=${encodeURIComponent(page())}`, {
+      port: daemon.livePort,
+      headers: fromLive({ cookie: live }),
+    });
+    expect(door.status).toBe(403);
+    expect(door.headers["set-cookie"]).toBeUndefined();
+    // Their own grant still works for them; a revoked device's old cookie doesn't stand in the way.
+    daemon.devices.revoke(mine.id);
+    const after = await call(`${LIVE_DOOR}?grant=${encodeURIComponent(shared)}&to=${encodeURIComponent(page())}`, {
+      port: daemon.livePort,
+      headers: fromLive({ cookie: live }),
+    });
+    expect(after.status).toBe(303);
+  });
+
   it("turns away a bad door or an expired grant", async () => {
     const { id } = pairDevice(daemon.devices);
     const grant = daemon.devices.liveGrant(id);
@@ -416,7 +509,16 @@ describe("the live origin", () => {
         port: daemon.livePort,
         headers: fromLive(),
       });
-    for (const to of ["https://evil.example/", "//evil.example/", "/api/commands", `/live/${thread.id}/\\evil`]) {
+    for (const to of [
+      "https://evil.example/",
+      "//evil.example/",
+      "/api/commands",
+      `/live/${thread.id}/\\evil`,
+      `/live/${thread.id}/../../../evil`,
+      `/live/${thread.id}/./x`,
+      `/live/${thread.id}/%2e%2e/%2e%2e/evil`,
+      `/live/${thread.id}/..%2f..%2fevil`,
+    ]) {
       expect((await door(to)).status, to).toBe(400);
     }
     expect((await door(page(), "dev_aaaaaaaaaaaaaaaaaaaa.99999999999999.forged")).status).toBe(401);

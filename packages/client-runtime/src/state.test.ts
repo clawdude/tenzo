@@ -25,6 +25,12 @@ describe("applyFrame", () => {
     });
   });
 
+  it("takes a renewed live grant from a live frame, keeping everything else", () => {
+    const before = { ...EMPTY, threads: [thread("a")] };
+    const live = { port: 4781, origins: [], grant: "dev_x.2.sig" };
+    expect(applyFrame(before, { type: "live", live })).toEqual({ ...before, live });
+  });
+
   it("keeps the automations: from the snapshot, then each automations frame replaces them whole", () => {
     const frame = snapshotFrame([thread("a")], []);
     let data = applyFrame(EMPTY, {

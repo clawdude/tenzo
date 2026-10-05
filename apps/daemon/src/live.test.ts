@@ -176,7 +176,7 @@ describe("live: HTTP", () => {
 
   it("works through Tailscale Serve's host and origin, for a paired device", async () => {
     const { id } = pairDevice(daemon.devices);
-    const cookie = `__Host-tenzo-live=${daemon.devices.livePass(id)}`;
+    const cookie = `__Host-tenzo-live=${daemon.devices.livePass(id).pass}`;
     const path = `${liveBase(thread.id)}x`;
     expect(await get(path, { host: `${TS}:8444`, origin: LIVE_TS, cookie })).toBe(200);
     expect(await get(path, { host: `${TS}:8444`, origin: LIVE_TS })).toBe(401);
@@ -384,7 +384,7 @@ describe("attachments", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox; frame-ancestors 'none'");
     expect(Buffer.from(await res.arrayBuffer())).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   });
 

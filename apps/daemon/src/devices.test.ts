@@ -124,7 +124,8 @@ describe("devices", () => {
   it("gives live passes that work until the device is revoked, with a key that lasts", () => {
     const paired = devices.exchange(devices.pair().code, "x");
     if (!paired) throw new Error("no pairing");
-    const pass = devices.livePass(paired.device.id);
+    const { pass, expiresAt } = devices.livePass(paired.device.id);
+    expect(expiresAt - now).toBe(30 * 24 * 60 * 60_000);
     const grant = devices.liveGrant(paired.device.id);
     expect(devices.checkLivePass(pass)?.id).toBe(paired.device.id);
     expect(devices.checkLivePass(grant)?.id).toBe(paired.device.id);
@@ -132,8 +133,8 @@ describe("devices", () => {
     expect(new Devices(store, { now: () => now }).checkLivePass(pass)?.id).toBe(paired.device.id);
     // A main token is not a live pass.
     expect(devices.checkLivePass(paired.token)).toBeNull();
-    now += 25 * 60 * 60_000;
-    expect(devices.checkLivePass(grant)).toBeNull(); // a grant lasts a day
+    now += 61 * 60_000;
+    expect(devices.checkLivePass(grant)).toBeNull(); // a grant lasts an hour
     expect(devices.checkLivePass(pass)?.id).toBe(paired.device.id);
     devices.revoke(paired.device.id);
     expect(devices.checkLivePass(pass)).toBeNull();
@@ -141,13 +142,29 @@ describe("devices", () => {
 });
 
 describe("where tenzo pair's link points", () => {
-  it("--url, else TENZO_PUBLIC_URL, else https on the first allowed host", () => {
-    const ts = "my-mac.tail0000.ts.net";
-    expect(pairingOrigin({ allowedHosts: [ts] })).toBe(`https://${ts}`);
-    expect(pairingOrigin({ allowedHosts: [ts], publicUrl: `https://${ts}:8443` })).toBe(`https://${ts}:8443`);
-    expect(pairingOrigin({ allowedHosts: [ts] }, `https://${ts}:8443/whatever`)).toBe(`https://${ts}:8443`);
-    expect(() => pairingOrigin({ allowedHosts: [] })).toThrow(/TENZO_ALLOWED_HOSTS/);
-    expect(() => pairingOrigin({ allowedHosts: [ts] }, "my-mac")).toThrow(/--url/);
+  it("--url, else the daemon's TENZO_PUBLIC_URL; never a guess", () => {
+    const ts = "https://my-mac.tail0000.ts.net:8443";
+    expect(pairingOrigin(ts)).toBe(ts);
+    expect(pairingOrigin(ts, "https://other.ts.net:9443/whatever")).toBe("https://other.ts.net:9443");
+    expect(pairingOrigin(null, `${ts}/x`)).toBe(ts);
+    expect(() => pairingOrigin(null)).toThrow(/TENZO_PUBLIC_URL/);
+    expect(() => pairingOrigin(ts, "my-mac")).toThrow(/--url/);
+  });
+
+  it("is the daemon's to say: each new code comes with it", () => {
+    const told = new Devices(store, { now: () => now, publicOrigin: "https://mac.ts.net:8443" });
+    expect(told.pair().origin).toBe("https://mac.ts.net:8443");
+    expect(devices.pair().origin).toBeNull();
+  });
+});
+
+describe("the live cookie's life", () => {
+  it("is 30 days, never past the device's own cookie", () => {
+    const paired = devices.exchange(devices.pair().code, "x");
+    if (!paired) throw new Error("no pairing");
+    const end = Date.parse(paired.device.createdAt) + 400 * 24 * 60 * 60_000;
+    now = end - 24 * 60 * 60_000;
+    expect(devices.livePass(paired.device.id).expiresAt).toBe(end);
   });
 });
 

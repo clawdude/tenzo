@@ -87,6 +87,28 @@ export function accessGuard(
   };
 }
 
+/**
+ * On every response of the daemon's own listener: no page may frame it. A live page is same-site
+ * (cookies ignore ports), so a frame of the Pass there loads with the device's cookie and every
+ * check passes inside it; an invisible one under a decoy button would answer cards with your tap.
+ * On the Mac, any website could frame the login-free Pass the same way (Safari lets it). Also:
+ * nothing is sniffed into another type, and no Referer leaves the Pass (thread names, ids).
+ */
+export function securityHeaders(): MiddlewareHandler {
+  return async (c, next) => {
+    await next();
+    const headers = c.res.headers;
+    const csp = headers.get("content-security-policy");
+    if (!csp) headers.set("content-security-policy", "frame-ancestors 'none'");
+    else if (!/frame-ancestors/i.test(csp)) {
+      headers.set("content-security-policy", `${csp}; frame-ancestors 'none'`);
+    }
+    headers.set("x-frame-options", "DENY");
+    headers.set("x-content-type-options", "nosniff");
+    headers.set("referrer-policy", "no-referrer");
+  };
+}
+
 function hostKnown(name: string, policy: AccessPolicy): boolean {
   return (
     (LOOPBACK_HOSTS as readonly string[]).includes(name) ||

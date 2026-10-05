@@ -66,7 +66,7 @@ Usage:
   tenzo pair [--name <name>]             a one-time link and QR code that pairs a phone (or any
                                          browser elsewhere) with this daemon: open it there within
                                          10 minutes (--url <origin>: where the device reaches
-                                         Tenzo, default TENZO_PUBLIC_URL or the allowed host)
+                                         Tenzo, default the daemon's TENZO_PUBLIC_URL)
   tenzo devices                          the paired devices: name, when paired, last seen
   tenzo devices rename <id> <name…>      call a device something else
   tenzo devices revoke <id>              unpair it: its token stops working, its connections close
@@ -84,8 +84,8 @@ Environment:
                        (e.g. its Tailscale Serve name)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
   TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
-  TENZO_PUBLIC_URL     where devices elsewhere reach Tenzo, for tenzo pair's link
-                       (e.g. https://my-mac.tailnet.ts.net:8443)
+  TENZO_PUBLIC_URL     where devices elsewhere reach Tenzo, port included, for tenzo pair's
+                       link (e.g. https://my-mac.tailnet.ts.net:8443); set it for the daemon
   TENZO_SNOOZE_MS      how long a swipe snoozes an item, for trying it out (default 15 minutes)
 `;
 
@@ -358,9 +358,12 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
 
 async function pair(args: string[]): Promise<void> {
   const { options } = parseArgs(args, [], ["--name", "--url"]);
-  const origin = pairingOrigin(config(), options.get("--url"));
+  const flag = options.get("--url");
+  if (flag !== undefined) pairingOrigin(null, flag); // a bad --url fails before a code is made
   const name = options.get("--name");
-  const { code, expiresAt } = await call({ type: "device.pair", ...(name ? { name } : {}) });
+  const paired = await call({ type: "device.pair", ...(name ? { name } : {}) });
+  const { code, expiresAt } = paired;
+  const origin = pairingOrigin(paired.origin, flag);
   const url = pairingUrl(origin, code);
   console.log(`Open this on the device you want to pair${name ? ` (${name})` : ""}:\n`);
   console.log(`  ${url}\n`);

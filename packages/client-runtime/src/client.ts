@@ -253,6 +253,7 @@ export class TenzoClient {
       case "thread":
       case "item":
       case "automations":
+      case "live":
         this.#set(applyFrame(this.#state, frame));
         return;
       case "ok": {

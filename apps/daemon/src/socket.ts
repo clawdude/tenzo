@@ -7,6 +7,7 @@ import {
 } from "@tenzo/contracts";
 import type { WSContext, WSEvents } from "hono/ws";
 import type { WebSocket, WebSocketServer } from "ws";
+import { LIVE_GRANT_RENEW_MS } from "./auth.ts";
 import { type Caller, executeCommand } from "./commands.ts";
 import type { Devices } from "./devices.ts";
 import type { Engine, EngineChange } from "./engine.ts";
@@ -29,6 +30,8 @@ export interface SocketOptions {
   devices?: Devices | undefined;
   /** Who opened the socket (app.ts); its commands run as them. */
   caller?: Caller | undefined;
+  /** How often a paired device's socket gets a fresh Open live grant (auth.ts). */
+  liveGrantRenewMs?: number | undefined;
   log?: (message: string) => void;
 }
 
@@ -51,11 +54,14 @@ export function socketHandlers({
   engine,
   devices,
   caller,
+  liveGrantRenewMs = LIVE_GRANT_RENEW_MS,
   log = (message) => console.error(`tenzo: ${message}`),
 }: SocketOptions): WSEvents {
   let unsubscribe: (() => void) | undefined;
   /** Unregisters the socket from its device's open connections. */
   let untrack: (() => void) | undefined;
+  /** Renews a paired device's Open live grant while the socket is open. */
+  let renew: ReturnType<typeof setInterval> | undefined;
   /** Threads this socket watches: it gets their new events (`thread.watch`). */
   const watching = new Set<string>();
 
@@ -118,6 +124,14 @@ export function socketHandlers({
           snapshot.live = { ...snapshot.live, grant: devices.liveGrant(device.id) };
         }
         send(ws, { type: "snapshot", snapshot });
+        if (snapshot.live && device && devices) {
+          // The grant is short-lived (a shared link soon expires): a fresh one well before it does.
+          renew = setInterval(() => {
+            const live = engine.live;
+            if (live) send(ws, { type: "live", live: { ...live, grant: devices.liveGrant(device.id) } });
+          }, liveGrantRenewMs);
+          renew.unref();
+        }
       } catch (error) {
         log(`couldn't send a snapshot: ${String(error)}`);
         send(ws, { type: "error", id: null, error: `No snapshot: ${String(error)}` });
@@ -160,6 +174,7 @@ export function socketHandlers({
         .catch((error: unknown) => log(`couldn't answer command ${id}: ${String(error)}`));
     },
     onClose() {
+      clearInterval(renew);
       untrack?.();
       untrack = undefined;
       unsubscribe?.();
