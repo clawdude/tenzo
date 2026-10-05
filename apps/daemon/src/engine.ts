@@ -572,6 +572,11 @@ export class Engine {
     this.#liveInfo = live;
   }
 
+  /** Where threads' live apps are served, if anywhere. */
+  get live(): LiveInfo | null {
+    return this.#liveInfo;
+  }
+
   /**
    * A thread's events after `after`; with `limit`, only the latest `limit` of those before
    * `before`, and whether there are earlier ones.

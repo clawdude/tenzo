@@ -26,7 +26,10 @@ export default defineConfig({
 			'/health': `http://${daemon}`,
 			'/ws': { target: `ws://${daemon}`, ws: true },
 			// Screenshots. Threads' live apps are on the daemon's live port, linked directly.
-			'/api/attachments': `http://${daemon}`
+			'/api/attachments': `http://${daemon}`,
+			// Who this browser is, and pairing (remote mode).
+			'/api/session': `http://${daemon}`,
+			'/api/pair': `http://${daemon}`
 		}
 	},
 	test: {

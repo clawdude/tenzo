@@ -79,6 +79,12 @@ export type Finished = z.infer<typeof Finished>;
 export const LiveInfo = z.object({
   port: z.number().int().min(1).max(65_535),
   origins: z.array(z.string()),
+  /**
+   * For a paired device: its pass to the live origin, which keeps its own credential (Tenzo's
+   * cookie is never taken there). Open live goes through `/_tenzo/live`, which trades it for the
+   * live origin's cookie. Short-lived, renewed with every snapshot; null on the Mac itself.
+   */
+  grant: z.string().nullable().default(null),
 });
 export type LiveInfo = z.infer<typeof LiveInfo>;
 
@@ -88,7 +94,7 @@ export type LiveInfo = z.infer<typeof LiveInfo>;
  */
 export function liveOriginFor(
   location: { protocol: string; hostname: string },
-  live: LiveInfo | null,
+  live: Pick<LiveInfo, "port" | "origins"> | null,
 ): string | null {
   if (!live) return null;
   const host = location.hostname.toLowerCase();
@@ -106,14 +112,24 @@ export function liveBase(threadId: string): string {
   return `/live/${threadId}/`;
 }
 
-/** The "Open live" link on the live origin: the thread's live base and the page the agent named. */
+/**
+ * The "Open live" link on the live origin: the thread's live base and the page the agent named.
+ * With a `grant` (a paired device), through the live origin's door, which sets its cookie and
+ * sends the browser on to the page.
+ */
 export function liveUrl(
   liveOrigin: string,
   threadId: string,
   preview: Pick<Preview, "path">,
+  grant: string | null = null,
 ): string {
-  return `${liveOrigin}${liveBase(threadId)}${preview.path}`;
+  const page = `${liveBase(threadId)}${preview.path}`;
+  if (!grant) return `${liveOrigin}${page}`;
+  return `${liveOrigin}${LIVE_DOOR}?grant=${encodeURIComponent(grant)}&to=${encodeURIComponent(page)}`;
 }
+
+/** Where the live listener trades a grant for its cookie (`liveUrl`). */
+export const LIVE_DOOR = "/_tenzo/live";
 
 /** Where the daemon serves an attachment's copy. */
 export function attachmentUrl(threadId: string, attachment: Pick<Attachment, "file">): string {

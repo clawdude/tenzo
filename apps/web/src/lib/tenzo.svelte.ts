@@ -5,9 +5,11 @@ import {
 	EMPTY,
 	emptyFeed,
 	type Feed,
+	fetchSession,
 	TenzoClient,
 	type TenzoState
 } from '@tenzo/client-runtime';
+import { grantStale } from './devices.ts';
 import { daemonSocketUrl } from './status.ts';
 
 /**
@@ -32,6 +34,12 @@ class Tenzo {
 	seen = $state(false);
 	/** Connected right now: commands can go. */
 	online = $derived(this.state.connection.state === 'connected');
+	/**
+	 * Who the daemon takes this browser for (PRODUCT.md §9): `unknown` until it says; `local` on the
+	 * Mac itself; `paired`; `unpaired` from elsewhere without a pairing, when the app shows how to
+	 * pair instead of a Pass that can't load (and opens no socket).
+	 */
+	access = $state<'unknown' | 'local' | 'paired' | 'unpaired'>('unknown');
 }
 
 export const tenzo = new Tenzo();
@@ -46,18 +54,77 @@ interface Watcher {
 }
 const watchers = new Set<Watcher>();
 
-/** Opens the connection (the app's layout does, once). Returns the close function. */
+/** Closes the open client, if any. */
+let closeClient: (() => void) | null = null;
+
+/**
+ * Asks the daemon who this browser is, then opens the connection unless it is an unpaired device
+ * from elsewhere (the app's layout does, once). Returns the close function.
+ */
 export function connectTenzo(): () => void {
+	let closed = false;
+	void fetchSession().then((session) => {
+		if (closed) return;
+		if (session?.mode === 'remote' && !session.device) {
+			tenzo.access = 'unpaired';
+			return;
+		}
+		tenzo.access = !session ? 'unknown' : session.mode === 'local' ? 'local' : 'paired';
+		openClient();
+	});
+	return () => {
+		closed = true;
+		closeClient?.();
+	};
+}
+
+/** Just paired (the pair page): connect now. */
+export function resumeTenzo(): void {
+	tenzo.access = 'paired';
+	if (!client) openClient();
+}
+
+function openClient(): void {
 	const opened = new TenzoClient({ url: daemonSocketUrl(location) });
 	client = opened;
+	/** A session check is out: one at a time. */
+	let checking = false;
+	let lastAttempt = 0;
 	const unsubscribe = opened.subscribe((next) => {
 		if (next.synced) tenzo.seen = true;
 		tenzo.state = next;
+		// A socket that keeps failing may be a device that was unpaired (revoked): ask once per
+		// attempt, and show how to pair rather than reconnecting forever.
+		const { state, attempt } = next.connection;
+		if (state === 'reconnecting' && attempt !== lastAttempt && !checking) {
+			lastAttempt = attempt;
+			checking = true;
+			void fetchSession().then((session) => {
+				checking = false;
+				if (session?.mode === 'remote' && !session.device && client === opened) {
+					tenzo.access = 'unpaired';
+					closeClient?.();
+				}
+			});
+		}
 	});
 	// Screens may start watching before the layout connects (children mount first).
 	for (const w of watchers) w.detach = opened.watch(w.threadId, w.listener);
 	opened.connect();
-	return () => {
+	// Back on the page with a stale Open live grant (the socket slept through its renewals): a
+	// new socket now, whose snapshot brings a fresh one before Open live is tapped.
+	const onResume = () => {
+		if (document.visibilityState === 'hidden' || client !== opened) return;
+		const { live, connection } = tenzo.state;
+		if (grantStale(live?.grant, Date.now() + connection.clockOffset)) {
+			opened.connection.wake({ away: Number.POSITIVE_INFINITY });
+		}
+	};
+	document.addEventListener('visibilitychange', onResume);
+	window.addEventListener('pageshow', onResume);
+	closeClient = () => {
+		document.removeEventListener('visibilitychange', onResume);
+		window.removeEventListener('pageshow', onResume);
 		for (const w of watchers) {
 			w.detach?.();
 			w.detach = null;
@@ -65,6 +132,7 @@ export function connectTenzo(): () => void {
 		unsubscribe();
 		opened.close();
 		if (client === opened) client = null;
+		closeClient = null;
 	};
 }
 

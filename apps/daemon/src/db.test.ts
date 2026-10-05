@@ -17,10 +17,13 @@ describe("openDatabase", () => {
     const db = openDatabase(join(tempDir(), "tenzo.db"));
     expect(schemaVersion(db)).toBe(MIGRATIONS.length);
     expect(tables(db)).toEqual([
+      "auth_keys",
       "automation_runs",
       "automations",
+      "devices",
       "events",
       "items",
+      "pairings",
       "projects",
       "prompts",
       "sqlite_sequence",

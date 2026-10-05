@@ -12,7 +12,7 @@ describe("applyFrame", () => {
       projects: [project("app")],
       automations: [automation("old")],
     };
-    const live = { port: 4781, origins: ["https://mac.ts.net:8444"] };
+    const live = { port: 4781, origins: ["https://mac.ts.net:8444"], grant: null };
     const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")], live));
     expect(after).toEqual({
       threads: [thread("b")],
@@ -23,6 +23,12 @@ describe("applyFrame", () => {
       automationsPaused: false,
       automationProblems: [],
     });
+  });
+
+  it("takes a renewed live grant from a live frame, keeping everything else", () => {
+    const before = { ...EMPTY, threads: [thread("a")] };
+    const live = { port: 4781, origins: [], grant: "dev_x.2.sig" };
+    expect(applyFrame(before, { type: "live", live })).toEqual({ ...before, live });
   });
 
   it("keeps the automations: from the snapshot, then each automations frame replaces them whole", () => {

@@ -7,7 +7,9 @@ import {
 } from "@tenzo/contracts";
 import type { WSContext, WSEvents } from "hono/ws";
 import type { WebSocket, WebSocketServer } from "ws";
-import { executeCommand } from "./commands.ts";
+import { LIVE_GRANT_RENEW_MS } from "./auth.ts";
+import { type Caller, executeCommand } from "./commands.ts";
+import type { Devices } from "./devices.ts";
 import type { Engine, EngineChange } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 
@@ -24,8 +26,17 @@ export interface SocketOptions {
   version: string;
   /** Without one, sockets get a hello and nothing else, and commands are refused. */
   engine?: Engine | undefined;
+  /** Paired devices: a device's socket closes when it is revoked. */
+  devices?: Devices | undefined;
+  /** Who opened the socket (app.ts); its commands run as them. */
+  caller?: Caller | undefined;
+  /** How often a paired device's socket gets a fresh Open live grant (auth.ts). */
+  liveGrantRenewMs?: number | undefined;
   log?: (message: string) => void;
 }
+
+/** The close code a revoked device's socket gets. */
+export const REVOKED_CODE = 4401;
 
 /** More unsent bytes than this and the socket is dropped; the client re-snapshots. */
 export const MAX_BUFFERED_BYTES = 4 * 1024 * 1024;
@@ -41,9 +52,16 @@ export function socketHandlers({
   environmentId,
   version,
   engine,
+  devices,
+  caller,
+  liveGrantRenewMs = LIVE_GRANT_RENEW_MS,
   log = (message) => console.error(`tenzo: ${message}`),
 }: SocketOptions): WSEvents {
   let unsubscribe: (() => void) | undefined;
+  /** Unregisters the socket from its device's open connections. */
+  let untrack: (() => void) | undefined;
+  /** Renews a paired device's Open live grant while the socket is open. */
+  let renew: ReturnType<typeof setInterval> | undefined;
   /** Threads this socket watches: it gets their new events (`thread.watch`). */
   const watching = new Set<string>();
 
@@ -83,12 +101,37 @@ export function socketHandlers({
 
   return {
     onOpen(_event, ws) {
+      const device = caller?.device;
+      if (device && devices) {
+        // Revoked: the socket closes now, and is cut a moment later if the other end dawdles.
+        const kick = () => {
+          ws.close(REVOKED_CODE, "This device was unpaired");
+          const raw = ws.raw as Partial<Pick<WebSocket, "terminate">> | undefined;
+          setTimeout(() => raw?.terminate?.(), 1000).unref();
+        };
+        // Revoked between the upgrade's check and now: no socket after all.
+        if (!devices.find(device.id)) return kick();
+        untrack = devices.track(device.id, kick);
+      }
       send(ws, { type: "hello", environmentId, version, serverTime: new Date().toISOString() });
       if (!engine) return;
       // Snapshot and subscription in the same tick: the engine can't change in between, so the
       // client misses nothing and sees nothing twice.
       try {
-        send(ws, { type: "snapshot", snapshot: engine.snapshot() });
+        const snapshot = engine.snapshot();
+        // A paired device's pass to the live origin, for Open live (live.ts).
+        if (snapshot.live && device && devices) {
+          snapshot.live = { ...snapshot.live, grant: devices.liveGrant(device.id) };
+        }
+        send(ws, { type: "snapshot", snapshot });
+        if (snapshot.live && device && devices) {
+          // The grant is short-lived (a shared link soon expires): a fresh one well before it does.
+          renew = setInterval(() => {
+            const live = engine.live;
+            if (live) send(ws, { type: "live", live: { ...live, grant: devices.liveGrant(device.id) } });
+          }, liveGrantRenewMs);
+          renew.unref();
+        }
       } catch (error) {
         log(`couldn't send a snapshot: ${String(error)}`);
         send(ws, { type: "error", id: null, error: `No snapshot: ${String(error)}` });
@@ -116,7 +159,7 @@ export function socketHandlers({
         send(ws, watch(id, command));
         return;
       }
-      void executeCommand(engine, command)
+      void executeCommand(engine, command, { devices, caller })
         .then((outcome) => {
           send(
             ws,
@@ -131,6 +174,9 @@ export function socketHandlers({
         .catch((error: unknown) => log(`couldn't answer command ${id}: ${String(error)}`));
     },
     onClose() {
+      clearInterval(renew);
+      untrack?.();
+      untrack = undefined;
       unsubscribe?.();
       unsubscribe = undefined;
       watching.clear();

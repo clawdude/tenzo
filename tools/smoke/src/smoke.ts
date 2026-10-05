@@ -1,5 +1,6 @@
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
 import type { AddressInfo } from "node:net";
 import { homedir, tmpdir } from "node:os";
@@ -415,6 +416,92 @@ async function heldPlace(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/** A command to the daemon from this Mac (no login), its result. */
+async function local<T>(base: string, command: unknown): Promise<T> {
+  const answer = (await (
+    await fetch(`${base}/api/commands`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(command),
+    })
+  ).json()) as { ok: boolean; result?: T; error?: string };
+  if (!answer.ok) throw new Error(`${JSON.stringify(command)}: ${answer.error}`);
+  return answer.result as T;
+}
+
+/**
+ * Remote mode (PRODUCT.md §9): the app reached by a name that isn't loopback, as through
+ * Tailscale Serve. `pair.localhost` resolves to this Mac and is a secure context, so the
+ * `__Host-` cookie sticks without HTTPS. Unpaired, it shows how to pair and opens no socket; a
+ * pairing link lands on the Pass; revoking the device from the Mac sends it back to pairing.
+ */
+async function remote(browser: Browser, base: string, remoteBase: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    await page.goto(`${remoteBase}/`);
+    await page.getByTestId("pair-device").waitFor();
+    if (seen.sockets !== 0) problems.push(`an unpaired device opened ${seen.sockets} WebSockets`);
+    const { code } = await local<{ code: string }>(base, { type: "device.pair", name: "Smoke phone" });
+    await page.goto(`${remoteBase}/pair#${code}`);
+    await page.getByTestId("pass").waitFor();
+    if (page.url() !== `${remoteBase}/`) problems.push(`paired, it landed on ${page.url()}`);
+    const cookie = (await context.cookies()).find((c) => c.name === "__Host-tenzo");
+    if (!cookie?.httpOnly || !cookie.secure || cookie.sameSite !== "Strict") {
+      problems.push(`the device cookie was ${JSON.stringify(cookie)}`);
+    }
+    const { devices: paired } = await local<{ devices: { id: string; name: string }[] }>(base, {
+      type: "device.list",
+    });
+    const phone = paired.find((d) => d.name === "Smoke phone");
+    if (!phone) throw new Error("the paired device isn't listed");
+    await local(base, { type: "device.revoke", deviceId: phone.id });
+    await page.getByTestId("pair-device").waitFor();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
+/**
+ * Clickjacking: a page on another port of the same host (as a live page is: same site, cookies
+ * ignore ports) puts the Pass in an iframe. The daemon's `frame-ancestors 'none'` must keep it
+ * from rendering there. The decoy is served by a plain server on a free loopback port.
+ */
+async function framed(browser: Browser, base: string): Promise<string[]> {
+  const decoy = createHttpServer((_req, res) => {
+    res.writeHead(200, { "content-type": "text/html" });
+    res.end(`<!doctype html><title>decoy</title><iframe src="${base}/" style="width:390px;height:700px"></iframe>`);
+  });
+  await new Promise<void>((done) => decoy.listen(0, "127.0.0.1", done));
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const problems: string[] = [];
+  try {
+    await page.goto(`http://127.0.0.1:${(decoy.address() as AddressInfo).port}/`);
+    const frame = page.frames().find((f) => f !== page.mainFrame());
+    if (!frame) throw new Error("the decoy has no frame");
+    // Long enough for the Pass to have drawn, had it loaded.
+    await sleep(2000);
+    const rendered = await frame
+      .locator('[data-testid="pass"], [data-testid="pair-device"]')
+      .count()
+      .catch(() => 0);
+    if (rendered > 0) problems.push(`the Pass rendered inside the decoy's frame (${frame.url()})`);
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+    decoy.close();
+  }
+  return problems;
+}
+
 async function main(): Promise<number> {
   if (!existsSync(join(WEB_DIR, "index.html"))) {
     console.error("No web build. Run `pnpm --filter @tenzo/web build` first (`pnpm smoke` does).");
@@ -428,6 +515,9 @@ async function main(): Promise<number> {
     TENZO_PORT: String(port),
     // Its own free port too: the next one up may be taken.
     TENZO_LIVE_PORT: String(await freePort()),
+    // Remote mode, without HTTPS: a name that isn't loopback, whose plain-http page may call.
+    TENZO_ALLOWED_HOSTS: "pair.localhost",
+    TENZO_DEV_ORIGIN: `http://pair.localhost:${port}`,
   };
   let daemon: { stop: () => Promise<void> } | undefined;
   let browser: Browser | undefined;
@@ -463,6 +553,11 @@ async function main(): Promise<number> {
       ["a long timeline holds your place as the full feed moves on", () => heldPlace(launched, base)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
+      ["a page on another port (a live page) can't frame the Pass", () => framed(launched, base)],
+      [
+        "from elsewhere: how to pair, a pairing link lands on the Pass, revoked goes back to pairing",
+        () => remote(launched, base, `http://pair.localhost:${port}`),
+      ],
     ];
     let failed = false;
     for (const [name, check] of checks) {

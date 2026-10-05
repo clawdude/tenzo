@@ -220,6 +220,39 @@ export const MIGRATIONS: readonly Migration[] = [
       CREATE UNIQUE INDEX automation_runs_by_thread ON automation_runs (thread_id);
     `,
   },
+  {
+    name: "paired devices",
+    sql: `
+      -- Devices that reach the daemon from elsewhere (auth.ts, devices.ts). Only hashes of
+      -- their tokens are kept: a copy of this database lets nobody in.
+      CREATE TABLE devices (
+        id             TEXT PRIMARY KEY,
+        environment_id TEXT NOT NULL,
+        name           TEXT NOT NULL,
+        token_hash     TEXT NOT NULL UNIQUE,  -- sha256 of the device's token (its cookie), hex
+        created_at     TEXT NOT NULL,
+        last_seen_at   TEXT,
+        revoked_at     TEXT                   -- set: the token no longer works
+      ) STRICT;
+
+      -- One-time pairing links (tenzo pair): short-lived, single use, by the code's hash.
+      CREATE TABLE pairings (
+        code_hash      TEXT PRIMARY KEY,
+        environment_id TEXT NOT NULL,
+        name           TEXT,                  -- what tenzo pair --name called the device
+        created_at     TEXT NOT NULL,
+        expires_at     TEXT NOT NULL,
+        used_at        TEXT,
+        device_id      TEXT REFERENCES devices(id)
+      ) STRICT;
+
+      -- The key live-origin passes are signed with (auth.ts): random, made once, never sent.
+      CREATE TABLE auth_keys (
+        name           TEXT PRIMARY KEY,
+        key            BLOB NOT NULL
+      ) STRICT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

@@ -61,6 +61,8 @@ export function applyFrame(data: Data, frame: ServerFrame): Data {
         automationsPaused: frame.paused,
         automationProblems: frame.problems,
       };
+    case "live":
+      return { ...data, live: frame.live };
     case "thread": {
       const threads = put(data.threads, frame.thread, frame.thread.status === "active");
       return threads === data.threads ? data : { ...data, threads };

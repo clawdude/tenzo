@@ -210,7 +210,7 @@ export function snapshotFrame(
   threads: ThreadView[],
   items: QueueItem[],
   projects: ProjectView[] = [],
-  live: { port: number; origins: string[] } | null = null,
+  live: { port: number; origins: string[]; grant: string | null } | null = null,
 ) {
   return {
     type: "snapshot",

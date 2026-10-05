@@ -7,12 +7,25 @@ import {
   type CommandResponse,
   type EnvironmentId,
   type Health,
+  PairRequest,
+  type PairResponse,
+  pairingCode,
+  type Session,
 } from "@tenzo/contracts";
 import { type Context, Hono } from "hono";
 import pkg from "../package.json" with { type: "json" };
-import { accessGuard } from "./access.ts";
+import { accessGuard, securityHeaders } from "./access.ts";
 import { storedAttachment } from "./attachments.ts";
-import { executeCommand } from "./commands.ts";
+import {
+  DEVICE_COOKIE,
+  deviceCookie,
+  factsOf,
+  fromOwnPage,
+  readCookies,
+  requestMode,
+} from "./auth.ts";
+import { type Caller, executeCommand } from "./commands.ts";
+import { type Devices, nameFromUserAgent } from "./devices.ts";
 import type { Engine } from "./engine.ts";
 import { markDaemon } from "./live.ts";
 import { socketHandlers } from "./socket.ts";
@@ -29,6 +42,31 @@ export interface AppOptions {
   allowedHosts?: readonly string[];
   /** Dev servers whose pages may call (access.ts). */
   devOrigins?: readonly string[];
+  /** Paired devices (devices.ts). Without them, nothing from elsewhere gets in. */
+  devices?: Devices | undefined;
+  /** How often a paired device's socket gets a fresh Open live grant; tests shorten it. */
+  liveGrantRenewMs?: number | undefined;
+}
+
+/** What a request carries through the app: who asked (set for the API and /ws). */
+export type AppEnv = { Variables: { caller: Caller | undefined } };
+
+const UNPAIRED =
+  "This device isn't paired with Tenzo. On the Mac, run `tenzo pair` and open its link here.";
+
+/**
+ * Who is asking (auth.ts): the Mac itself, or a paired device by its cookie, taken only from
+ * Tenzo's own pages. Null: from elsewhere, and not paired.
+ */
+function callerOf(c: Context, devices: Devices | undefined): Caller | null {
+  if (requestMode(factsOf(c)) === "local") return { mode: "local", device: null };
+  if (!devices || !fromOwnPage(c.req.header("sec-fetch-site"))) return null;
+  // Every value under the name: a cookie planted beside ours must not shadow the one that verifies.
+  for (const token of readCookies(c.req.header("cookie"), DEVICE_COOKIE)) {
+    const device = devices.authenticate(token);
+    if (device) return { mode: "remote", device };
+  }
+  return null;
 }
 
 /**
@@ -44,10 +82,14 @@ export function createApp({
   engine,
   allowedHosts = [],
   devOrigins = [],
-}: AppOptions): Hono {
-  const app = new Hono();
+  devices,
+  liveGrantRenewMs,
+}: AppOptions): Hono<AppEnv> {
+  const app = new Hono<AppEnv>();
 
   app.use("*", markDaemon());
+  // No page frames the Pass: not a live page, not any website (access.ts).
+  app.use("*", securityHeaders());
   app.use(
     "*",
     accessGuard(
@@ -55,6 +97,19 @@ export function createApp({
       (path) => path === "/ws" || path.startsWith("/api/"),
     ),
   );
+  // Remote mode (auth.ts): the API, attachments and /ws only for a paired device. The web app's
+  // files hold no data and stay open, so an unpaired phone gets the page that says how to pair.
+  app.use("*", async (c, next) => {
+    const path = c.req.path;
+    if (path !== "/ws" && !path.startsWith("/api/")) return next();
+    const caller = callerOf(c, devices);
+    c.set("caller", caller ?? undefined);
+    if (!caller && path !== "/api/session" && path !== "/api/pair") {
+      if (path === "/ws") return c.text(`${UNPAIRED}\n`, 401);
+      return c.json({ ok: false, error: UNPAIRED } satisfies CommandResponse, 401);
+    }
+    await next();
+  });
 
   app.get("/health", (c) => c.json({ ok: true, version: VERSION, environmentId } satisfies Health));
 
@@ -66,7 +121,6 @@ export function createApp({
     if (mediaType !== "application/json") {
       return fail("Send the command as application/json.", 415);
     }
-    if (!engine) return fail("This daemon runs no threads.", 503);
     let body: unknown;
     try {
       body = await c.req.json();
@@ -78,10 +132,70 @@ export function createApp({
       const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`);
       return fail(`Not a command: ${issues.join("; ")}`, 400);
     }
-    const outcome = await executeCommand(engine, parsed.data);
+    if (!engine && !parsed.data.type.startsWith("device.")) {
+      return fail("This daemon runs no threads.", 503);
+    }
+    const outcome = await executeCommand(engine, parsed.data, { devices, caller: c.var.caller });
     if (outcome.ok) return c.json({ ok: true, result: outcome.result } satisfies CommandResponse);
     return fail(outcome.error, outcome.fault === "client" ? 400 : 500);
   });
+  // Who this browser is to the daemon: on the Mac, a paired device, or neither (then the web app
+  // shows how to pair). Open to all; it says nothing else.
+  app.get("/api/session", (c) => {
+    const session: Session = {
+      mode: requestMode(factsOf(c)),
+      device: c.var.caller?.device ?? null,
+    };
+    return c.json(session, 200, { "Cache-Control": "no-store" });
+  });
+
+  // A pairing link's code for this browser's own token, as a cookie (auth.ts). A POST from the
+  // page, never the link's GET: the code is in the link's fragment, which no request carries.
+  app.post("/api/pair", async (c) => {
+    const fail = (
+      error: string,
+      status: 400 | 415 | 429 | 503,
+      headers: Record<string, string> = {},
+    ) =>
+      c.json({ ok: false, error } satisfies PairResponse, status, {
+        "Cache-Control": "no-store",
+        ...headers,
+      });
+    const mediaType = c.req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
+    if (mediaType !== "application/json") return fail("Send the code as application/json.", 415);
+    if (!devices) return fail("This daemon pairs no devices.", 503);
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return fail("The body is not JSON.", 400);
+    }
+    const parsed = PairRequest.safeParse(body);
+    const code = parsed.success ? pairingCode(parsed.data.code) : null;
+    const name = parsed.data?.name ?? nameFromUserAgent(c.req.header("user-agent"));
+    // The exchange first: a good code always pairs, however many bad ones a peer keeps sending.
+    // Only failures are limited.
+    const paired = code ? devices.exchange(code, name) : null;
+    if (!paired) {
+      if (devices.pairingAttempts.blocked()) {
+        return fail(
+          "Too many failed pairing attempts. On the Mac, run `tenzo pair` for a new link (that lifts this), or wait a minute.",
+          429,
+          { "Retry-After": String(devices.pairingAttempts.retryAfter()) },
+        );
+      }
+      devices.pairingAttempts.fail();
+      return fail(
+        "This pairing link has expired or was already used. On the Mac, run `tenzo pair` for a new one.",
+        400,
+      );
+    }
+    return c.json({ ok: true, device: paired.device } satisfies PairResponse, 200, {
+      "Set-Cookie": deviceCookie(paired.token),
+      "Cache-Control": "no-store",
+    });
+  });
+
   // A screenshot an agent attached: only the daemon's own copies, by well-formed names
   // (attachments.ts), served so that nothing in one can run: images only, never sniffed, and a
   // sandbox if one is opened on its own.
@@ -112,7 +226,16 @@ export function createApp({
   // The access guard above has already refused a foreign Host or Origin before any upgrade.
   app.get(
     "/ws",
-    upgradeWebSocket(() => socketHandlers({ environmentId, version: VERSION, engine })),
+    upgradeWebSocket((c) =>
+      socketHandlers({
+        environmentId,
+        version: VERSION,
+        engine,
+        devices,
+        caller: c.var.caller,
+        liveGrantRenewMs,
+      }),
+    ),
   );
 
   // SvelteKit content-hashes everything under _app/immutable; everything else must revalidate.

@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AutomationsState } from "./automations.ts";
 import { Command, Snapshot } from "./commands.ts";
+import { LiveInfo } from "./finished.ts";
 import { EnvironmentId } from "./ids.ts";
 import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
 
@@ -64,6 +65,14 @@ export const ServerItem = z.object({
 export const ServerAutomations = AutomationsState.extend({
   type: z.literal("automations"),
 });
+/**
+ * Where threads' live apps are, again: sent now and then to a paired device so its Open live
+ * grant (`LiveInfo.grant`, short-lived) never runs out while the socket stays open.
+ */
+export const ServerLive = z.object({
+  type: z.literal("live"),
+  live: LiveInfo,
+});
 /** One new event of a thread this socket watches (`thread.watch`). */
 export const ServerEvent = z.object({
   type: z.literal("event"),
@@ -92,6 +101,7 @@ export const ServerFrame = z.discriminatedUnion("type", [
   ServerThread,
   ServerItem,
   ServerAutomations,
+  ServerLive,
   ServerEvent,
   ServerOk,
   ServerError,

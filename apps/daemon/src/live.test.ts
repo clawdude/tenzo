@@ -16,7 +16,7 @@ import { checkPort, livePath, outsideBase } from "./live.ts";
 import { addProject } from "./projects.ts";
 import { type RunningDaemon, startDaemon } from "./server.ts";
 import { openStore } from "./store.ts";
-import { initRepo, removeTempDirs, tempDir } from "./testing.ts";
+import { initRepo, pairDevice, removeTempDirs, tempDir } from "./testing.ts";
 
 afterAll(removeTempDirs);
 
@@ -174,8 +174,12 @@ describe("live: HTTP", () => {
     expect(res.headers.get("location")).toBe(liveBase(thread.id));
   });
 
-  it("works through Tailscale Serve's host and origin", async () => {
-    expect(await get(`${liveBase(thread.id)}x`, { host: `${TS}:8444`, origin: LIVE_TS })).toBe(200);
+  it("works through Tailscale Serve's host and origin, for a paired device", async () => {
+    const { id } = pairDevice(daemon.devices);
+    const cookie = `__Host-tenzo-live=${daemon.devices.livePass(id).pass}`;
+    const path = `${liveBase(thread.id)}x`;
+    expect(await get(path, { host: `${TS}:8444`, origin: LIVE_TS, cookie })).toBe(200);
+    expect(await get(path, { host: `${TS}:8444`, origin: LIVE_TS })).toBe(401);
   });
 
   it("refuses a foreign host or origin, like every other route", async () => {
@@ -277,7 +281,11 @@ describe("live: an origin of its own", () => {
 
   it("is on another port, published in the snapshot for Open live", () => {
     expect(daemon.livePort).not.toBe(daemon.port);
-    expect(daemon.engine.snapshot().live).toEqual({ port: daemon.livePort, origins: [LIVE_TS] });
+    expect(daemon.engine.snapshot().live).toEqual({
+      port: daemon.livePort,
+      origins: [LIVE_TS],
+      grant: null,
+    });
   });
 
   it("a live page can't call Tenzo's API: the daemon refuses its origin", async () => {
@@ -376,7 +384,7 @@ describe("attachments", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toBe("image/png");
     expect(res.headers.get("x-content-type-options")).toBe("nosniff");
-    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox");
+    expect(res.headers.get("content-security-policy")).toBe("default-src 'none'; sandbox; frame-ancestors 'none'");
     expect(Buffer.from(await res.arrayBuffer())).toEqual(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
   });
 

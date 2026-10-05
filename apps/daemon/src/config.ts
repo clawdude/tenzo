@@ -31,6 +31,12 @@ export interface DaemonConfig {
    */
   allowedHosts: string[];
   /**
+   * Where devices elsewhere reach Tenzo, e.g. the Tailscale Serve route
+   * `https://my-mac.tailnet.ts.net:8443`, port included: the daemon gives it to `tenzo pair` for
+   * its links. `TENZO_PUBLIC_URL`; unset, `tenzo pair` needs `--url` (no guessing a port).
+   */
+  publicUrl?: string;
+  /**
    * Origins of dev servers whose pages may call the API and open `/ws`, e.g. Vite's
    * `http://localhost:5173` (`pnpm dev` sets it). `TENZO_DEV_ORIGIN`, comma-separated.
    */
@@ -67,9 +73,18 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     webDir: resolve(env.TENZO_WEB_DIR || DEFAULT_WEB_DIR),
     allowedHosts: readHosts(env.TENZO_ALLOWED_HOSTS),
     devOrigins: readOrigins(env.TENZO_DEV_ORIGIN, "TENZO_DEV_ORIGIN", "http://localhost:5173"),
+    ...publicUrl(env.TENZO_PUBLIC_URL),
     ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
     ...(env.TENZO_SNOOZE_MS?.trim() ? { snoozeMs: readSnooze(env.TENZO_SNOOZE_MS.trim()) } : {}),
   };
+}
+
+function publicUrl(raw: string | undefined): { publicUrl?: string } {
+  const [origin, ...more] = readOrigins(raw, "TENZO_PUBLIC_URL", "https://my-mac.tailnet.ts.net:8443");
+  if (more.length > 0) {
+    throw new Error(`TENZO_PUBLIC_URL takes one origin, like https://my-mac.tailnet.ts.net:8443, got "${raw}"`);
+  }
+  return origin ? { publicUrl: origin } : {};
 }
 
 function readSnooze(raw: string): number {
