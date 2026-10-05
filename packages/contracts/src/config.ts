@@ -76,11 +76,22 @@ export function durationMs(text: string): number | null {
   return Number(match[1]) * (DURATION_UNITS[match[2] ?? ""] ?? 0);
 }
 
-/** A run's wall-clock budget: from a minute to a week. */
+/**
+ * The bounds on a run's budget. A file in the repo sets it, so it may set at most these; you go
+ * further yourself, with Continue on the run's budget card. Unset, a run gets the defaults.
+ */
+export const RUN_BUDGET = {
+  defaultWallClockMs: 60 * 60_000,
+  defaultCostUsd: 2,
+  maxWallClockMs: 24 * 60 * 60_000,
+  maxCostUsd: 20,
+} as const;
+
+/** A run's wall-clock budget: from a minute to a day. */
 export const BudgetDuration = z.string().refine((text) => {
   const ms = durationMs(text);
-  return ms !== null && ms >= 60_000 && ms <= 7 * 86_400_000;
-}, 'must be a duration like "30m", "2h" or "1d", from 1m to 7d');
+  return ms !== null && ms >= 60_000 && ms <= RUN_BUDGET.maxWallClockMs;
+}, 'must be a duration like "30m", "2h" or "1d", from 1m to 24h');
 
 /**
  * When it runs by itself. No schedule: only when you run it (`tenzo automation run`, Run now).
@@ -104,13 +115,16 @@ export type AutomationTrigger = z.infer<typeof AutomationTrigger>;
 
 /**
  * What one run may use before it pauses and asks you (a quick-lane card: Continue with as much
- * again, or Stop). Never a kill.
+ * again, from then, or Stop). Never a kill. Each one unset is its default: 1h and $2.
  */
 export const AutomationBudget = z.strictObject({
-  /** From when the run starts until it finishes. */
+  /** From when the run starts until it finishes: at most 24h. */
   wallClock: BudgetDuration.optional(),
-  /** What Claude reports the run's session spent, in USD (an estimate, as `/cost` shows). */
-  costUsd: z.number().positive().max(1_000).optional(),
+  /**
+   * What Claude reports the run's session spent, in USD (an estimate, as `/cost` shows): at most
+   * $20.
+   */
+  costUsd: z.number().positive().max(RUN_BUDGET.maxCostUsd).optional(),
 });
 export type AutomationBudget = z.infer<typeof AutomationBudget>;
 

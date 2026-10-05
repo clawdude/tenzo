@@ -231,6 +231,8 @@ export class FakeSession implements AgentSession {
   ): void {
     if (!this.turnId) throw new Error("no turn to complete");
     this.emit({ type: "turn.completed", turnId: this.turnId, payload: { state, ...usage } });
+    // Like Claude's adapter: a stop at the spend cap leaves nothing waiting on its requests.
+    if (usage.stoppedBy === "budget") this.#cancelPending();
     this.turnId = null;
   }
 
@@ -293,6 +295,11 @@ export class FakeSession implements AgentSession {
   }
 
   async interrupt(): Promise<void> {
+    this.#cancelPending();
+    if (this.turnId) this.complete("interrupted");
+  }
+
+  #cancelPending(): void {
     for (const [requestId, kind] of this.pending) {
       const turn = this.#inTurn();
       this.emit(
@@ -304,7 +311,6 @@ export class FakeSession implements AgentSession {
       );
     }
     this.pending.clear();
-    if (this.turnId) this.complete("interrupted");
   }
 
   /** Set by a test: `stop` never finishes (a process that won't end). */

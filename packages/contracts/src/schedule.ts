@@ -4,19 +4,23 @@
  * show what a schedule means.
  *
  * Forms:
- * - `every 15m`, `every 2h`, `every 1d`: a fixed interval (at least a minute, at most 30 days),
- *   counted from when it last ran (or from when its schedule started). Time zones and daylight
- *   saving don't move it.
+ * - `every 15m`, `every 2h`, `every 1d`: a fixed interval (at least 5 minutes, at most 30
+ *   days), counted from when it last ran (or from when its schedule started). Time zones and
+ *   daylight saving don't move it.
  * - `hourly`: `0 * * * *`. `daily 09:00`: every day at that time on the clock. `weekdays 09:00`:
  *   Monday to Friday.
  * - A cron line of five fields, `minute hour day-of-month month day-of-week`: numbers, `*`,
  *   ranges `a-b`, steps `*\/n` and `a-b/n`, lists `a,b`; day-of-week 0–7 (0 and 7 are Sunday).
- *   As in cron, a day matches when both day fields are restricted and either one matches.
+ *   The two day fields combine as in Vixie cron (and cronie): when either one starts with `*`
+ *   (`*`, `*\/2`) a day must match both; when neither does, a day matching either one is enough.
+ *   The daemon starts scheduled runs at most every 5 minutes whatever the line says.
  *
  * Clock times are read in a time zone (IANA, e.g. `Europe/Rome`; default the machine's). A time
  * that doesn't exist on a spring-forward day runs as the clocks jump past it (02:30 runs at
  * 03:30), and a time that happens twice on a fall-back day runs once, the first time; this is
- * Temporal's "compatible" choice.
+ * Temporal's "compatible" choice. So `hourly` skips the repeated hour on a fall-back night, a
+ * two-hour gap: in Rome on 2026-10-25 it runs at 02:00 CEST (00:00Z), then at 03:00 CET
+ * (02:00Z). `every 1h` doesn't.
  */
 
 export type Schedule =
@@ -29,7 +33,7 @@ export interface CronFields {
   days: ReadonlySet<number>;
   months: ReadonlySet<number>;
   weekdays: ReadonlySet<number>;
-  /** Day-of-month and day-of-week were both restricted: a day matches either. */
+  /** Neither day field starts with `*` (Vixie cron): a day matches either; else both. */
   either: boolean;
 }
 
@@ -37,6 +41,8 @@ export interface CronFields {
 export const MAX_SCHEDULE_LENGTH = 100;
 
 const MINUTE = 60_000;
+/** The shortest interval between an automation's scheduled runs (the daemon holds cron to it). */
+export const MIN_SCHEDULE_GAP_MS = 5 * MINUTE;
 const DAY = 24 * 60 * MINUTE;
 const UNITS: Record<string, number> = { m: MINUTE, h: 60 * MINUTE, d: DAY };
 const MAX_EVERY = 30 * DAY;
@@ -49,7 +55,7 @@ export function parseSchedule(input: string): Schedule | string {
   const every = /^every (\d{1,5}) ?(m|h|d)$/i.exec(text);
   if (every) {
     const ms = Number(every[1]) * (UNITS[every[2]!.toLowerCase()] ?? MINUTE);
-    if (ms < MINUTE) return "runs at most every minute (every 1m)";
+    if (ms < MIN_SCHEDULE_GAP_MS) return "runs at most every 5 minutes (every 5m)";
     if (ms > MAX_EVERY) return "runs at least every 30 days (every 30d)";
     return { kind: "every", text, ms };
   }
@@ -89,7 +95,8 @@ function cronSchedule(text: string, line: string): Schedule | string {
     months: new Set(months),
     // 7 is Sunday too.
     weekdays: new Set(weekdays!.map((d) => d % 7)),
-    either: day !== "*" && weekday !== "*",
+    // Vixie's DOM_STAR / DOW_STAR: a field that starts with `*` (`*/2` too) doesn't widen.
+    either: !day.startsWith("*") && !weekday.startsWith("*"),
   };
   // A line that never comes (the 31st of February) is no schedule.
   if (nextCron(cron, "UTC", Date.UTC(2024, 0, 1)) === null) return "never comes (no such day)";

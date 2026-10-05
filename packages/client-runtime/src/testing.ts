@@ -196,6 +196,6 @@ export function snapshotFrame(
 ) {
   return {
     type: "snapshot",
-    snapshot: { environmentId, threads, items, projects, live, automations: [] as AutomationView[] },
+    snapshot: { environmentId, threads, items, projects, live, automations: [] as AutomationView[], automationsPaused: false },
   } as const;
 }

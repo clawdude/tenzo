@@ -556,6 +556,22 @@ describe("Claude adapter: permission requests", () => {
     await session.stop();
   });
 
+  it("cancels open requests when Claude stops the turn at its spend cap", async () => {
+    let answer: PermissionResult | null = null;
+    const { session, events } = start(async function* (turn) {
+      const asked = turn.canUseTool("Write", { file_path: "notes.md", content: "x" }, "toolu_w");
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      yield result({ subtype: "error_max_budget_usd", is_error: true, errors: ["budget"] } as never);
+      answer = await asked;
+    });
+    session.sendTurn("write notes");
+    await events.until("request.opened");
+    expect((await events.until("turn.completed")).payload).toMatchObject({ stoppedBy: "budget" });
+    expect((await events.until("request.resolved")).payload).toEqual({ decision: "cancel" });
+    await session.stop();
+    expect(answer).toMatchObject({ behavior: "deny" });
+  });
+
   it("keeps a bounded copy of the input on the event; Claude gets the full input back", async () => {
     const big = { file_path: "/etc/hosts", content: "1.2.3.4 x\n".repeat(1000) };
     let answer: PermissionResult | null = null;

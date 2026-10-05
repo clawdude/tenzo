@@ -103,14 +103,18 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("automation.list"), project: z.string().min(1).optional() }),
   /**
    * Runs an automation now (Run now): an ordinary thread on its prompt, unless its previous run
-   * is still going (then the run is recorded as skipped). Running it by hand is also what turns
-   * its schedule on for this definition (`AutomationView.approved`).
+   * is still going (then the run is recorded as skipped).
    */
   z.object({
     type: z.literal("automation.run"),
     project: z.string().min(1),
     name: z.string().min(1).max(100),
   }),
+  /**
+   * The off switch, kept in Tenzo's home (never in a repo): `paused` true, no schedule starts a
+   * run (running one by hand still does) until it is false again.
+   */
+  z.object({ type: z.literal("automation.pause"), paused: z.boolean() }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -126,6 +130,8 @@ export const Snapshot = z.object({
   live: LiveInfo.nullable().default(null),
   /** The projects' automations, by project and name: next run and last run. */
   automations: z.array(AutomationView).default([]),
+  /** The off switch (`automation.pause`): no schedule starts a run while it is on. */
+  automationsPaused: z.boolean().default(false),
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 
@@ -172,7 +178,8 @@ export const CommandResults = {
   }),
   "item.snooze": z.object({ item: QueueItem, thread: ThreadView }),
   "item.unsnooze": z.object({ item: QueueItem, thread: ThreadView }),
-  "automation.list": z.object({ automations: z.array(AutomationView) }),
+  "automation.list": z.object({ automations: z.array(AutomationView), paused: z.boolean() }),
+  "automation.pause": z.object({ paused: z.boolean() }),
   "automation.run": z.object({
     automation: AutomationView,
     run: AutomationRunView,

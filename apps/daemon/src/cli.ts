@@ -51,8 +51,9 @@ Usage:
                                          finished work; merge, or what first, for a ready PR
   tenzo automation list [<project>]      the automations the projects' .tenzo/config.json define:
                                          schedule, next run, last run
-  tenzo automation run <project> <name>  run one now (a thread, origin automation); running it
-                                         by hand also turns its schedule on for this definition
+  tenzo automation run <project> <name>  run one now (a thread, origin automation)
+  tenzo automation pause | resume        the off switch, kept in TENZO_HOME: while paused, no
+                                         schedule starts a run (running one by hand still works)
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -265,7 +266,7 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
     case "list":
     case "ls": {
       const [projectRef] = positional;
-      const { automations } = await call({
+      const { automations, paused } = await call({
         type: "automation.list",
         ...(projectRef ? { project: projectRef } : {}),
       });
@@ -273,11 +274,22 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
         for (const a of automations) console.log(JSON.stringify(a));
         return;
       }
+      if (paused) console.log("Automations are paused: no schedule starts a run (`tenzo automation resume`).\n");
       if (automations.length === 0) {
         console.log("No automations. A project defines them under `automations` in .tenzo/config.json.");
         return;
       }
       printTable(automations.map((a) => [a.projectName, a.name, scheduleCell(a), lastRunCell(a)]));
+      return;
+    }
+    case "pause":
+    case "resume": {
+      const { paused } = await call({ type: "automation.pause", paused: sub === "pause" });
+      console.log(
+        paused
+          ? "Automations paused: no schedule starts a run until `tenzo automation resume` (running one by hand still works)."
+          : "Automations resumed: schedules start runs again.",
+      );
       return;
     }
     case "run": {
@@ -307,7 +319,6 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
 function scheduleCell(a: AutomationView): string {
   if (!a.schedule) return "run by hand";
   if (!a.enabled) return `${a.schedule} (switched off)`;
-  if (!a.approved) return `${a.schedule} (waits for a run by hand)`;
   return `${a.schedule}${a.nextRunAt ? `, next ${localTime(a.nextRunAt)}` : ""}`;
 }
 

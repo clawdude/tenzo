@@ -20,10 +20,11 @@ export const AutomationRunView = z.object({
   reason: z.string().nullable(),
   threadId: ThreadId.nullable(),
   /**
-   * Where a started run is: `going` (working, or waiting on you), `paused` (its budget ran out:
-   * a card asks), `finished` (its agent is done), `archived`. Null for one that didn't start.
+   * Where a started run is: `going` (working, or landing), `waiting` (on you: a question, a
+   * permission, a proposal, an error card), `paused` (its budget ran out: a card asks),
+   * `finished` (its agent is done), `archived`. Null for one that didn't start.
    */
-  state: z.enum(["going", "paused", "finished", "archived"]).nullable(),
+  state: z.enum(["going", "waiting", "paused", "finished", "archived"]).nullable(),
   /** What its session spent so far, as Claude reports it (USD); null before its first turn ends. */
   costUsd: z.number().nullable(),
 });
@@ -41,12 +42,10 @@ export const AutomationView = z.object({
   timeZone: z.string(),
   /** False when `enabled: false` switched its schedule off. */
   enabled: z.boolean(),
-  /**
-   * You have run this definition by hand. A schedule only starts runs of a definition you have
-   * run yourself once: a new automation, or one whose prompt, trigger, budget or model changed
-   * (a pull, a teammate's commit), waits for that before its schedule goes on.
-   */
-  approved: z.boolean(),
+  /** What one run may use before it pauses and asks, its defaults filled in. */
+  budget: z.object({ wallClockMs: z.number(), costUsd: z.number() }),
+  /** The run's own model, when the definition names one. */
+  model: z.string().nullable(),
   /** When its schedule runs it next; null when nothing is scheduled. */
   nextRunAt: z.iso.datetime().nullable(),
   lastRun: AutomationRunView.nullable(),

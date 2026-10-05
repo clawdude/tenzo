@@ -27,7 +27,7 @@ import {
   Automations,
   finishRun,
   insertRun,
-  raiseAllowance,
+  grantMore,
   recordCost,
   type RunBudget,
   type RunStart,
@@ -70,7 +70,7 @@ import {
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { branchExists, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
+import { branchExists, commitsAhead, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
   type ConfigRead,
@@ -293,6 +293,7 @@ export class Engine {
         start: (run) =>
           this.#create({ project: run.project.name, title: run.title, prompt: run.prompt, run }),
         state: (threadId) => this.#runState(threadId),
+        retire: (threadId) => this.#retireRun(threadId),
         log: this.#log,
       },
       { ...(options.automationTickMs ? { tickMs: options.automationTickMs } : {}) },
@@ -609,6 +610,7 @@ export class Engine {
       projects: this.projects(),
       live: this.#liveInfo,
       automations: this.automations(),
+      automationsPaused: this.automationsPaused,
     };
   }
 
@@ -623,12 +625,18 @@ export class Engine {
     }
   }
 
-  /**
-   * Runs an automation now, by hand (Run now): an ordinary thread, origin `automation`. This is
-   * also what turns its schedule on for this definition (automations.ts).
-   */
+  /** Runs an automation now, by hand (Run now): an ordinary thread, origin `automation`. */
   runAutomation(project: string, name: string) {
     return this.#automations.run(project, name);
+  }
+
+  /** The automations' off switch: whether it is on, and turning it on or off. */
+  get automationsPaused(): boolean {
+    return this.#automations.paused;
+  }
+
+  pauseAutomations(paused: boolean): boolean {
+    return this.#automations.setPaused(paused);
   }
 
   /** Looks at the automations' schedules now (tests; the daemon does it on its own). */
@@ -813,7 +821,7 @@ export class Engine {
     const run = item.error?.cause === "budget" ? runOfThread(this.store, thread.id) : undefined;
     const appended = transaction(this.store, () => {
       const result = appendEvent(this.store, resolution);
-      if (run) raiseAllowance(this.store, run.id);
+      if (run) grantMore(this.store, run);
       for (const prompt of errorPrompts(item, answer)) enqueuePrompt(this.store, thread.id, prompt);
       return result;
     });
@@ -925,7 +933,8 @@ export class Engine {
 
   /**
    * The budget of the automation run `thread` is, while it applies (the run hasn't finished):
-   * the spend cap and the wall-clock deadline its allowance gives, and why it is over, if it is.
+   * its spend cap and wall-clock deadline as granted so far (at start, and one more grant from
+   * each Continue), and why it is over, if it is.
    */
   #budgetOf(thread: Thread): {
     run: AutomationRun;
@@ -938,14 +947,13 @@ export class Engine {
     const run = runOfThread(this.store, thread.id);
     if (!run?.budget || run.finishedAt !== null) return null;
     const budget = run.budget;
-    const capUsd = budget.costUsd !== undefined ? budget.costUsd * run.allowance : undefined;
-    const deadline =
-      budget.wallClockMs !== undefined ? Date.parse(run.at) + budget.wallClockMs * run.allowance : undefined;
+    const capUsd = run.capUsd ?? undefined;
+    const deadline = run.deadline ?? undefined;
     let over: string | null = null;
     if (deadline !== undefined && Date.now() >= deadline) {
-      over = `it has run for ${formatDuration(Date.now() - Date.parse(run.at))}, and its budget is ${formatDuration(deadline - Date.parse(run.at))}`;
+      over = `its ${formatDuration(budget.wallClockMs)} of wall clock ran out (it started ${formatDuration(Date.now() - Date.parse(run.at))} ago)`;
     } else if (capUsd !== undefined && (run.costUsd ?? 0) >= capUsd) {
-      over = `it has spent $${(run.costUsd ?? 0).toFixed(2)}, and its budget is $${capUsd.toFixed(2)}`;
+      over = `it has spent $${(run.costUsd ?? 0).toFixed(2)}, and its cap is $${capUsd.toFixed(2)}`;
     }
     return {
       run,
@@ -998,7 +1006,7 @@ export class Engine {
     }
   }
 
-  /** Sets the run's wall-clock timer, for its deadline as its allowance stands. */
+  /** Sets the run's wall-clock timer, for its deadline as granted so far. */
   #armBudget(threadId: ThreadId): void {
     if (this.#closing) return;
     let deadline: number | undefined;
@@ -1023,7 +1031,7 @@ export class Engine {
       if (thread.status !== "active") return;
       const budget = this.#budgetOf(thread);
       if (!budget) return;
-      if (budget.over === null) return this.#armBudget(threadId); // allowance raised, or early
+      if (budget.over === null) return this.#armBudget(threadId); // granted more, or early
       const live = this.#live.get(threadId);
       const { runtime, open } = loadFoldState(this.store, threadId);
       if (!live || (live.turnId === null && runtime.turnId === null)) return;
@@ -1067,18 +1075,36 @@ export class Engine {
   }
 
   /**
-   * Where an automation run's thread is. Finished: archived, or nothing running or queued, not
-   * landing, and nothing open but finished work (its card waits for you; the run is done).
-   * Paused: its budget card is open. Otherwise it is still going (working, or waiting on you).
+   * Where an automation run's thread is. Paused: its budget card is open. Waiting: on you (a
+   * question, a permission, a proposal, an error card, a ready PR). Going: working, or landing.
+   * Finished: nothing running or queued, and nothing open but finished work (its card waits for
+   * you; the run is done).
    */
   #runState(threadId: ThreadId): NonNullable<AutomationRunView["state"]> {
     const thread = getThread(this.store, threadId);
     if (thread.status !== "active") return "archived";
     if (this.#budgetCard(threadId)) return "paused";
     const view = this.#viewOf(thread);
+    const asks = openItems(this.store, threadId).filter((item) => item.kind !== "finished");
+    if (asks.length > 0 && (!view.working || waitsOnYou(asks))) return "waiting";
     if (view.working || view.phase === "landing") return "going";
-    const open = openItems(this.store, threadId);
-    return open.some((item) => item.kind !== "finished") ? "going" : "finished";
+    return "finished";
+  }
+
+  /**
+   * Archives a finished run's thread (its branch stays) when nothing would be lost: no open
+   * item, a clean worktree, and no commits beyond its base. A run with work stays for you.
+   */
+  async #retireRun(threadId: ThreadId): Promise<boolean> {
+    const thread = getThread(this.store, threadId);
+    if (thread.status !== "active" || this.#runState(threadId) !== "finished") return false;
+    if (openItems(this.store, threadId).length > 0) return false;
+    if (!existsSync(thread.worktreePath) || (await hasChanges(thread.worktreePath))) return false;
+    const project = projectOf(this.store, thread);
+    const base = await resolveBase(project.path, project.defaultBranch);
+    if ((await commitsAhead(project.path, base, `refs/heads/${thread.branch}`)) > 0) return false;
+    await this.archive(threadId);
+    return true;
   }
 
   /** The models: the thread's own choice, then its project's config, then the default. */

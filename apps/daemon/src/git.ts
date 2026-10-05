@@ -301,11 +301,19 @@ export async function latestChange(
   refs: readonly string[],
   base: string,
   path: string,
+  timeoutMs?: number,
 ): Promise<{ commit: string; onBase: boolean } | null> {
-  const found = await runGit(root, ["log", "-1", "--format=%H", ...refs, "--", path]);
+  const options = timeoutMs ? { timeoutMs } : {};
+  const found = await runGit(root, ["log", "-1", "--format=%H", ...refs, "--", path], options);
   const commit = found.stdout.trim();
   if (found.code !== 0 || !/^[0-9a-f]{40,64}$/.test(commit)) return null;
-  return { commit, onBase: await succeeds(root, ["merge-base", "--is-ancestor", commit, base]) };
+  const onBase = await runGit(root, ["merge-base", "--is-ancestor", commit, base], options);
+  return { commit, onBase: onBase.code === 0 };
+}
+
+/** How many commits `ref` has that `base` doesn't. */
+export async function commitsAhead(root: string, base: string, ref: string): Promise<number> {
+  return Number(await git(root, ["rev-list", "--count", `${base}..${ref}`]));
 }
 
 export async function deleteBranch(root: string, branch: string): Promise<void> {

@@ -1,13 +1,16 @@
-import { createHash } from "node:crypto";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import {
   type Automation,
   type AutomationRunView,
   type AutomationView,
   durationMs,
   localTimeZone,
+  MIN_SCHEDULE_GAP_MS,
   nextRun,
   parseSchedule,
   type ProjectId,
+  RUN_BUDGET,
   type Schedule,
   type ThinkingLevel,
   type ThreadId,
@@ -27,20 +30,20 @@ import { Timers } from "./timers.ts";
  *
  * The daemon keeps only what the files can't: each automation's next scheduled run (so a
  * schedule survives a restart; runs missed while no daemon ran come once, on start, not once per
- * missed time), which definition you last ran by hand, and every run (started, skipped, failed),
- * with a started run's budget and what it has used. Budgets are the engine's to watch (it sees
- * the turns); this module starts the runs.
+ * missed time) and every run (started, skipped, failed), with a started run's budget and what it
+ * has used. Budgets are the engine's to watch (it sees the turns); this module starts the runs.
  *
- * A file in the repo defines an automation, so the repo, not you, wrote its prompt. It only ever
- * starts an ordinary thread, with your own permissions and nothing more. And its schedule runs
- * only a definition you have run by hand once (`approved`): a new automation, or one a pull or a
- * teammate's commit changed, waits for you before it starts threads by itself.
+ * A file in the repo defines an automation, so it only ever starts an ordinary thread, with your
+ * own permissions and nothing more, and within bounds the repo can't move: every run has a
+ * budget (1h and $2 unless the file says otherwise, at most 24h and $20), an automation's
+ * schedule starts a run at most every 5 minutes, at most 3 runs go at once across all projects,
+ * and an off switch in Tenzo's home (`tenzo automation pause`) stops every schedule.
  */
 
-/** What one run may use: wall clock from its start, and Claude's reported spend. */
+/** What one grant of a run's budget is: wall clock from when it is given, and spend. */
 export interface RunBudget {
-  wallClockMs?: number;
-  costUsd?: number;
+  wallClockMs: number;
+  costUsd: number;
 }
 
 export interface AutomationRun {
@@ -52,9 +55,12 @@ export interface AutomationRun {
   reason: string | null;
   threadId: ThreadId | null;
   at: string;
+  /** One grant's worth: what the run started with, and what each Continue adds. */
   budget: RunBudget | null;
-  /** Budgets granted: 1, and one more for each Continue on its budget card. */
-  allowance: number;
+  /** The run is paused once the clock passes this (ms since the epoch). */
+  deadline: number | null;
+  /** The run is paused once Claude's running total reaches this (USD). */
+  capUsd: number | null;
   /** Claude's running total for the run's session, the highest seen; null before a turn ended. */
   costUsd: number | null;
   /** When the run's agent was first done: its budget no longer applies. */
@@ -70,24 +76,21 @@ export const SUMMARY_LIMIT = 1_500;
 /** How often the scheduler looks at the configs again when nothing is due sooner. */
 export const TICK_MS = 60_000;
 
+/** The scheduler never looks again sooner than this: no schedule can make it spin. */
+export const MIN_TICK_MS = 1_000;
+
+/** Automation runs that may be going at once, across every project, for schedules to start more. */
+export const MAX_RUNS_GOING = 3;
+
+/** How long the notes lookup's `git log` may take. */
+const NOTES_TIMEOUT_MS = 10_000;
+
+/** The off switch's file, in Tenzo's home: never in a repo, so a repo can't turn it off. */
+export const PAUSED_FILE = "automations.paused";
+
 /** The notes file an automation's runs keep for each other, in the repo. */
 export function notesPath(name: string): string {
   return `.tenzo/automations/${name}.md`;
-}
-
-/** A definition's fingerprint: what you approve by running it by hand. `enabled` isn't in it. */
-export function definitionHash(automation: Automation): string {
-  const { prompt, trigger, budget, model, thinking } = automation;
-  const canonical = JSON.stringify({
-    prompt,
-    schedule: trigger?.schedule?.trim() ?? null,
-    timeZone: trigger?.timeZone ?? null,
-    wallClock: budget?.wallClock ?? null,
-    costUsd: budget?.costUsd ?? null,
-    model: model ?? null,
-    thinking: thinking ?? null,
-  });
-  return `sha256:${createHash("sha256").update(canonical).digest("hex")}`;
 }
 
 /** The automation's schedule and the time zone it is read in; null when it has none. */
@@ -104,9 +107,10 @@ export function scheduleOf(
 }
 
 /**
- * When a schedule comes next after it came at `scheduledAt` and fired at `now`. An interval
- * counts from when it was due, unless that has passed too (the daemon was down): then from now.
- * Missed times never pile up: whatever was missed ran once, now.
+ * When a schedule comes next after it came at `scheduledAt` and fired at `now`: at least
+ * `MIN_SCHEDULE_GAP_MS` after `now`, whatever the schedule says. An interval counts from when it
+ * was due, unless that has passed too (the daemon was down): then from now. Missed times never
+ * pile up: whatever was missed ran once, now.
  */
 export function nextAfterFiring(
   schedule: Schedule,
@@ -114,25 +118,24 @@ export function nextAfterFiring(
   scheduledAt: number,
   now: number,
 ): number | null {
+  const earliest = now + MIN_SCHEDULE_GAP_MS;
   if (schedule.kind === "every") {
     const due = scheduledAt + schedule.ms;
-    return due > now ? due : now + schedule.ms;
+    return Math.max(due > now ? due : now + schedule.ms, earliest);
   }
-  return nextRun(schedule, timeZone, now);
+  return nextRun(schedule, timeZone, earliest - 1);
 }
 
-/** The budget a run starts with, from its definition; null when it has none. */
-export function budgetOf(automation: Automation): RunBudget | null {
-  const wallClockMs = automation.budget?.wallClock ? durationMs(automation.budget.wallClock) : null;
-  const costUsd = automation.budget?.costUsd;
-  if (wallClockMs === null && costUsd === undefined) return null;
+/** The budget one grant gives, from the definition, its defaults filled in. */
+export function budgetOf(automation: Automation): RunBudget {
+  const wallClock = automation.budget?.wallClock ? durationMs(automation.budget.wallClock) : null;
   return {
-    ...(wallClockMs !== null ? { wallClockMs } : {}),
-    ...(costUsd !== undefined ? { costUsd } : {}),
+    wallClockMs: wallClock ?? RUN_BUDGET.defaultWallClockMs,
+    costUsd: automation.budget?.costUsd ?? RUN_BUDGET.defaultCostUsd,
   };
 }
 
-/** "every 1h (Europe/Rome)", or "run by hand" for an automation without a schedule. */
+/** "every 1h", "daily 09:00 (Europe/Rome)", or "run by hand" for one without a schedule. */
 export function describeTrigger(automation: Automation, machineZone = localTimeZone()): string {
   const scheduled = scheduleOf(automation, machineZone);
   if (!scheduled) return "run by hand";
@@ -159,7 +162,8 @@ export interface RunPromptInput {
 /**
  * A run's first prompt: the automation's own prompt, then what Tenzo adds: which automation this
  * is, what its previous run said, and where its notes are. Tenzo never writes the notes file;
- * the agent may (and commits it on its branch, where the next run is pointed to it).
+ * the agent may, without proposing first (only that file: everything else follows the thread's
+ * usual flow), and commits it on its branch, where the next run is pointed to it.
  */
 export function runPrompt(input: RunPromptInput): string {
   const { name, automation, trigger, previous, notes } = input;
@@ -187,7 +191,9 @@ export function runPrompt(input: RunPromptInput): string {
         : `Its latest version is in commit ${notes.commit}, which this worktree doesn't have: take it first with \`git checkout ${notes.commit} -- ${path}\`, then read it.`;
   lines.push(
     "",
-    `Notes: \`${path}\` is this automation's notes file, what one run leaves for the next (what you did, where you left off). ${where} Before you end, update it if something is worth keeping and commit it to this thread's branch; the next run is pointed to it. Also leave markers in the systems you work in (a comment, a label) so a later run can tell what's done.`,
+    `Notes: \`${path}\` is this automation's notes file, what one run leaves for the next (what you did, where you left off). ${where}`,
+    `Before you end, update it if something is worth keeping and commit it (that file alone) to this thread's branch; the next run is pointed to it. Writing and committing this one file needs no proposal and no agreement first; any other change still does.`,
+    "Also leave markers in the systems you work in (a comment, a label) so a later run can tell what's done.",
   );
   return lines.join("\n");
 }
@@ -248,18 +254,18 @@ export function runTitle(name: string, at: number, timeZone = localTimeZone()): 
 // The database.
 
 interface AutomationRow {
-  approved: string | null;
   scheduleKey: string | null;
   nextRunAt: string | null;
 }
 
+const NO_ROW: AutomationRow = { scheduleKey: null, nextRunAt: null };
+
 function getRow(store: Store, projectId: ProjectId, name: string): AutomationRow | undefined {
   const row = store.db
-    .prepare("SELECT approved, schedule_key, next_run_at FROM automations WHERE project_id = ? AND name = ?")
+    .prepare("SELECT schedule_key, next_run_at FROM automations WHERE project_id = ? AND name = ?")
     .get(projectId, name);
   if (!row) return undefined;
   return {
-    approved: row.approved === null ? null : String(row.approved),
     scheduleKey: row.schedule_key === null ? null : String(row.schedule_key),
     nextRunAt: row.next_run_at === null ? null : String(row.next_run_at),
   };
@@ -268,25 +274,51 @@ function getRow(store: Store, projectId: ProjectId, name: string): AutomationRow
 function saveRow(store: Store, projectId: ProjectId, name: string, row: AutomationRow): void {
   store.db
     .prepare(
-      `INSERT INTO automations (project_id, name, environment_id, approved, schedule_key, next_run_at)
-       VALUES (?, ?, ?, ?, ?, ?)
+      `INSERT INTO automations (project_id, name, environment_id, schedule_key, next_run_at)
+       VALUES (?, ?, ?, ?, ?)
        ON CONFLICT (project_id, name) DO UPDATE SET
-         approved = excluded.approved, schedule_key = excluded.schedule_key,
-         next_run_at = excluded.next_run_at`,
+         schedule_key = excluded.schedule_key, next_run_at = excluded.next_run_at`,
     )
-    .run(projectId, name, store.environmentId, row.approved, row.scheduleKey, row.nextRunAt);
+    .run(projectId, name, store.environmentId, row.scheduleKey, row.nextRunAt);
+}
+
+/**
+ * Forgets the schedules of automations no config defines any more: the project's that aren't
+ * in `names`, or (no `projectId`) every removed project's. They are never armed again.
+ */
+function dropSchedules(store: Store, projectId: ProjectId | null, names: readonly string[] = []): void {
+  if (projectId === null) {
+    store.db
+      .prepare(
+        `UPDATE automations SET schedule_key = NULL, next_run_at = NULL
+         WHERE next_run_at IS NOT NULL
+           AND project_id NOT IN (SELECT id FROM projects WHERE removed_at IS NULL)`,
+      )
+      .run();
+    return;
+  }
+  store.db
+    .prepare(
+      `UPDATE automations SET schedule_key = NULL, next_run_at = NULL
+       WHERE project_id = ? AND next_run_at IS NOT NULL
+         AND name NOT IN (SELECT value FROM json_each(?))`,
+    )
+    .run(projectId, JSON.stringify(names));
 }
 
 /** Records a run; keeps the last `KEEP_EMPTY_RUNS` that started nothing. */
 export function insertRun(
   store: Store,
-  run: Omit<AutomationRun, "id" | "allowance" | "costUsd" | "finishedAt">,
+  run: Omit<AutomationRun, "id" | "deadline" | "capUsd" | "costUsd" | "finishedAt">,
 ): AutomationRun {
+  const deadline = run.budget ? Date.parse(run.at) + run.budget.wallClockMs : null;
+  const capUsd = run.budget ? run.budget.costUsd : null;
   const { lastInsertRowid } = store.db
     .prepare(
       `INSERT INTO automation_runs
-         (environment_id, project_id, name, trigger, result, reason, thread_id, at, budget)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (environment_id, project_id, name, trigger, result, reason, thread_id, at, budget,
+          deadline_at, cap_usd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       store.environmentId,
@@ -298,6 +330,8 @@ export function insertRun(
       run.threadId,
       run.at,
       run.budget === null ? null : JSON.stringify(run.budget),
+      deadline === null ? null : new Date(deadline).toISOString(),
+      capUsd,
     );
   store.db
     .prepare(
@@ -308,7 +342,7 @@ export function insertRun(
          ORDER BY id DESC LIMIT :keep)`,
     )
     .run({ project: run.projectId, name: run.name, keep: KEEP_EMPTY_RUNS });
-  return { ...run, id: Number(lastInsertRowid), allowance: 1, costUsd: null, finishedAt: null };
+  return { ...run, id: Number(lastInsertRowid), deadline, capUsd, costUsd: null, finishedAt: null };
 }
 
 function toRun(row: Record<string, unknown>): AutomationRun {
@@ -322,7 +356,8 @@ function toRun(row: Record<string, unknown>): AutomationRun {
     threadId: row.thread_id === null ? null : (String(row.thread_id) as ThreadId),
     at: String(row.at),
     budget: row.budget === null ? null : (JSON.parse(String(row.budget)) as RunBudget),
-    allowance: Number(row.allowance),
+    deadline: row.deadline_at === null ? null : Date.parse(String(row.deadline_at)),
+    capUsd: row.cap_usd === null ? null : Number(row.cap_usd),
     costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
     finishedAt: row.finished_at === null ? null : String(row.finished_at),
   };
@@ -334,7 +369,7 @@ export function runOfThread(store: Store, threadId: ThreadId): AutomationRun | u
   return row ? toRun(row) : undefined;
 }
 
-/** The automation's latest run, and its latest run that started a thread. */
+/** The automation's latest run, and its latest runs that started a thread. */
 function lastRuns(
   store: Store,
   projectId: ProjectId,
@@ -352,6 +387,28 @@ function lastRuns(
   return { last: last ? toRun(last) : undefined, started: started.map(toRun) };
 }
 
+/** When the automation's schedule last started a run (ms), if it ever did. */
+function lastScheduledStart(store: Store, projectId: ProjectId, name: string): number | null {
+  const row = store.db
+    .prepare(
+      `SELECT MAX(at) AS at FROM automation_runs
+       WHERE project_id = ? AND name = ? AND trigger = 'schedule' AND result = 'started'`,
+    )
+    .get(projectId, name);
+  return row?.at ? Date.parse(String(row.at)) : null;
+}
+
+/** Threads of automation runs that aren't archived: the ones that may still be going. */
+function activeRunThreads(store: Store): ThreadId[] {
+  return store.db
+    .prepare(
+      `SELECT r.thread_id AS id FROM automation_runs r JOIN threads t ON t.id = r.thread_id
+       WHERE t.status = 'active'`,
+    )
+    .all()
+    .map((row) => String(row.id) as ThreadId);
+}
+
 /** Runs whose budget still applies (not finished): the engine arms their wall clocks on start. */
 export function unfinishedRuns(store: Store): AutomationRun[] {
   return store.db
@@ -363,7 +420,13 @@ export function unfinishedRuns(store: Store): AutomationRun[] {
     .map(toRun);
 }
 
-/** Claude's running total for the run, kept at its highest (a crashed turn may report 0). */
+/**
+ * Claude's running total for the run, kept at its highest (a crashed turn may report 0). A
+ * resumed session carries on from the total its transcript saved (Claude restores it), so the
+ * highest is the run's whole spend; if a session ended before saving it, the next one would start
+ * lower and this undercounts by what that one spent after its last save. Claude's own cap
+ * (`maxBudgetUsd`, what is left of `cap_usd`) still holds within each session.
+ */
 export function recordCost(store: Store, runId: number, costUsd: number): void {
   if (!Number.isFinite(costUsd) || costUsd < 0) return;
   store.db
@@ -371,9 +434,18 @@ export function recordCost(store: Store, runId: number, costUsd: number): void {
     .run(costUsd, runId);
 }
 
-/** Continue on a budget card: the run gets as much budget again. */
-export function raiseAllowance(store: Store, runId: number): void {
-  store.db.prepare("UPDATE automation_runs SET allowance = allowance + 1 WHERE id = ?").run(runId);
+/**
+ * Continue on a budget card: a fresh grant from now. The wall clock runs one grant from now
+ * (time paused or waiting on you doesn't count against it), and the spend cap is one grant above
+ * what is spent already or the old cap, whichever is higher (one API call can go past a cap).
+ */
+export function grantMore(store: Store, run: AutomationRun, now = Date.now()): void {
+  if (!run.budget) return;
+  const deadline = now + run.budget.wallClockMs;
+  const capUsd = Math.max(run.costUsd ?? 0, run.capUsd ?? 0) + run.budget.costUsd;
+  store.db
+    .prepare("UPDATE automation_runs SET deadline_at = ?, cap_usd = ? WHERE id = ?")
+    .run(new Date(deadline).toISOString(), capUsd, run.id);
 }
 
 /** The run's agent is done (or its thread archived): its budget no longer applies. */
@@ -385,6 +457,9 @@ export function finishRun(store: Store, runId: number, at = new Date().toISOStri
 
 // The scheduler.
 
+/** Where a run's thread is (`AutomationRunView.state`, never null here). */
+export type RunState = NonNullable<AutomationRunView["state"]>;
+
 /** What the scheduler asks of the engine. */
 export interface AutomationHost {
   readonly store: Store;
@@ -392,8 +467,13 @@ export interface AutomationHost {
   config(root: string): ConfigRead;
   /** Starts a run's thread through the ordinary create, recording the run with it. */
   start(input: RunStart): Promise<ThreadView>;
-  /** Where a run's thread is: still going, paused by its budget, finished, or archived. */
-  state(threadId: ThreadId): NonNullable<AutomationRunView["state"]>;
+  /** Where a run's thread is. */
+  state(threadId: ThreadId): RunState;
+  /**
+   * Archives a finished run's thread when nothing would be lost (no open item, a clean
+   * worktree, no commits beyond its base); its branch is kept. Says whether it did.
+   */
+  retire(threadId: ThreadId): Promise<boolean>;
   log(message: string): void;
 }
 
@@ -404,12 +484,13 @@ export interface RunStart {
   trigger: "schedule" | "manual";
   title: string;
   prompt: string;
-  budget: RunBudget | null;
+  budget: RunBudget;
 }
 
 export class Automations {
   readonly #host: AutomationHost;
   readonly #tickMs: number;
+  readonly #pausedFile: string;
   readonly #timers = new Timers<"tick">();
   /** Automations a run is being started for, by project and name: a second one is skipped. */
   readonly #starting = new Set<string>();
@@ -421,6 +502,7 @@ export class Automations {
   constructor(host: AutomationHost, options: { tickMs?: number } = {}) {
     this.#host = host;
     this.#tickMs = options.tickMs ?? TICK_MS;
+    this.#pausedFile = join(host.store.home, PAUSED_FILE);
   }
 
   /** Looks at the schedules now (a run missed while no daemon ran comes now, once), then on time. */
@@ -435,6 +517,19 @@ export class Automations {
     await Promise.allSettled([...this.#firing]);
   }
 
+  /** The off switch is on: no schedule starts a run. */
+  get paused(): boolean {
+    return existsSync(this.#pausedFile);
+  }
+
+  /** Turns the off switch on or off. Kept in Tenzo's home, so it outlives the daemon. */
+  setPaused(paused: boolean): boolean {
+    if (paused) writeFileSync(this.#pausedFile, `${new Date().toISOString()}\n`);
+    else rmSync(this.#pausedFile, { force: true });
+    if (!paused) this.#arm(Date.now());
+    return this.paused;
+  }
+
   /** Every project's automations, or one project's. */
   list(projectRef?: string): AutomationView[] {
     const projects = projectRef ? [findProject(this.#host.store, projectRef)] : listProjects(this.#host.store);
@@ -445,10 +540,7 @@ export class Automations {
     );
   }
 
-  /**
-   * Runs an automation now, by hand: you have seen what it is, so its schedule (if it has one)
-   * goes on for this definition from now. A run whose previous one is still going is skipped.
-   */
+  /** Runs an automation now, by hand. A run whose previous one is still going is skipped. */
   async run(
     projectRef: string,
     name: string,
@@ -465,12 +557,7 @@ export class Automations {
         `${project.name} has no automation "${name.slice(0, 100)}"${names.length > 0 ? ` (it has ${names.join(", ")})` : " (.tenzo/config.json defines none)"}.`,
       );
     }
-    const store = this.#host.store;
-    const row = getRow(store, project.id, name) ?? { approved: null, scheduleKey: null, nextRunAt: null };
-    saveRow(store, project.id, name, { ...row, approved: definitionHash(automation) });
-    this.#sync(project, Date.now(), false);
     const { run, thread } = await this.#track(this.#fire(project, name, automation, "manual"));
-    this.#arm(this.#nextDue());
     return { automation: this.#view(project, name, automation), run: this.#runView(run), thread };
   }
 
@@ -480,14 +567,18 @@ export class Automations {
     this.#ticking = true;
     try {
       const now = Date.now();
+      const upcoming: number[] = [];
       for (const project of listProjects(this.#host.store)) {
         try {
-          this.#sync(project, now, true);
+          upcoming.push(...this.#sync(project, now));
         } catch (error) {
           this.#host.log(`couldn't look at ${project.name}'s automations: ${String(error)}`);
         }
       }
-      this.#arm(this.#nextDue());
+      dropSchedules(this.#host.store, null);
+      // Only what this look saw is armed: a stale time (a deleted automation, a broken config,
+      // a removed project) can't bring the next look forward.
+      this.#arm(Math.min(...upcoming));
     } catch (error) {
       // The store is gone (the daemon stopping): nothing more to schedule.
       this.#host.log(`couldn't look at the automations: ${String(error)}`);
@@ -496,18 +587,12 @@ export class Automations {
     }
   }
 
+  /** The next look: at `at`, within `tickMs` (configs change), never sooner than `MIN_TICK_MS`. */
   #arm(at: number): void {
     if (this.#closed) return;
-    const soonest = Math.min(at, Date.now() + this.#tickMs);
-    this.#timers.set("tick", soonest, () => void this.tick());
-  }
-
-  /** The earliest scheduled run of any automation. */
-  #nextDue(): number {
-    const row = this.#host.store.db
-      .prepare("SELECT MIN(next_run_at) AS at FROM automations WHERE next_run_at IS NOT NULL")
-      .get();
-    return row?.at ? Date.parse(String(row.at)) : Number.POSITIVE_INFINITY;
+    const now = Date.now();
+    const next = Math.max(Math.min(at, now + this.#tickMs), now + MIN_TICK_MS);
+    this.#timers.set("tick", next, () => void this.tick());
   }
 
   #definitions(project: Project): Record<string, Automation> {
@@ -520,36 +605,48 @@ export class Automations {
 
   /**
    * Brings the project's schedules in step with its config: an automation whose schedule is on
-   * (it has one, it isn't switched off, and you have run this definition by hand) gets its next
-   * run worked out when that changed; one that is due fires (`fire`), once. A config that can't
-   * be read changes nothing: its schedules wait for it to be fixed.
+   * (it has one and it isn't switched off) gets its next run worked out when that changed; one
+   * that is due fires (`fire`), once. Says when the next ones are. A config that can't be read
+   * changes nothing and arms nothing: its schedules wait for it to be fixed.
    */
-  #sync(project: Project, now: number, fire: boolean): void {
+  #sync(project: Project, now: number): number[] {
     const read = this.#host.config(project.path);
-    if (read.problem !== null) return;
+    if (read.problem !== null) return [];
     const store = this.#host.store;
-    for (const [name, automation] of Object.entries(automationsOf(read))) {
-      const row = getRow(store, project.id, name) ?? { approved: null, scheduleKey: null, nextRunAt: null };
+    const automations = automationsOf(read);
+    dropSchedules(store, project.id, Object.keys(automations));
+    const upcoming: number[] = [];
+    const save = (name: string, row: AutomationRow, next: number | null) => {
+      saveRow(store, project.id, name, { ...row, nextRunAt: next === null ? null : new Date(next).toISOString() });
+      if (next !== null) upcoming.push(next);
+    };
+    for (const [name, automation] of Object.entries(automations)) {
+      const row = getRow(store, project.id, name) ?? NO_ROW;
       const scheduled = scheduleOf(automation);
-      const on =
-        scheduled !== null && automation.enabled !== false && row.approved === definitionHash(automation);
+      const on = scheduled !== null && automation.enabled !== false;
       const key = on ? scheduled.key : null;
       if (key !== row.scheduleKey) {
-        const next = on ? nextRun(scheduled.schedule, scheduled.timeZone, now) : null;
-        saveRow(store, project.id, name, {
-          ...row,
-          scheduleKey: key,
-          nextRunAt: next === null ? null : new Date(next).toISOString(),
-        });
+        save(name, { ...row, scheduleKey: key }, on ? nextRun(scheduled.schedule, scheduled.timeZone, now) : null);
         continue;
       }
-      if (!on || !fire || row.nextRunAt === null || Date.parse(row.nextRunAt) > now) continue;
-      // Due (or missed while no daemon ran): the next one is worked out before this one starts,
-      // so it fires once whatever happens to the run.
-      const next = nextAfterFiring(scheduled.schedule, scheduled.timeZone, Date.parse(row.nextRunAt), now);
-      saveRow(store, project.id, name, { ...row, nextRunAt: next === null ? null : new Date(next).toISOString() });
+      if (!on || row.nextRunAt === null) continue;
+      const due = Date.parse(row.nextRunAt);
+      if (due > now) {
+        upcoming.push(due);
+        continue;
+      }
+      // Due (or missed while no daemon ran). The next one is worked out before this one
+      // starts, so it fires once whatever happens to the run.
+      const last = lastScheduledStart(store, project.id, name);
+      if (last !== null && now - last < MIN_SCHEDULE_GAP_MS) {
+        // Too soon after the last one (a cron line every minute): at the gap's end instead.
+        save(name, row, Math.max(nextRun(scheduled.schedule, scheduled.timeZone, last + MIN_SCHEDULE_GAP_MS - 1) ?? 0, last + MIN_SCHEDULE_GAP_MS));
+        continue;
+      }
+      save(name, row, nextAfterFiring(scheduled.schedule, scheduled.timeZone, due, now));
       void this.#track(this.#fire(project, name, automation, "schedule"));
     }
+    return upcoming;
   }
 
   #track<T>(firing: Promise<T>): Promise<T> {
@@ -558,10 +655,25 @@ export class Automations {
     return firing;
   }
 
+  /** Why a scheduled run may not start now, if it may not: the off switch, or too many going. */
+  #held(): string | null {
+    if (this.paused) return "Automations are paused (`tenzo automation resume` turns them back on).";
+    const going = activeRunThreads(this.#host.store).filter((id) => {
+      const state = this.#host.state(id);
+      return state !== "finished" && state !== "archived";
+    }).length;
+    if (going + this.#starting.size >= MAX_RUNS_GOING) {
+      return `Too many automation runs going (${MAX_RUNS_GOING} at once at most, across all projects).`;
+    }
+    return null;
+  }
+
   /**
    * Starts a run: an ordinary thread on the automation's prompt, with its previous run's last
-   * words and where its notes are. Skipped while its previous run is still going; failed (and
-   * recorded so) when the thread can't be started.
+   * words and where its notes are. Skipped while its previous run is still going (and, for a
+   * schedule, while automations are paused or too many runs are going); failed (and recorded so)
+   * when the thread can't be started. A previous run that finished with nothing to keep is
+   * archived first (its branch stays).
    */
   async #fire(
     project: Project,
@@ -589,15 +701,26 @@ export class Automations {
       return { run, thread: null };
     };
     if (this.#starting.has(key)) return record("skipped", "A run of it was starting already.");
-    const going = previous?.threadId ? this.#host.state(previous.threadId) : null;
-    if (going === "going" || going === "paused") {
-      return record(
-        "skipped",
-        `Its previous run (${previous?.threadId}) is still ${going === "paused" ? "paused by its budget" : "going"}.`,
-      );
+    const state = previous?.threadId ? this.#host.state(previous.threadId) : null;
+    if (state === "going" || state === "waiting" || state === "paused") {
+      const why = { going: "is still going", waiting: "is waiting on you", paused: "is paused by its budget" }[state];
+      return record("skipped", `Its previous run (${previous?.threadId}) ${why}.`);
+    }
+    if (trigger === "schedule") {
+      const held = this.#held();
+      if (held) return record("skipped", held);
     }
     this.#starting.add(key);
     try {
+      if (previous?.threadId && state === "finished") {
+        try {
+          if (await this.#host.retire(previous.threadId)) {
+            this.#host.log(`automation ${project.name}/${name}: archived its finished run ${previous.threadId}`);
+          }
+        } catch (error) {
+          this.#host.log(`couldn't archive ${previous.threadId}: ${String(error)}`);
+        }
+      }
       const prompt = runPrompt({
         name,
         automation,
@@ -641,7 +764,7 @@ export class Automations {
         const branch = this.#branchOf(run.threadId);
         if (branch && (await branchExists(project.path, branch))) refs.push(`refs/heads/${branch}`);
       }
-      return await latestChange(project.path, refs, base, notesPath(name));
+      return await latestChange(project.path, refs, base, notesPath(name), NOTES_TIMEOUT_MS);
     } catch (error) {
       this.#host.log(`couldn't look for ${project.name}/${name}'s notes: ${String(error)}`);
       return null;
@@ -666,7 +789,8 @@ export class Automations {
       schedule: scheduled?.schedule.text ?? null,
       timeZone: scheduled?.timeZone ?? localTimeZone(),
       enabled: automation.enabled !== false,
-      approved: row?.approved === definitionHash(automation),
+      budget: budgetOf(automation),
+      model: automation.model ?? null,
       nextRunAt: row?.scheduleKey && row.scheduleKey === scheduled?.key ? row.nextRunAt : null,
       lastRun: last ? this.#runView(last) : null,
     };
@@ -685,7 +809,7 @@ export class Automations {
   }
 }
 
-/** What to record for a run's thread when it starts: its automation, its own model choice. */
+/** What to record for a run's thread when it starts: its own model choice. */
 export function runThreadOptions(automation: Automation): { model?: string; thinking?: ThinkingLevel } {
   return {
     ...(automation.model ? { model: automation.model } : {}),

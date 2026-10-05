@@ -514,6 +514,9 @@ function startSession(
           background = message.tasks.filter((task) => isWork(task)).length;
         }
         apply(translate(state, message));
+        // Claude ended the turn at the spend cap Tenzo set: nothing waits on a request it had
+        // open any more, so it is cancelled (its card goes; the budget card is what asks).
+        if (message.type === "result" && message.subtype === "error_max_budget_usd") cancelPending(false);
       }
       emit({ type: "session.exited", ...inTurn(), payload: { exitKind: "graceful" } });
     } catch (error) {

@@ -33,6 +33,7 @@ describe("parseSchedule", () => {
     for (const bad of [
       "",
       "every 0m",
+      "every 4m", // schedules run at most every 5 minutes
       "every 31d",
       "every hour",
       "every 5s",
@@ -75,6 +76,8 @@ describe("nextRun", () => {
     );
     // Day of month or day of week, as cron does when both are set: the 1st, or a Sunday.
     expect(iso(nextRun(parsed("0 12 1 * 0"), "UTC", Date.UTC(2026, 9, 5)))).toBe("2026-10-11T12:00:00.000Z");
+    // A day field that starts with `*` (`*/2`) narrows, as in Vixie cron: odd days that are Mondays.
+    expect(iso(nextRun(parsed("0 12 */2 * 1"), "UTC", Date.UTC(2026, 9, 6)))).toBe("2026-10-19T12:00:00.000Z");
     // Leap day.
     expect(iso(nextRun(parsed("0 0 29 2 *"), "UTC", Date.UTC(2026, 0, 1)))).toBe("2028-02-29T00:00:00.000Z");
   });
@@ -155,6 +158,8 @@ describe("automations in a project config", () => {
       ["a wall clock too short", one({ prompt: "x", budget: { wallClock: "0m" } })],
       ["a negative cost", one({ prompt: "x", budget: { costUsd: -1 } })],
       ["a huge cost", one({ prompt: "x", budget: { costUsd: 1e9 } })],
+      ["a cost over $20", one({ prompt: "x", budget: { costUsd: 20.01 } })],
+      ["a wall clock over a day", one({ prompt: "x", budget: { wallClock: "25h" } })],
       ["a model that is a flag", one({ prompt: "x", model: "--dangerously-skip-permissions" })],
       ["too many", { automations: Object.fromEntries(Array.from({ length: 21 }, (_, i) => [`a${i}`, { prompt: "x" }])) }],
     ] as const) {

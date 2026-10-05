@@ -188,13 +188,11 @@ export const MIGRATIONS: readonly Migration[] = [
       ALTER TABLE threads ADD COLUMN automation TEXT;
 
       -- What the daemon keeps of each automation a project's .tenzo/config.json defines (the
-      -- definition itself stays in the file): its schedule's next run, and which definition you
-      -- last ran by hand (a hash: the schedule only runs that one).
+      -- definition itself stays in the file): its schedule's next run.
       CREATE TABLE automations (
         project_id     TEXT NOT NULL REFERENCES projects(id),
         name           TEXT NOT NULL,
         environment_id TEXT NOT NULL,
-        approved       TEXT,                  -- hash of the definition you last ran by hand
         schedule_key   TEXT,                  -- the schedule next_run_at was worked out for
         next_run_at    TEXT,                  -- NULL: nothing scheduled
         PRIMARY KEY (project_id, name)
@@ -212,8 +210,9 @@ export const MIGRATIONS: readonly Migration[] = [
         reason         TEXT,
         thread_id      TEXT REFERENCES threads(id),
         at             TEXT NOT NULL,
-        budget         TEXT,                  -- JSON {wallClockMs?, costUsd?}, NULL: none
-        allowance      INTEGER NOT NULL DEFAULT 1, -- budgets granted: 1, +1 per Continue
+        budget         TEXT,                  -- JSON {wallClockMs, costUsd}: one grant's worth
+        deadline_at    TEXT,                  -- wall clock: paused from then (each Continue: now + one grant)
+        cap_usd        REAL,                  -- spend: paused from then (each Continue: one grant more)
         cost_usd       REAL,                  -- Claude's running total, the highest seen
         finished_at    TEXT                   -- the run's agent was done: no budget after
       ) STRICT;
