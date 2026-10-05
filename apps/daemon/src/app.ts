@@ -164,13 +164,6 @@ export function createApp({
     const mediaType = c.req.header("content-type")?.split(";")[0]?.trim().toLowerCase();
     if (mediaType !== "application/json") return fail("Send the code as application/json.", 415);
     if (!devices) return fail("This daemon pairs no devices.", 503);
-    if (devices.pairingAttempts.blocked()) {
-      return fail(
-        "Too many failed pairing attempts. On the Mac, run `tenzo pair` for a new link (that lifts this), or wait a minute.",
-        429,
-        { "Retry-After": String(devices.pairingAttempts.retryAfter()) },
-      );
-    }
     let body: unknown;
     try {
       body = await c.req.json();
@@ -180,8 +173,17 @@ export function createApp({
     const parsed = PairRequest.safeParse(body);
     const code = parsed.success ? pairingCode(parsed.data.code) : null;
     const name = parsed.data?.name ?? nameFromUserAgent(c.req.header("user-agent"));
+    // The exchange first: a good code always pairs, however many bad ones a peer keeps sending.
+    // Only failures are limited.
     const paired = code ? devices.exchange(code, name) : null;
     if (!paired) {
+      if (devices.pairingAttempts.blocked()) {
+        return fail(
+          "Too many failed pairing attempts. On the Mac, run `tenzo pair` for a new link (that lifts this), or wait a minute.",
+          429,
+          { "Retry-After": String(devices.pairingAttempts.retryAfter()) },
+        );
+      }
       devices.pairingAttempts.fail();
       return fail(
         "This pairing link has expired or was already used. On the Mac, run `tenzo pair` for a new one.",

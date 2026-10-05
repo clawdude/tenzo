@@ -19,3 +19,16 @@ export function splitDevices(
 		others: devices.filter((d) => d.id !== current)
 	};
 }
+
+/** How soon before its end an Open live grant counts as stale: ask for a fresh one. */
+export const GRANT_MARGIN_MS = 10 * 60_000;
+
+/**
+ * True when an Open live grant (`<device>.<expiry ms>.<signature>`) is gone or about to go at
+ * `now` (the daemon's clock). No grant (on the Mac itself) is never stale.
+ */
+export function grantStale(grant: string | null | undefined, now: number): boolean {
+	if (!grant) return false;
+	const expires = Number(grant.split('.')[1]);
+	return !Number.isFinite(expires) || expires - now < GRANT_MARGIN_MS;
+}

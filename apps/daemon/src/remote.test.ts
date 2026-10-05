@@ -278,14 +278,35 @@ describe("pairing", () => {
     const statuses: number[] = [];
     for (let i = 0; i < PAIR_ATTEMPTS.limit + 2; i++) statuses.push((await pair("a".repeat(26))).status);
     expect(statuses).toEqual([...Array(PAIR_ATTEMPTS.limit).fill(400), 429, 429]);
-    const limited = await pair(early.code);
+    const limited = await pair("e".repeat(26));
     expect(limited.status).toBe(429);
     expect(Number(limited.headers["retry-after"])).toBeGreaterThan(0);
     expect(JSON.parse(limited.body).error).toMatch(/tenzo pair/);
+    // A good code still pairs while it is tripped.
+    expect((await pair(early.code)).status).toBe(200);
+    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) await pair("f".repeat(26));
     // The owner runs tenzo pair on the Mac: the new link works at once.
     const fresh = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "device.pair" });
     const { code } = JSON.parse(fresh.body).result as { code: string };
     expect((await pair(code)).status).toBe(200);
+  });
+
+  it("pairs with a good code even while a peer keeps the limit tripped", async () => {
+    const pair = (code: string) =>
+      call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code } });
+    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) await pair("a".repeat(26));
+    const { code } = daemon.devices.pair();
+    // tenzo pair lifted the limit; the peer trips it again at once, alongside the real phone.
+    const bad = Array.from({ length: 3 * PAIR_ATTEMPTS.limit }, () => pair("b".repeat(26)));
+    const good = pair(code);
+    const statuses = await Promise.all(bad.map(async (b) => (await b).status));
+    expect(statuses).toContain(429);
+    expect((await good).status).toBe(200);
+    // And after it, with the limit still tripped.
+    const another = daemon.devices.pair().code;
+    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) await pair("c".repeat(26));
+    expect((await pair("d".repeat(26))).status).toBe(429);
+    expect((await pair(another)).status).toBe(200);
   });
 
   it("makes links on the Mac only", async () => {
@@ -481,24 +502,22 @@ describe("the live origin", () => {
     expect(door.headers["set-cookie"]).toBeUndefined();
   });
 
-  it("won't switch a browser over to another device's live access with a shared link", async () => {
-    const mine = pairDevice(daemon.devices, "mine");
-    const theirs = pairDevice(daemon.devices, "theirs");
-    const live = `__Host-tenzo-live=${daemon.devices.livePass(mine.id).pass}`;
-    const shared = daemon.devices.liveGrant(theirs.id);
-    const door = await call(`${LIVE_DOOR}?grant=${encodeURIComponent(shared)}&to=${encodeURIComponent(page())}`, {
+  it("issues the live cookie for the granted device, whatever the browser held", async () => {
+    // Safari paired as one device opens the links of a home-screen app paired as another.
+    const safari = pairDevice(daemon.devices, "Safari");
+    const app = pairDevice(daemon.devices, "Home-screen app");
+    const live = `__Host-tenzo-live=${daemon.devices.livePass(safari.id).pass}`;
+    const grant = daemon.devices.liveGrant(app.id);
+    const door = await call(`${LIVE_DOOR}?grant=${encodeURIComponent(grant)}&to=${encodeURIComponent(page())}`, {
       port: daemon.livePort,
       headers: fromLive({ cookie: live }),
     });
-    expect(door.status).toBe(403);
-    expect(door.headers["set-cookie"]).toBeUndefined();
-    // Their own grant still works for them; a revoked device's old cookie doesn't stand in the way.
-    daemon.devices.revoke(mine.id);
-    const after = await call(`${LIVE_DOOR}?grant=${encodeURIComponent(shared)}&to=${encodeURIComponent(page())}`, {
-      port: daemon.livePort,
-      headers: fromLive({ cookie: live }),
-    });
-    expect(after.status).toBe(303);
+    expect(door.status).toBe(303);
+    expect(door.headers.location).toBe(page());
+    const [set] = door.headers["set-cookie"] ?? [];
+    expect(set).toMatch(new RegExp(`^__Host-tenzo-live=${app.id}\\.`));
+    // A day at most: a shared link gives no more.
+    expect(Number(/Max-Age=(\d+)/.exec(set ?? "")?.[1])).toBeLessThanOrEqual(24 * 60 * 60);
   });
 
   it("turns away a bad door or an expired grant", async () => {

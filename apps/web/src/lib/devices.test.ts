@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { deviceLine, splitDevices } from './devices.ts';
+import { deviceLine, grantStale, splitDevices } from './devices.ts';
 
 const NOW = Date.parse('2026-10-05T12:00:00Z');
 const device = (id: string, createdAt: string, lastSeenAt: string | null = null) => ({
@@ -23,5 +23,16 @@ describe('devices', () => {
 		expect(split.mine?.id).toBe('b');
 		expect(split.others.map((d) => d.id)).toEqual(['a', 'c']);
 		expect(splitDevices(list, null)).toEqual({ mine: null, others: list });
+	});
+});
+
+describe('Open live grants', () => {
+	it('are stale shortly before they run out, and none is never stale', () => {
+		const now = 1_000_000_000;
+		expect(grantStale(`dev_x.${now + 60 * 60_000}.sig`, now)).toBe(false);
+		expect(grantStale(`dev_x.${now + 5 * 60_000}.sig`, now)).toBe(true);
+		expect(grantStale(`dev_x.${now - 1}.sig`, now)).toBe(true);
+		expect(grantStale('garbage', now)).toBe(true);
+		expect(grantStale(null, now)).toBe(false);
 	});
 });

@@ -134,8 +134,11 @@ export const TENZO_COOKIES: readonly string[] = [DEVICE_COOKIE, LIVE_COOKIE];
  */
 export const DEVICE_TTL_MS = 400 * 24 * 60 * 60_000;
 
-/** How long the live origin's cookie lasts at most (never past the device's own); Open live renews it. */
-export const LIVE_COOKIE_TTL_MS = 30 * 24 * 60 * 60_000;
+/**
+ * How long the live origin's cookie lasts at most (never past the device's own): a day, so a
+ * shared Open live link gives at most that. Every Open live tap issues it again.
+ */
+export const LIVE_COOKIE_TTL_MS = 24 * 60 * 60_000;
 
 /**
  * How long an Open live grant works. Short, so a shared Open live link is soon worthless; a paired

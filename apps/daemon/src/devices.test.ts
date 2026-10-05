@@ -125,7 +125,7 @@ describe("devices", () => {
     const paired = devices.exchange(devices.pair().code, "x");
     if (!paired) throw new Error("no pairing");
     const { pass, expiresAt } = devices.livePass(paired.device.id);
-    expect(expiresAt - now).toBe(30 * 24 * 60 * 60_000);
+    expect(expiresAt - now).toBe(24 * 60 * 60_000);
     const grant = devices.liveGrant(paired.device.id);
     expect(devices.checkLivePass(pass)?.id).toBe(paired.device.id);
     expect(devices.checkLivePass(grant)?.id).toBe(paired.device.id);
@@ -159,11 +159,11 @@ describe("where tenzo pair's link points", () => {
 });
 
 describe("the live cookie's life", () => {
-  it("is 30 days, never past the device's own cookie", () => {
+  it("is a day, never past the device's own cookie", () => {
     const paired = devices.exchange(devices.pair().code, "x");
     if (!paired) throw new Error("no pairing");
     const end = Date.parse(paired.device.createdAt) + 400 * 24 * 60 * 60_000;
-    now = end - 24 * 60 * 60_000;
+    now = end - 60 * 60_000;
     expect(devices.livePass(paired.device.id).expiresAt).toBe(end);
   });
 });

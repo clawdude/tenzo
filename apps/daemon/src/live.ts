@@ -247,10 +247,10 @@ export function doorTarget(to: string | undefined): string | null {
 }
 
 /** What a browser from elsewhere gets without the live origin's cookie. */
-function notPaired(c: Context, why: string, status: 401 | 403 = 401): Response {
+function notPaired(c: Context, why: string): Response {
   return c.html(
     `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tenzo · live app</title><body style="margin:0;padding:32px 24px;background:#000;color:#f5f5f7;font:17px/1.4 -apple-system,system-ui,sans-serif"><h1 style="font-size:28px">Open it from Tenzo</h1><p style="color:#8e8e93">${why} Open live on a finished card opens it, on a device paired with <code>tenzo pair</code>.</p></body>`,
-    status,
+    401,
     { "Cache-Control": "no-store" },
   );
 }
@@ -355,11 +355,8 @@ export function createLiveApp(options: {
         },
       });
     if (granted && devices) {
-      // A grant is one device's: a browser that already opens live apps as another device keeps
-      // that (a link someone shared doesn't switch it over).
-      if (holding && holding.id !== granted.id) {
-        return notPaired(c, "This Open live link belongs to another device.", 403);
-      }
+      // (Re)issued for the granted device, whatever cookie the browser held: Safari paired as one
+      // device may well open the links of a home-screen app paired as another.
       const { pass, expiresAt } = devices.livePass(granted.id);
       return onward(liveCookie(pass, expiresAt));
     }

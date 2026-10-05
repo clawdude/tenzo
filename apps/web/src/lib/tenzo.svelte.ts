@@ -9,6 +9,7 @@ import {
 	TenzoClient,
 	type TenzoState
 } from '@tenzo/client-runtime';
+import { grantStale } from './devices.ts';
 import { daemonSocketUrl } from './status.ts';
 
 /**
@@ -110,7 +111,20 @@ function openClient(): void {
 	// Screens may start watching before the layout connects (children mount first).
 	for (const w of watchers) w.detach = opened.watch(w.threadId, w.listener);
 	opened.connect();
+	// Back on the page with a stale Open live grant (the socket slept through its renewals): a
+	// new socket now, whose snapshot brings a fresh one before Open live is tapped.
+	const onResume = () => {
+		if (document.visibilityState === 'hidden' || client !== opened) return;
+		const { live, connection } = tenzo.state;
+		if (grantStale(live?.grant, Date.now() + connection.clockOffset)) {
+			opened.connection.wake({ away: Number.POSITIVE_INFINITY });
+		}
+	};
+	document.addEventListener('visibilitychange', onResume);
+	window.addEventListener('pageshow', onResume);
 	closeClient = () => {
+		document.removeEventListener('visibilitychange', onResume);
+		window.removeEventListener('pageshow', onResume);
 		for (const w of watchers) {
 			w.detach?.();
 			w.detach = null;
