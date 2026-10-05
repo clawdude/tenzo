@@ -5,9 +5,12 @@ import {
 	notificationOf,
 	pickWindow,
 	readPushData,
+	resubscribeCommand,
 	safePath,
 	staleTags
 } from './notifications.ts';
+
+const ORIGIN = 'https://my-mac.tail0000.ts.net:8443';
 
 describe('a pushed notification', () => {
 	it("shows the daemon's message, one per thread, buzzing again when replaced", () => {
@@ -17,7 +20,7 @@ describe('a pushed notification', () => {
 				title: 'Fix login',
 				body: 'Which auth method?',
 				url: '/?item=itm_aaaaaaaaaaaaaaaaaaaa'
-			})
+			}, ORIGIN)
 		).toEqual({
 			title: 'Fix login',
 			options: {
@@ -32,7 +35,7 @@ describe('a pushed notification', () => {
 
 	it('still shows something for a push it can’t read: iOS ends silent subscriptions', () => {
 		for (const data of [null, 'text', 42, {}, { title: 7, body: ['x'] }]) {
-			const shown = notificationOf(data);
+			const shown = notificationOf(data, ORIGIN);
 			expect(shown.title).toBe('Tenzo');
 			expect(shown.options.body).toBe('A thread needs you.');
 			expect(shown.options.data.url).toBe('/');
@@ -52,16 +55,28 @@ describe('a pushed notification', () => {
 	});
 
 	it("goes only to Tenzo's own pages", () => {
-		expect(safePath('/?item=itm_x')).toBe('/?item=itm_x');
-		expect(safePath('/devices')).toBe('/devices');
-		for (const bad of ['//evil.example/', 'https://evil.example/', 'javascript:alert(1)', '/\\evil', 7]) {
-			expect(safePath(bad)).toBe('/');
+		expect(safePath('/?item=itm_x', ORIGIN)).toBe('/?item=itm_x');
+		expect(safePath('/devices', ORIGIN)).toBe('/devices');
+		expect(safePath('/a/../devices#x', ORIGIN)).toBe('/devices#x');
+		for (const bad of [
+			'//evil.example/',
+			'https://evil.example/',
+			'javascript:alert(1)',
+			'/\\evil.example',
+			'/\t/evil.example',
+			'/\n/evil.example',
+			'/ /evil.example',
+			'/\u0000/evil.example',
+			7
+		]) {
+			expect(safePath(bad, ORIGIN), String(bad)).toBe('/');
 		}
-		expect(notificationOf({ url: '//evil.example' }).options.data.url).toBe('/');
+		expect(notificationOf({ url: '//evil.example' }, ORIGIN).options.data.url).toBe('/');
+		expect(notificationOf({ url: '/\t/evil.example' }, ORIGIN).options.data.url).toBe('/');
 	});
 
 	it('is cut to size', () => {
-		const shown = notificationOf({ title: 'T'.repeat(500), body: 'B'.repeat(500) });
+		const shown = notificationOf({ title: 'T'.repeat(500), body: 'B'.repeat(500) }, ORIGIN);
 		expect(shown.title.length).toBeLessThanOrEqual(80);
 		expect(shown.options.body.length).toBeLessThanOrEqual(200);
 	});
@@ -110,5 +125,17 @@ describe('stale notifications', () => {
 			card('thr_c', { snoozedUntil: '2026-10-05T12:00:00Z' })
 		];
 		expect(staleTags(tags, items)).toEqual(['thr_b', 'thr_c', 'thr_d']);
+	});
+});
+
+describe('a rotated subscription', () => {
+	it('goes to the daemon as this device’s new one, keys and all', () => {
+		const json = {
+			endpoint: 'https://fcm.googleapis.com/fcm/send/new',
+			expirationTime: null,
+			keys: { p256dh: 'BKey', auth: 'auth' }
+		};
+		expect(resubscribeCommand(json)).toEqual({ type: 'device.subscribe', subscription: json });
+		expect(resubscribeCommand({ endpoint: 'https://fcm.googleapis.com/x' })).toBeNull();
 	});
 });

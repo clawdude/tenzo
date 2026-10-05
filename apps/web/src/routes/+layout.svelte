@@ -6,8 +6,8 @@
 	import { track } from '#lib/nav.ts';
 	import { isOpenMessage, staleTags } from '#lib/notifications.ts';
 	import PairDevice from '#lib/PairDevice.svelte';
-	import { closeNotifications } from '#lib/push.ts';
-	import { connectTenzo, tenzo } from '#lib/tenzo.svelte.ts';
+	import { closeNotifications, resendSubscription } from '#lib/push.ts';
+	import { command, connectTenzo, tenzo } from '#lib/tenzo.svelte.ts';
 
 	let { children } = $props();
 
@@ -40,6 +40,23 @@
 		const items = tenzo.state.items;
 		if (!visible || !tenzo.state.synced) return;
 		void closeNotifications((tags) => staleTags(tags, items));
+	});
+
+	// Once per open, a paired device gives the daemon its push subscription again: a push service
+	// may have rotated it. Nothing happens without one made with the daemon's key.
+	let resent = false;
+	$effect(() => {
+		if (resent || tenzo.access !== 'paired' || !tenzo.online) return;
+		resent = true;
+		void command({ type: 'device.list' })
+			.then(({ pushKey }) =>
+				resendSubscription(pushKey, (subscription) =>
+					command({ type: 'device.subscribe', subscription })
+				)
+			)
+			.catch(() => {
+				// offline or refused: the next open tries again
+			});
 	});
 </script>
 

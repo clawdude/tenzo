@@ -1,4 +1,5 @@
 import type { Device } from '@tenzo/client-runtime';
+import { type SubscriptionInfo, subscriptionInfo } from './notifications.ts';
 
 /**
  * This browser's side of notifications (Web Push, PRODUCT.md §9): whether it can get them,
@@ -128,23 +129,32 @@ export async function subscribeBrowser(publicKey: string): Promise<PushSubscript
 	return subscription.toJSON();
 }
 
-/** What `device.subscribe` takes, from a browser's subscription. */
-export interface SubscriptionInfo {
-	endpoint: string;
-	expirationTime: number | null;
-	keys: { p256dh: string; auth: string };
+/** What `device.subscribe` takes, from a browser's subscription; throws without keys. */
+export function requireSubscriptionInfo(json: PushSubscriptionJSON): SubscriptionInfo {
+	const info = subscriptionInfo(json);
+	if (!info) throw new Error("The browser's push subscription has no keys; try again.");
+	return info;
 }
 
-export function subscriptionInfo(json: PushSubscriptionJSON): SubscriptionInfo {
-	const { endpoint, keys } = json;
-	if (!endpoint || !keys?.p256dh || !keys.auth) {
-		throw new Error("The browser's push subscription has no keys; try again.");
+/**
+ * Gives the daemon this browser's subscription again, as the app does each time it opens: a push
+ * service may have rotated it (and not every browser says so to the service worker). Only with
+ * permission granted and a subscription made with the daemon's current key; `device.subscribe`
+ * replaces what the daemon had, so sending it again changes nothing. True when it was sent.
+ */
+export async function resendSubscription(
+	publicKey: string | null,
+	send: (subscription: SubscriptionInfo) => Promise<unknown>
+): Promise<boolean> {
+	if (!publicKey || typeof Notification === 'undefined' || Notification.permission !== 'granted') {
+		return false;
 	}
-	return {
-		endpoint,
-		expirationTime: json.expirationTime ?? null,
-		keys: { p256dh: keys.p256dh, auth: keys.auth }
-	};
+	const subscription = await currentSubscription();
+	if (!subscription || !madeWith(subscription, keyBytes(publicKey))) return false;
+	const info = subscriptionInfo(subscription.toJSON());
+	if (!info) return false;
+	await send(info);
+	return true;
 }
 
 /** Drops this browser's push subscription. */

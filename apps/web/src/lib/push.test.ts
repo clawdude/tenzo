@@ -1,5 +1,11 @@
 import { describe, expect, it } from 'vitest';
-import { type BrowserFacts, keyBytes, pushLine, subscriptionInfo, supportOf } from './push.ts';
+import {
+	type BrowserFacts,
+	keyBytes,
+	pushLine,
+	requireSubscriptionInfo,
+	supportOf
+} from './push.ts';
 
 const IPHONE =
 	'Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1';
@@ -74,7 +80,7 @@ describe('subscribing', () => {
 			expirationTime: null,
 			keys: { p256dh: 'BKey', auth: 'auth' }
 		};
-		expect(subscriptionInfo(json)).toEqual(json);
-		expect(() => subscriptionInfo({ endpoint: 'https://x' })).toThrow(/no keys/);
+		expect(requireSubscriptionInfo(json)).toEqual(json);
+		expect(() => requireSubscriptionInfo({ endpoint: 'https://x' })).toThrow(/no keys/);
 	});
 });

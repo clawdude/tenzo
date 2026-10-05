@@ -29,11 +29,11 @@ export interface Shown {
 export const TEST_TAG = 'tenzo-test';
 
 /**
- * The notification for a push's data (the daemon's `PushMessage`, JSON). Every push must show
- * one (iOS revokes a subscription whose pushes show nothing), so anything unreadable still
- * shows a plain "Tenzo needs you".
+ * The notification for a push's data (the daemon's `PushMessage`, JSON), its link on `origin`
+ * (the service worker's). Every push must show one (iOS revokes a subscription whose pushes
+ * show nothing), so anything unreadable still shows a plain "Tenzo needs you".
  */
-export function notificationOf(data: unknown): Shown {
+export function notificationOf(data: unknown, origin: string): Shown {
 	const message = (typeof data === 'object' && data !== null ? data : {}) as Record<string, unknown>;
 	const text = (value: unknown, max: number) =>
 		typeof value === 'string' ? value.replace(/\s+/g, ' ').trim().slice(0, max) : '';
@@ -45,7 +45,7 @@ export function notificationOf(data: unknown): Shown {
 			tag,
 			renotify: true,
 			icon: '/icon-192.png',
-			data: { url: safePath(message.url) }
+			data: { url: safePath(message.url, origin) }
 		}
 	};
 }
@@ -59,12 +59,58 @@ export function readPushData(data: { json(): unknown } | null | undefined): unkn
 	}
 }
 
-/** A path on Tenzo's own origin, or the Pass: never another origin (`//evil`, `https:`). */
-export function safePath(url: unknown): string {
-	if (typeof url !== 'string' || !url.startsWith('/') || url.startsWith('//') || url.includes('\\')) {
+/**
+ * A path on Tenzo's own `origin`, or the Pass: never another origin (`//evil`, `https:`, and
+ * what a URL parser turns into one, like `/\t/evil`: whitespace and control characters are
+ * refused before anything is resolved, and what resolves must still be on `origin`).
+ */
+export function safePath(url: unknown, origin: string): string {
+	if (
+		typeof url !== 'string' ||
+		url.length > 2048 ||
+		!url.startsWith('/') ||
+		url.startsWith('//') ||
+		/[\s\u0000-\u001f\u007f\\]/.test(url)
+	) {
 		return '/';
 	}
-	return url;
+	let resolved: URL;
+	try {
+		resolved = new URL(url, origin);
+	} catch {
+		return '/';
+	}
+	if (resolved.origin !== new URL(origin).origin) return '/';
+	return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+}
+
+/** What `device.subscribe` takes: a browser's subscription, keys and all. */
+export interface SubscriptionInfo {
+	endpoint: string;
+	expirationTime: number | null;
+	keys: { p256dh: string; auth: string };
+}
+
+/**
+ * A browser's subscription (`PushSubscription.toJSON()`) as `device.subscribe` takes it; null
+ * when it has no keys.
+ */
+export function subscriptionInfo(json: PushSubscriptionJSON): SubscriptionInfo | null {
+	const { endpoint, keys } = json;
+	if (!endpoint || !keys?.p256dh || !keys.auth) return null;
+	return {
+		endpoint,
+		expirationTime: json.expirationTime ?? null,
+		keys: { p256dh: keys.p256dh, auth: keys.auth }
+	};
+}
+
+/** The command that gives the daemon a rotated subscription; null when there is nothing to give. */
+export function resubscribeCommand(
+	json: PushSubscriptionJSON
+): { type: 'device.subscribe'; subscription: SubscriptionInfo } | null {
+	const subscription = subscriptionInfo(json);
+	return subscription ? { type: 'device.subscribe', subscription } : null;
 }
 
 /** One of the app's open windows, as the service worker sees it. */

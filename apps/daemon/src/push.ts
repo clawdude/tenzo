@@ -1,6 +1,14 @@
-import { chmodSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { createECDH } from "node:crypto";
+import { chmodSync, existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { isIP } from "node:net";
 import { join } from "node:path";
-import type { PushMessage, QueueItem, QueueItemId, ThreadId } from "@tenzo/contracts";
+import type {
+  PushMessage,
+  PushSubscriptionInfo,
+  QueueItem,
+  QueueItemId,
+  ThreadId,
+} from "@tenzo/contracts";
 import webpush from "web-push";
 import type { Devices, PushTarget } from "./devices.ts";
 import type { EngineChange } from "./engine.ts";
@@ -35,6 +43,9 @@ const MAX_RETRY_AFTER_MS = 10 * 60_000;
 
 /** How long a push service keeps an undelivered message (a phone that is off): an hour. */
 export const PUSH_TTL_S = 60 * 60;
+
+/** A device gets at most one test notification this often. */
+export const TEST_EVERY_MS = 10_000;
 
 /** How long one push request may take. */
 const SEND_TIMEOUT_MS = 15_000;
@@ -72,18 +83,20 @@ export function vapidKeysPath(home: string): string {
  */
 export function loadVapidKeys(home: string): VapidKeys {
   const path = vapidKeysPath(home);
-  const fresh = webpush.generateVAPIDKeys();
-  try {
-    // `wx`: only if there is none yet. Two daemons can't race here (lockHome), but a crash can't
-    // leave half a file behind either: the write is one call on a new file.
-    writeFileSync(
-      path,
-      `${JSON.stringify({ publicKey: fresh.publicKey, privateKey: fresh.privateKey })}\n`,
-      { mode: 0o600, flag: "wx" },
-    );
-    return { publicKey: fresh.publicKey, privateKey: fresh.privateKey };
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+  if (!existsSync(path)) {
+    const fresh = webpush.generateVAPIDKeys();
+    try {
+      // `wx`: only if there is none yet. Two daemons can't race here (lockHome), but a crash
+      // can't leave half a file behind either: the write is one call on a new file.
+      writeFileSync(
+        path,
+        `${JSON.stringify({ publicKey: fresh.publicKey, privateKey: fresh.privateKey })}\n`,
+        { mode: 0o600, flag: "wx" },
+      );
+      return { publicKey: fresh.publicKey, privateKey: fresh.privateKey };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
   }
   // Kept private even if something loosened it.
   if ((statSync(path).mode & 0o077) !== 0) chmodSync(path, 0o600);
@@ -105,6 +118,67 @@ export function loadVapidKeys(home: string): VapidKeys {
     );
   }
   return { publicKey, privateKey };
+}
+
+// Subscriptions.
+
+/**
+ * The push services a subscription may point at: Google's (Chrome, Android; Chrome for Testing
+ * uses `*.google.com`), Apple's (Safari, iOS), Mozilla's (Firefox) and Microsoft's (Edge on
+ * Windows). The daemon POSTs to whatever a subscription names, so anything else (loopback, the
+ * LAN, cloud metadata, the tailnet) would let a paired page make it call there.
+ */
+export const PUSH_SERVICE_DOMAINS = [
+  "googleapis.com",
+  "google.com",
+  "push.apple.com",
+  "push.services.mozilla.com",
+  "notify.windows.com",
+] as const;
+
+/**
+ * True for an endpoint on a known push service: https on the default port, a host name (never
+ * an IP literal, in any spelling) under one of `PUSH_SERVICE_DOMAINS`, no credentials, nothing
+ * a parser might read two ways (whitespace, control characters, backslashes).
+ */
+export function pushEndpointAllowed(endpoint: string): boolean {
+  if (endpoint.length > 2048 || /[\s\u0000-\u001f\u007f\\]/.test(endpoint)) return false;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== "https:" || url.port !== "" || url.username !== "" || url.password !== "") {
+    return false;
+  }
+  // The URL parser has already turned 127.1, 0x7f000001 and 2130706433 into 127.0.0.1.
+  const host = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (host.startsWith("[") || isIP(host) !== 0) return false;
+  return PUSH_SERVICE_DOMAINS.some((domain) => host.endsWith(`.${domain}`));
+}
+
+/**
+ * Why a browser's subscription can't be used, or null when it can: an endpoint on a known push
+ * service, `p256dh` an uncompressed P-256 point (65 bytes, on the curve), `auth` 16 bytes.
+ */
+export function subscriptionProblem(subscription: PushSubscriptionInfo): string | null {
+  if (!pushEndpointAllowed(subscription.endpoint)) {
+    return "That subscription isn't on a known push service (Apple's, Google's, Mozilla's or Microsoft's).";
+  }
+  const p256dh = Buffer.from(subscription.keys.p256dh, "base64url");
+  const auth = Buffer.from(subscription.keys.auth, "base64url");
+  if (auth.length !== 16 || p256dh.length !== 65 || p256dh[0] !== 0x04) {
+    return "That subscription's keys aren't Web Push keys.";
+  }
+  try {
+    const ecdh = createECDH("prime256v1");
+    ecdh.generateKeys();
+    ecdh.computeSecret(p256dh); // throws for a point off the curve
+  } catch {
+    return "That subscription's keys aren't Web Push keys.";
+  }
+  return null;
 }
 
 // What a push says.
@@ -277,6 +351,10 @@ export class Push {
   readonly #pending = new Map<ThreadId, NodeJS.Timeout>();
   /** Retries waiting. */
   readonly #retries = new Set<NodeJS.Timeout>();
+  /** The card each thread's latest push was for: a retry for an older one would replace it. */
+  readonly #latest = new Map<ThreadId, QueueItemId>();
+  /** When each device last got a test notification. */
+  readonly #tested = new Map<string, number>();
   /** Each open socket of a paired device: is its page in view, and when did it last talk. */
   readonly #presence = new Map<symbol, { deviceId: string; visible: boolean; heardAt: number }>();
   #closed = false;
@@ -360,28 +438,28 @@ export class Push {
     if (!target) {
       return { sent: false, error: "This device hasn't turned notifications on." };
     }
+    const now = this.#now();
+    if (now - (this.#tested.get(deviceId) ?? Number.NEGATIVE_INFINITY) < TEST_EVERY_MS) {
+      return { sent: false, error: "A test went a moment ago. Try again in a few seconds." };
+    }
+    this.#tested.set(deviceId, now);
     const message: PushMessage = {
       tag: "tenzo-test",
       title: "Tenzo",
       body: `Notifications work on ${clip(target.name, 40)}.`,
       url: "/devices",
     };
-    const { status } = await this.#post(target, message, undefined);
-    if (status >= 200 && status < 300) return { sent: true, error: null };
-    if (status === 404 || status === 410) {
+    const answer = await this.#post(target, message, undefined);
+    if (answer && answer.status >= 200 && answer.status < 300) return { sent: true, error: null };
+    if (answer?.status === 404 || answer?.status === 410) {
       this.#devices.dropSubscription(target.deviceId, target.subscription.endpoint);
       return {
         sent: false,
         error: "The browser's push service no longer knows this device. Turn notifications on again.",
       };
     }
-    return {
-      sent: false,
-      error:
-        status === 0
-          ? "Couldn't reach the push service."
-          : `The push service refused it (${status}).`,
-    };
+    // Nothing of the push service's answer is passed on (its status, its body).
+    return { sent: false, error: "The push service didn't take it. Try again later." };
   }
 
   #changed(change: EngineChange): void {
@@ -428,6 +506,7 @@ export class Push {
         this.#announced.delete(id);
       }
     }
+    this.#latest.delete(threadId);
   }
 
   /** The burst is over: one push for the thread's newest card nobody was told of yet. */
@@ -438,6 +517,7 @@ export class Push {
     const item = fresh.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
     if (!item) return;
     for (const each of open) this.#announced.add(each.id);
+    this.#latest.set(threadId, item.id);
     const message = pushMessageOf(item, this.#titleOf(threadId), this.#preview);
     for (const target of this.#devices.pushTargets()) {
       if (target.muted || this.inView(target.deviceId)) continue;
@@ -460,8 +540,11 @@ export class Push {
     itemId: QueueItemId,
     attempt: number,
   ): Promise<void> {
-    const { status, retryAfter } = await this.#post(target, message, message.tag);
-    if (this.#closed || (status >= 200 && status < 300)) return;
+    const answer = await this.#post(target, message, message.tag);
+    // Not sendable at all (a subscription no push service would take): trying again won't help.
+    if (this.#closed || !answer) return;
+    const { status, retryAfter } = answer;
+    if (status >= 200 && status < 300) return;
     const device = target.deviceId;
     if (status === 404 || status === 410) {
       if (this.#devices.dropSubscription(device, target.subscription.endpoint)) {
@@ -478,11 +561,13 @@ export class Push {
     const timer = setTimeout(
       () => {
         this.#retries.delete(timer);
-        // Still worth it? The card is open, the device subscribed (the same browser), unmuted,
-        // and not looking at Tenzo now.
+        // Still worth it? The card is open and still the thread's latest push (a retry must not
+        // replace a newer card's notification), the device subscribed (the same browser),
+        // unmuted, and not looking at Tenzo now.
         const now = this.#devices.pushTarget(device);
         if (
           !this.#open.has(itemId) ||
+          this.#latest.get(message.tag as ThreadId) !== itemId ||
           !now ||
           now.muted ||
           now.subscription.endpoint !== target.subscription.endpoint ||
@@ -498,21 +583,40 @@ export class Push {
     this.#retries.add(timer);
   }
 
-  /** Posts one message; never throws (a failure to even build it is status 0, logged). */
+  /**
+   * Posts one message; never throws. Null, logged: it couldn't even be built (keys no push
+   * service would take) or its endpoint isn't a known push service's (a row from before the
+   * check, say), so the subscription is forgotten. Nothing is ever sent anywhere else.
+   */
   async #post(
     target: PushTarget,
     message: PushMessage,
     topic: string | undefined,
-  ): Promise<PushResponse> {
+  ): Promise<PushResponse | null> {
+    const problem = subscriptionProblem({
+      endpoint: target.subscription.endpoint,
+      keys: target.subscription.keys,
+    });
+    if (problem) {
+      this.#devices.dropSubscription(target.deviceId, target.subscription.endpoint);
+      this.#log(`push: ${target.deviceId}'s subscription can't be used (${problem}); forgot it`);
+      return null;
+    }
+    let request: PushRequest;
     try {
-      const request = pushRequest(target.subscription, message, {
+      request = pushRequest(target.subscription, message, {
         keys: this.#keys,
         contact: this.#contact,
         topic,
       });
+    } catch (error) {
+      this.#log(`push to ${target.deviceId} couldn't be built: ${String(error)}`);
+      return null;
+    }
+    try {
       return await this.#send(request);
     } catch (error) {
-      this.#log(`push to ${target.deviceId} couldn't be sent: ${String(error)}`);
+      this.#log(`push to ${target.deviceId} failed: ${String(error)}`);
       return { status: 0, retryAfter: null };
     }
   }

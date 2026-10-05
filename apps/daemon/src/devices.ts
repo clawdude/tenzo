@@ -17,6 +17,7 @@ import {
 } from "./auth.ts";
 import { TenzoError } from "./errors.ts";
 import { randomId } from "./ids.ts";
+import { subscriptionProblem } from "./push.ts";
 import { type Store, transaction } from "./store.ts";
 
 /** Failed pairing attempts, all devices together, before attempts wait (auth.ts). */
@@ -209,6 +210,9 @@ export class Devices {
    */
   subscribe(id: string, subscription: PushSubscriptionInfo): Device {
     const device = this.#active(id);
+    // The daemon will POST to the endpoint: only a known push service's, with real keys.
+    const problem = subscriptionProblem(subscription);
+    if (problem) throw new TenzoError(problem);
     transaction(this.#store, () => {
       this.#store.db
         .prepare("DELETE FROM push_subscriptions WHERE device_id = ? OR endpoint = ?")

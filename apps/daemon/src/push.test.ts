@@ -11,6 +11,7 @@ import { request } from "node:http";
 import { join } from "node:path";
 import type { PushMessage, QueueItem, ThreadView } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import webpush from "web-push";
 import { WebSocket } from "ws";
 import { FakeAdapter } from "./agent/fake-agent.ts";
 import { executeCommand } from "./commands.ts";
@@ -22,9 +23,12 @@ import {
   Push,
   type PushRequest,
   type PushResponse,
+  pushEndpointAllowed,
   pushMessageOf,
   pushRequest,
   retryAfterMs,
+  subscriptionProblem,
+  TEST_EVERY_MS,
   VISIBLE_FRESH_MS,
   type VapidKeys,
   vapidKeysPath,
@@ -45,7 +49,7 @@ interface Browser {
   open(body: Uint8Array): string;
 }
 
-function browser(endpoint = `https://push.example/send/${randomBytes(6).toString("hex")}`): Browser {
+function browser(endpoint = `https://fcm.googleapis.com/fcm/send/${randomBytes(6).toString("hex")}`): Browser {
   const ecdh = createECDH("prime256v1");
   const uaPublic = ecdh.generateKeys();
   const auth = randomBytes(16);
@@ -153,6 +157,15 @@ describe("VAPID keys", () => {
     expect(() => loadVapidKeys(home)).toThrow(TenzoError);
     expect(() => loadVapidKeys(home)).toThrow(/Delete it/);
   });
+
+  it("are only generated when there are none", () => {
+    const home = tempDir("home");
+    loadVapidKeys(home);
+    const generate = vi.spyOn(webpush, "generateVAPIDKeys");
+    loadVapidKeys(home);
+    expect(generate).not.toHaveBeenCalled();
+    generate.mockRestore();
+  });
 });
 
 describe("what a push says", () => {
@@ -245,6 +258,85 @@ describe("a push request", () => {
       topic: "not a topic!",
     });
     expect(request.headers.Topic).toBeUndefined();
+  });
+});
+
+describe("which endpoints are push services", () => {
+  it("are Apple's, Google's, Mozilla's and Microsoft's", () => {
+    for (const ok of [
+      "https://fcm.googleapis.com/fcm/send/abc:def",
+      "https://jmt17.google.com/fcm/send/abc",
+      "https://web.push.apple.com/QGlk",
+      "https://api.push.apple.com/3/device/x",
+      "https://updates.push.services.mozilla.com/wpush/v2/x",
+      "https://wns2-par02p.notify.windows.com/w/?token=x",
+      "https://FCM.GoogleAPIs.com./fcm/send/x",
+      "https://fcm.googleapis.com:443/fcm/send/x",
+    ]) {
+      expect(pushEndpointAllowed(ok), ok).toBe(true);
+    }
+  });
+
+  it("are nothing the daemon could be made to call on a page's behalf", () => {
+    for (const bad of [
+      // Loopback, in every spelling the URL parser understands.
+      "https://127.0.0.1/x",
+      "https://localhost/x",
+      "https://127.1/x",
+      "https://0x7f000001/x",
+      "https://2130706433/x",
+      "https://[::1]/x",
+      "https://[::ffff:127.0.0.1]/x",
+      "https://pair.localhost/x",
+      // The LAN, cloud metadata, the tailnet.
+      "https://10.0.0.1/x",
+      "https://169.254.169.254/latest/meta-data",
+      "https://100.100.100.100/x",
+      "https://my-mac.tail0000.ts.net:8443/api/commands",
+      // A push service's name, but not on its default port, not https, or with credentials.
+      "https://fcm.googleapis.com:8443/x",
+      "http://fcm.googleapis.com/x",
+      "https://user:pw@fcm.googleapis.com/x",
+      // Look-alikes, and what a parser might read two ways.
+      "https://googleapis.com/x",
+      "https://evilgoogleapis.com/x",
+      "https://fcm.googleapis.com.evil.example/x",
+      "https://evil.example/?fcm.googleapis.com",
+      "https://fcm.googleapis.com\\@evil.example/x",
+      "https://fcm.googleapis.com\t/x",
+      "https://fcm.goog\nleapis.com/x",
+      "not a url",
+    ]) {
+      expect(pushEndpointAllowed(bad), bad).toBe(false);
+    }
+  });
+
+  it("are checked when a device subscribes, keys too", () => {
+    const store = openStore(join(tempDir("home"), ".tenzo"));
+    const devices = new Devices(store);
+    const phone = pairDevice(devices);
+    const { subscription } = browser();
+    const at = (endpoint: string) => ({ ...subscription, endpoint });
+    expect(() => devices.subscribe(phone.id, at("https://169.254.169.254/x"))).toThrow(
+      /known push service/,
+    );
+    expect(() => devices.subscribe(phone.id, at("https://127.1/x"))).toThrow(/known push service/);
+    const keys = subscription.keys;
+    const offCurve = Buffer.from(keys.p256dh, "base64url");
+    offCurve[64] = (offCurve[64] ?? 0) ^ 1;
+    for (const bad of [
+      { ...keys, p256dh: offCurve.toString("base64url") },
+      { ...keys, p256dh: Buffer.alloc(65, 4).toString("base64url") },
+      { ...keys, p256dh: Buffer.alloc(64, 1).toString("base64url") },
+      { ...keys, auth: Buffer.alloc(15).toString("base64url") },
+    ]) {
+      expect(() => devices.subscribe(phone.id, { ...subscription, keys: bad })).toThrow(
+        /aren't Web Push keys/,
+      );
+    }
+    expect(devices.pushTargets()).toEqual([]);
+    expect(subscriptionProblem(subscription)).toBeNull();
+    store.close();
   });
 });
 
@@ -574,15 +666,85 @@ describe("Push", () => {
     expect(logged.join("\n")).toMatch(/boom/);
   });
 
-  it("sends a test notification on request, muted or not", async () => {
+  it("sends a test notification on request, muted or not, at most one per 10 s", async () => {
     const p = phone("Phone");
     devices.mute(p.id, true);
     await expect(push.test(p.id)).resolves.toEqual({ sent: true, error: null });
     expect(sent[0]?.message).toMatchObject({ tag: "tenzo-test", title: "Tenzo", url: "/devices" });
+    expect((await push.test(p.id)).error).toMatch(/a moment ago/);
+    expect(sent).toHaveLength(1);
+    await vi.advanceTimersByTimeAsync(TEST_EVERY_MS);
     answer = () => ({ status: 404, retryAfter: null });
     expect((await push.test(p.id)).error).toMatch(/Turn notifications on again/);
     expect(devices.find(p.id)?.push.subscribed).toBe(false);
     expect((await push.test(p.id)).error).toMatch(/hasn't turned notifications on/);
+  });
+
+  it("says nothing of what the push service answered to a test", async () => {
+    const p = phone("Phone");
+    answer = () => ({ status: 502, retryAfter: null });
+    const { sent: ok, error } = await push.test(p.id);
+    expect(ok).toBe(false);
+    expect(error).toBe("The push service didn't take it. Try again later.");
+  });
+
+  it("skips only the device that is looking", async () => {
+    const looking = phone("Phone");
+    const away = phone("iPad");
+    push.presence(looking.id).visible(true);
+    opened(item());
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(sent.map((s) => s.device)).toEqual([away.id]);
+  });
+
+  it("never lets a retry of an older card replace a newer card's notification", async () => {
+    phone("Phone");
+    const statuses = [503];
+    answer = () => ({ status: statuses.shift() ?? 201, retryAfter: null });
+    opened(item({ ask: "Older?" }));
+    await vi.advanceTimersByTimeAsync(3_000); // fails: a retry is due in 5 s
+    opened(item({ ask: "Newer?" }));
+    await vi.advanceTimersByTimeAsync(3_000); // the newer card's push goes
+    await vi.advanceTimersByTimeAsync(300_000);
+    expect(sent.map((s) => s.message.body)).toEqual(["Older?", "Newer?"]);
+  });
+
+  it("never sends to a subscription no push service would take, and forgets it", async () => {
+    const p = pairDevice(devices, "Phone");
+    // As if stored before the check: straight into the table.
+    store.db
+      .prepare(
+        "INSERT INTO push_subscriptions (device_id, environment_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      )
+      .run(p.id, store.environmentId, "https://169.254.169.254/latest", browser().subscription.keys.p256dh, "x".repeat(22), "t");
+    opened(item());
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(sent).toEqual([]);
+    expect(devices.find(p.id)?.push.subscribed).toBe(false);
+    expect(logged.join("\n")).toMatch(/known push service/);
+  });
+
+  it("doesn't retry a push that can't be built", async () => {
+    const p = pairDevice(devices, "Phone");
+    const { subscription } = browser();
+    devices.subscribe(p.id, subscription);
+    // Keys that pass the subscribe check but that the encryption then refuses (a bad private key).
+    push.close();
+    const broken = new Push({
+      devices,
+      keys: { ...keys, privateKey: "AAAA" },
+      send: async () => {
+        sent.push({ request: {} as PushRequest, device: p.id, message: {} as PushMessage });
+        return { status: 201, retryAfter: null };
+      },
+      log: (message) => logged.push(message),
+    });
+    broken.start({ subscribe: (l) => ((listener = l), () => {}), view: () => ({ title: "" }) });
+    opened(item());
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(sent).toEqual([]);
+    expect(logged.join("\n")).toMatch(/couldn't be built/);
+    broken.close();
   });
 
   describe("commands", () => {

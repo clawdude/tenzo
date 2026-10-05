@@ -8,7 +8,7 @@
 		currentSubscription,
 		pushLine,
 		subscribeBrowser,
-		subscriptionInfo,
+		requireSubscriptionInfo,
 		type Support,
 		supportOf,
 		unsubscribeBrowser
@@ -83,7 +83,7 @@
 		const key = pushKey;
 		if (!key) return;
 		void run(async () => {
-			const subscription = subscriptionInfo(await subscribeBrowser(key));
+			const subscription = requireSubscriptionInfo(await subscribeBrowser(key));
 			await command({ type: 'device.subscribe', subscription });
 		}).then(() => {
 			if (note === null) note = 'Notifications are on. Test sends one now.';
