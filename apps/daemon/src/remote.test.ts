@@ -311,7 +311,11 @@ describe("pairing", () => {
 
   it("makes links on the Mac only", async () => {
     const local = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "device.pair", name: "tablet" });
-    expect(JSON.parse(local.body)).toMatchObject({ ok: true, result: { code: expect.any(String) } });
+    // With the remote settings it runs with, for `tenzo pair --tailscale` to check.
+    expect(JSON.parse(local.body)).toMatchObject({
+      ok: true,
+      result: { code: expect.any(String), origin: null, allowedHosts: [TS], liveOrigins: [LIVE] },
+    });
     const { cookie } = pairDevice(daemon.devices);
     const fromPhone = await command(remote({ cookie }), { type: "device.pair" });
     expect(fromPhone.status).toBe(400);

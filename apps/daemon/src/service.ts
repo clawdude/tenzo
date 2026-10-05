@@ -98,10 +98,7 @@ export interface LaunchAgent {
  * (`tenzo service uninstall`, or SIGTERM) leaves it stopped.
  */
 export function launchAgentPlist(agent: LaunchAgent): string {
-  const env = Object.keys(agent.env)
-    .sort()
-    .map((key) => `      <key>${xml(key)}</key>\n      <string>${xml(agent.env[key] ?? "")}</string>`)
-    .join("\n");
+  const env = plistEnvEntries(agent.env);
   const args = [agent.node, agent.cli, "serve"]
     .map((arg) => `      <string>${xml(arg)}</string>`)
     .join("\n");
@@ -137,6 +134,46 @@ ${env}
   </dict>
 </plist>
 `;
+}
+
+/**
+ * The `EnvironmentVariables` of a plist `launchAgentPlist` wrote, or null when it has none (or
+ * isn't one of ours).
+ */
+export function plistEnv(plist: string): Record<string, string> | null {
+  const block = ENV_BLOCK.exec(plist);
+  if (!block) return null;
+  const env: Record<string, string> = {};
+  for (const [, key, value] of (block[2] ?? "").matchAll(/<key>([^<]*)<\/key>\s*<string>([^<]*)<\/string>/g)) {
+    env[unxml(key ?? "")] = unxml(value ?? "");
+  }
+  return env;
+}
+
+/** The same plist with `env` as its environment; everything else as it was. */
+export function withPlistEnv(plist: string, env: Record<string, string>): string {
+  if (!ENV_BLOCK.test(plist)) {
+    throw new TenzoError("The service's plist has no environment to update; run `tenzo service install` again.");
+  }
+  return plist.replace(ENV_BLOCK, (_, head: string) => `${head}\n${plistEnvEntries(env)}\n    </dict>`);
+}
+
+const ENV_BLOCK = /(<key>EnvironmentVariables<\/key>\s*<dict>)([\s\S]*?)\n?\s*<\/dict>/;
+
+function plistEnvEntries(env: Record<string, string>): string {
+  return Object.keys(env)
+    .sort()
+    .map((key) => `      <key>${xml(key)}</key>\n      <string>${xml(env[key] ?? "")}</string>`)
+    .join("\n");
+}
+
+function unxml(text: string): string {
+  return text
+    .replaceAll("&lt;", "<")
+    .replaceAll("&gt;", ">")
+    .replaceAll("&quot;", '"')
+    .replaceAll("&apos;", "'")
+    .replaceAll("&amp;", "&");
 }
 
 function xml(text: string): string {
@@ -228,11 +265,7 @@ export function installService(config: DaemonConfig, env: NodeJS.ProcessEnv): st
   // Private: the environment may hold credentials (ANTHROPIC_API_KEY, say).
   writeFileSync(path, launchAgentPlist(agent), { mode: 0o600 });
   chmodSync(path, 0o600);
-  launchctl("bootout", `${domain()}/${SERVICE_LABEL}`); // an older install, if any
-  const loaded = launchctl("bootstrap", domain(), path);
-  if (!loaded.ok) {
-    throw new TenzoError(`launchctl couldn't load ${path}: ${loaded.output || "no reason given"}`);
-  }
+  loadService(path);
   return [
     `Installed ${SERVICE_LABEL}: tenzo serve on 127.0.0.1:${config.port}, at login and after a crash.`,
     `  plist  ${path}`,
@@ -241,6 +274,16 @@ export function installService(config: DaemonConfig, env: NodeJS.ProcessEnv): st
     "If another tenzo daemon holds this TENZO_HOME, the service retries every 10 s until it stops.",
     ...installWarnings(env, isLinkedWorktree(agent.cwd)),
   ];
+}
+
+/** (Re)loads the agent from its plist: stops the running daemon, if any, and starts it again. */
+export function loadService(path: string = plistPath()): void {
+  requireMac();
+  launchctl("bootout", `${domain()}/${SERVICE_LABEL}`); // the one running, if any
+  const loaded = launchctl("bootstrap", domain(), path);
+  if (!loaded.ok) {
+    throw new TenzoError(`launchctl couldn't load ${path}: ${loaded.output || "no reason given"}`);
+  }
 }
 
 export function uninstallService(): string[] {

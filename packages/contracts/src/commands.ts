@@ -221,6 +221,12 @@ export const CommandResults = {
     expiresAt: z.string(),
     /** Where devices reach this daemon (`TENZO_PUBLIC_URL`), for the link; null: it wasn't told. */
     origin: z.string().nullable(),
+    /**
+     * Its other remote settings (`TENZO_ALLOWED_HOSTS`, `TENZO_LIVE_ORIGIN`), so
+     * `tenzo pair --tailscale` can tell whether the running daemon is set up for the tailnet.
+     */
+    allowedHosts: z.array(z.string()),
+    liveOrigins: z.array(z.string()),
   }),
   "device.list": z.object({
     devices: z.array(Device),
