@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AutomationsState } from "./automations.ts";
 import { Command, Snapshot } from "./commands.ts";
 import { EnvironmentId } from "./ids.ts";
 import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
@@ -8,7 +9,9 @@ import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
  *
  * - the daemon says `hello`, then sends a `snapshot` (active threads, open items), then streams
  *   a `thread` frame whenever a thread changes and an `item` frame whenever an item opens,
- *   detaches, is snoozed or wakes, or resolves; a client that applies them in order has what the daemon has;
+ *   detaches, is snoozed or wakes, or resolves, and an `automations` frame whenever an automation's
+ *   next run, last run or finished runs change, the off switch flips, or a config breaks or
+ *   heals; a client that applies them in order has what the daemon has;
  * - a client that watches a thread (`thread.watch`) also gets an `event` frame for each of that
  *   thread's new events, after the watch's answer and in the log's order;
  * - the client sends `command` frames, each with an id of its choosing, and the daemon answers
@@ -54,6 +57,13 @@ export const ServerItem = z.object({
   change: z.enum(["opened", "updated", "detached", "snoozed", "unsnoozed", "resolved"]),
   item: QueueItem,
 });
+/**
+ * The automations as they are now (the snapshot's `automations`, `automationsPaused` and
+ * `automationProblems`), whole: it replaces what the client had.
+ */
+export const ServerAutomations = AutomationsState.extend({
+  type: z.literal("automations"),
+});
 /** One new event of a thread this socket watches (`thread.watch`). */
 export const ServerEvent = z.object({
   type: z.literal("event"),
@@ -81,6 +91,7 @@ export const ServerFrame = z.discriminatedUnion("type", [
   ServerSnapshot,
   ServerThread,
   ServerItem,
+  ServerAutomations,
   ServerEvent,
   ServerOk,
   ServerError,

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import {
   type AgentKind,
   type AutomationRunView,
+  type AutomationsState,
   type AutomationView,
   type ItemAnswer,
   ModelName,
@@ -23,6 +24,8 @@ import {
 import type { AgentAdapter, AgentSession, SessionSettings } from "./agent/agent.ts";
 import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
 import {
+  activeRunsOf,
+  activeRunThreads,
   type AutomationRun,
   Automations,
   finishRun,
@@ -73,6 +76,7 @@ import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } 
 import { branchExists, commitsAhead, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
+  automationsOf,
   type ConfigRead,
   landingOf,
   permissionsOf,
@@ -210,7 +214,8 @@ export const WATCH_BACKLOG = 200;
 export type EngineChange =
   | ({ type: "event" } & StoredEvent)
   | { type: "item"; change: ItemChange }
-  | { type: "thread"; thread: ThreadView };
+  | { type: "thread"; thread: ThreadView }
+  | { type: "automations"; automations: AutomationsState };
 
 interface Live {
   threadId: ThreadId;
@@ -273,6 +278,14 @@ export class Engine {
   readonly #budgets = new Timers<ThreadId>();
   /** The projects' automations: their schedules and runs (automations.ts). */
   readonly #automations: Automations;
+  /** A look at the automations is due (`#automationsChanged`): changes in one tick go as one. */
+  #automationsTimer: NodeJS.Timeout | undefined;
+  /** What subscribers last heard of the automations, so the same list isn't sent twice. */
+  #automationsSent: string | null = null;
+  /** Each look at the automations, numbered: only the latest one's list is sent. */
+  #automationsLook = 0;
+  /** Finished runs whose worktree had uncommitted changes when last looked at. */
+  readonly #dirty = new Set<ThreadId>();
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -293,7 +306,9 @@ export class Engine {
         start: (run) =>
           this.#create({ project: run.project.name, title: run.title, prompt: run.prompt, run }),
         state: (threadId) => this.#runState(threadId),
+        clean: (threadId) => !this.#dirty.has(threadId),
         retire: (threadId) => this.#retireRun(threadId),
+        changed: () => this.#automationsChanged(),
         log: this.#log,
       },
       { ...(options.automationTickMs ? { tickMs: options.automationTickMs } : {}) },
@@ -443,6 +458,9 @@ export class Engine {
         `${thread.id} has landed and is being archived; start a new thread for more work.`,
       );
     }
+    if (this.#archiving.has(thread.id)) {
+      throw new TenzoError(`${thread.id} is being archived; start a new thread for more work.`);
+    }
     enqueuePrompt(this.store, thread.id, text);
     this.#pump(thread.id);
     return this.#changed(thread.id);
@@ -474,13 +492,24 @@ export class Engine {
     return this.#changed(thread.id);
   }
 
-  /** Stops the thread's agent, removes its worktree, and takes its items off the queue. */
-  async archive(threadId: string, options: { force?: boolean } = {}): Promise<ThreadView> {
+  /**
+   * Stops the thread's agent, removes its worktree, and takes its items off the queue.
+   * `unless`: why not to after all (a run that is no longer finished), asked once the checks'
+   * waits are over and in the same tick as archiving starts, so nothing can come in between; a
+   * reason refuses with `ArchiveHeld`. From then on, nothing new is sent to the thread (`send`).
+   */
+  async archive(
+    threadId: string,
+    options: { force?: boolean; unless?: () => string | null } = {},
+  ): Promise<ThreadView> {
     const thread = getThread(this.store, threadId);
     if (thread.status === "archived") return this.view(thread.id);
     // Refuse before stopping anything: a refused archive must not kill the running turn.
     await checkArchivable(this.store, thread, options);
-    this.#archiving.add(thread.id); // no new session while its worktree goes away
+    if (getThread(this.store, thread.id).status === "archived") return this.view(thread.id);
+    const held = options.unless?.() ?? null;
+    if (held !== null) throw new ArchiveHeld(held);
+    this.#archiving.add(thread.id); // no new session (nor prompt) while its worktree goes away
     let cutShort = false;
     try {
       const live = this.#live.get(thread.id);
@@ -611,7 +640,61 @@ export class Engine {
       live: this.#liveInfo,
       automations: this.automations(),
       automationsPaused: this.automationsPaused,
+      automationProblems: this.automationProblems(),
     };
+  }
+
+  /** The projects whose config can't be read, so their automations don't run. */
+  automationProblems(project?: string) {
+    try {
+      return this.#automations.problems(project);
+    } catch (error) {
+      if (project !== undefined) throw error;
+      this.#log(`couldn't read the projects' configs: ${String(error)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Archives the automation's finished runs (their branches are kept): those with nothing
+   * running or queued and nothing open but finished work, whose worktree is clean. A run that is
+   * going, waits on you (a question, an error, its budget card) or has uncommitted changes stays.
+   */
+  async archiveFinishedRuns(
+    projectRef: string,
+    name: string,
+  ): Promise<{ archived: ThreadView[]; kept: { threadId: ThreadId; reason: string }[] }> {
+    const project = findProject(this.store, projectRef);
+    const runs = activeRunsOf(this.store, project.id, name);
+    if (runs.length === 0 && !automationsOf(this.#readConfig(project.path))[name]) {
+      throw new TenzoError(`No automation "${name.slice(0, 100)}" in ${project.name}.`);
+    }
+    const archived: ThreadView[] = [];
+    const kept: { threadId: ThreadId; reason: string }[] = [];
+    for (const threadId of runs) {
+      if (this.#runState(threadId) !== "finished") continue;
+      const thread = getThread(this.store, threadId);
+      if (existsSync(thread.worktreePath) && (await hasChanges(thread.worktreePath))) {
+        this.#dirty.add(threadId);
+        kept.push({ threadId, reason: "Its worktree has uncommitted changes." });
+        continue;
+      }
+      try {
+        // Looked at again once archive's own checks are done, in the tick it starts: a message
+        // sent meanwhile makes the run go again, and it stays.
+        archived.push(await this.archive(threadId, { unless: () => this.#unfinished(threadId) }));
+      } catch (error) {
+        if (error instanceof ArchiveHeld) continue;
+        // One run that won't archive (a gone repo, git failing) doesn't stop the others.
+        if (!(error instanceof TenzoError)) this.#log(`couldn't archive ${threadId}: ${String(error)}`);
+        kept.push({ threadId, reason: error instanceof Error ? error.message : String(error) });
+      }
+    }
+    if (archived.length > 0) {
+      this.#log(`automation ${project.name}/${name}: archived ${archived.length} finished run(s)`);
+    }
+    this.#automationsChanged();
+    return { archived, kept };
   }
 
   /** The automations the projects' configs define, with their next and last runs. */
@@ -637,6 +720,53 @@ export class Engine {
 
   pauseAutomations(paused: boolean): boolean {
     return this.#automations.setPaused(paused);
+  }
+
+  /** The automations as a list draws them: each one, the off switch, broken configs. */
+  automationsState(): AutomationsState {
+    return {
+      automations: this.automations(),
+      paused: this.automationsPaused,
+      problems: this.automationProblems(),
+    };
+  }
+
+  /**
+   * Something the automations list shows may have changed: a run started or skipped, a run's
+   * thread moved on, a schedule was worked out, the off switch flipped. Subscribers hear the
+   * whole list once this tick's changes are in, and only when it differs from the last they heard.
+   */
+  #automationsChanged(): void {
+    if (this.#closing || this.#automationsTimer) return;
+    this.#automationsTimer = setTimeout(async () => {
+      this.#automationsTimer = undefined;
+      if (this.#closing) return;
+      const look = ++this.#automationsLook;
+      try {
+        await this.#lookAtWorktrees();
+        if (this.#closing || look !== this.#automationsLook) return; // a newer look sends
+        const automations = this.automationsState();
+        const json = JSON.stringify(automations);
+        if (json === this.#automationsSent) return;
+        this.#automationsSent = json;
+        this.#emit({ type: "automations", automations });
+      } catch (error) {
+        this.#log(`couldn't look at the automations: ${String(error)}`);
+      }
+    }, 0);
+  }
+
+  /** Which finished runs have uncommitted changes (`#dirty`), so they aren't offered to archive. */
+  async #lookAtWorktrees(): Promise<void> {
+    const finished = activeRunThreads(this.store).filter((id) => this.#runState(id) === "finished");
+    const dirty = await Promise.all(
+      finished.map(async (id) => {
+        const path = getThread(this.store, id).worktreePath;
+        return existsSync(path) && (await hasChanges(path).catch(() => false)) ? id : null;
+      }),
+    );
+    this.#dirty.clear();
+    for (const id of dirty) if (id) this.#dirty.add(id);
   }
 
   /** Looks at the automations' schedules now (tests; the daemon does it on its own). */
@@ -748,6 +878,8 @@ export class Engine {
     this.#snoozes.clearAll();
     this.#wakes.clearAll();
     this.#budgets.clearAll();
+    clearTimeout(this.#automationsTimer);
+    this.#automationsTimer = undefined;
     this.#stopNaming.abort();
     stopDetachedGit(); // a `landed` check still fetching
     await this.#automations.close();
@@ -1103,8 +1235,21 @@ export class Engine {
     const project = projectOf(this.store, thread);
     const base = await resolveBase(project.path, project.defaultBranch);
     if ((await commitsAhead(project.path, base, `refs/heads/${thread.branch}`)) > 0) return false;
-    await this.archive(threadId);
+    try {
+      await this.archive(threadId, {
+        unless: () => this.#unfinished(threadId) ?? (openItems(this.store, threadId).length > 0 ? "It has an open item." : null),
+      });
+    } catch (error) {
+      if (error instanceof ArchiveHeld) return false;
+      throw error;
+    }
     return true;
+  }
+
+  /** Why a run isn't finished any more (a message came, a card opened), or null while it is. */
+  #unfinished(threadId: ThreadId): string | null {
+    const state = this.#runState(threadId);
+    return state === "finished" ? null : `It is ${state} again.`;
   }
 
   /** The models: the thread's own choice, then its project's config, then the default. */
@@ -1751,6 +1896,8 @@ export class Engine {
   #changed(threadId: ThreadId): ThreadView {
     const view = this.view(threadId);
     this.#emit({ type: "thread", thread: view });
+    // A run's thread moving on is its automation's last run (or finished runs) changing.
+    if (view.origin === "automation") this.#automationsChanged();
     return view;
   }
 
@@ -1816,6 +1963,11 @@ export class Engine {
       }
     }
   }
+}
+
+/** An archive called off by its `unless`: the thread is no longer what the caller looked at. */
+export class ArchiveHeld extends TenzoError {
+  override name = "ArchiveHeld";
 }
 
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;

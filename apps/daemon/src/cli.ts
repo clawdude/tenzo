@@ -8,12 +8,14 @@ import {
   type QueueItem,
 } from "@tenzo/contracts";
 import { answerFromWords, isAsk } from "./answers.ts";
+import { scheduledNote } from "./automations.ts";
 import { VERSION } from "./app.ts";
 import { parseArgs } from "./args.ts";
 import { callDaemon } from "./client.ts";
 import { readConfig } from "./config.ts";
 import { TenzoError } from "./errors.ts";
 import { formatEvent, formatItem } from "./format.ts";
+import { readProjectConfig } from "./project-config.ts";
 import { addProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
 import { installService, serviceStatus, uninstallService } from "./service.ts";
@@ -54,6 +56,9 @@ Usage:
   tenzo automation run <project> <name>  run one now (a thread, origin automation)
   tenzo automation pause | resume        the off switch, kept in TENZO_HOME: while paused, no
                                          schedule starts a run (running one by hand still works)
+  tenzo automation archive <project> <name>
+                                         archive its finished runs with a clean worktree
+                                         (branches kept); runs going or waiting on you stay
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -120,6 +125,9 @@ async function project([sub, ...rest]: string[]): Promise<void> {
       if (!path) usageError("tenzo project add needs a path.");
       const p = await withStore((store) => addProject(store, path));
       console.log(`Added "${p.name}": ${p.path} (default branch ${p.defaultBranch})`);
+      // Its automations start by themselves once the daemon sees it: say so now.
+      const note = scheduledNote(readProjectConfig(p.path));
+      if (note) console.log(note);
       return;
     }
     case "list":
@@ -266,7 +274,7 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
     case "list":
     case "ls": {
       const [projectRef] = positional;
-      const { automations, paused } = await call({
+      const { automations, paused, problems } = await call({
         type: "automation.list",
         ...(projectRef ? { project: projectRef } : {}),
       });
@@ -275,10 +283,17 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
         return;
       }
       if (paused) console.log("Automations are paused: no schedule starts a run (`tenzo automation resume`).\n");
+      // A config that can't be read runs none of its automations: say why, not "none".
+      for (const p of problems) {
+        console.log(`${p.projectName}: its Tenzo config is invalid, so its automations don't run: ${p.problem}`);
+      }
       if (automations.length === 0) {
-        console.log("No automations. A project defines them under `automations` in .tenzo/config.json.");
+        if (problems.length === 0) {
+          console.log("No automations. A project defines them under `automations` in .tenzo/config.json.");
+        }
         return;
       }
+      if (problems.length > 0) console.log("");
       printTable(automations.map((a) => [a.projectName, a.name, scheduleCell(a), lastRunCell(a)]));
       return;
     }
@@ -309,6 +324,18 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
       if (a.schedule && a.enabled && a.nextRunAt) {
         console.log(`Its schedule (${a.schedule}) is on: next run ${localTime(a.nextRunAt)}.`);
       }
+      return;
+    }
+    case "archive": {
+      const [projectRef, name] = positional;
+      if (!projectRef || !name) usageError("tenzo automation archive needs a project and an automation's name.");
+      const { archived, kept } = await call({ type: "automation.archiveFinished", project: projectRef, name });
+      console.log(
+        archived.length === 0
+          ? "No finished runs to archive."
+          : `Archived ${archived.length} finished run${archived.length === 1 ? "" : "s"}; their branches are kept.`,
+      );
+      for (const k of kept) console.log(`Kept ${k.threadId}: ${k.reason}`);
       return;
     }
     default:

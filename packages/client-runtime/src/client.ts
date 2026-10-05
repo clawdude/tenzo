@@ -19,7 +19,7 @@ import {
 import { consoleLog, type Log, notify } from "./notify.ts";
 import { applyFrame, type Data, EMPTY } from "./state.ts";
 
-/** Everything a view reads: the connection, and the daemon's threads and open items. */
+/** Everything a view reads: the connection, and the daemon's threads, open items and automations. */
 export interface TenzoState extends Data {
   connection: ConnectionSnapshot;
   /**
@@ -252,6 +252,7 @@ export class TenzoClient {
       }
       case "thread":
       case "item":
+      case "automations":
         this.#set(applyFrame(this.#state, frame));
         return;
       case "ok": {
@@ -313,7 +314,10 @@ export class TenzoClient {
       next.synced === this.#state.synced &&
       next.threads === this.#state.threads &&
       next.items === this.#state.items &&
-      next.projects === this.#state.projects
+      next.projects === this.#state.projects &&
+      next.automations === this.#state.automations &&
+      next.automationsPaused === this.#state.automationsPaused &&
+      next.automationProblems === this.#state.automationProblems
     ) {
       return;
     }

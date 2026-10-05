@@ -1,3 +1,4 @@
+import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { ServerFrame, type UserInputQuestion } from "@tenzo/contracts";
 import type { WSContext } from "hono/ws";
@@ -26,6 +27,7 @@ const color: UserInputQuestion = {
 };
 
 let home: string;
+let repo: string;
 let adapter: FakeAdapter;
 const running: RunningDaemon[] = [];
 const clients: Client[] = [];
@@ -33,7 +35,8 @@ const clients: Client[] = [];
 beforeEach(async () => {
   home = join(tempDir("home"), ".tenzo");
   const store = openStore(home);
-  await addProject(store, initRepo("app"));
+  repo = initRepo("app");
+  await addProject(store, repo);
   store.close();
   adapter = new FakeAdapter();
   // On its prompt, the agent says a line and asks the color.
@@ -155,6 +158,29 @@ describe("/ws", () => {
         expect.objectContaining({ name: "blog" }),
       ],
     });
+  });
+
+  it("sends the automations in the snapshot, and again whenever they change", async () => {
+    mkdirSync(join(repo, ".tenzo"), { recursive: true });
+    writeFileSync(
+      join(repo, ".tenzo/config.json"),
+      JSON.stringify({ automations: { nightly: { prompt: "Check.", trigger: { schedule: "every 1h" } } } }),
+    );
+    const daemon = await start();
+    const client = await Client.open(daemon);
+    const snapshot = client.frames[1];
+    expect(snapshot?.type === "snapshot" && snapshot.snapshot).toMatchObject({
+      automations: [{ name: "nightly", lastRun: null }],
+      automationsPaused: false,
+      automationProblems: [],
+    });
+    const ran = await client.command({ type: "automation.run", project: "app", name: "nightly" });
+    const threadId = ran.type === "ok" ? (ran.result as { thread: { id: string } }).thread.id : "";
+    await client.next(
+      (f) => f.type === "automations" && f.automations[0]?.lastRun?.threadId === threadId,
+    );
+    await client.command({ type: "automation.pause", paused: true });
+    await client.next((f) => f.type === "automations" && f.paused);
   });
 
   it("renames a new thread once its name is ready, and tells every client", async () => {

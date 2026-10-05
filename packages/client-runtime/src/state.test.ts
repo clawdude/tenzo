@@ -1,19 +1,50 @@
 import { describe, expect, it } from "vitest";
 import { isSnoozed } from "./index.ts";
 import { applyFrame, EMPTY } from "./state.ts";
-import { item, project, snapshotFrame, thread } from "./testing.ts";
+import { automation, item, project, snapshotFrame, thread } from "./testing.ts";
 
 describe("applyFrame", () => {
   it("replaces everything with a snapshot", () => {
     const before = {
+      ...EMPTY,
       threads: [thread("a")],
       items: [item("x", "a")],
       projects: [project("app")],
-      live: null,
+      automations: [automation("old")],
     };
     const live = { port: 4781, origins: ["https://mac.ts.net:8444"] };
     const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")], live));
-    expect(after).toEqual({ threads: [thread("b")], items: [], projects: [project("blog")], live });
+    expect(after).toEqual({
+      threads: [thread("b")],
+      items: [],
+      projects: [project("blog")],
+      live,
+      automations: [],
+      automationsPaused: false,
+      automationProblems: [],
+    });
+  });
+
+  it("keeps the automations: from the snapshot, then each automations frame replaces them whole", () => {
+    const frame = snapshotFrame([thread("a")], []);
+    let data = applyFrame(EMPTY, {
+      ...frame,
+      snapshot: { ...frame.snapshot, automations: [automation("nightly"), automation("weekly")] },
+    });
+    expect(data.automations.map((a) => a.name)).toEqual(["nightly", "weekly"]);
+    const threads = data.threads;
+    const problem = { projectId: automation("x").projectId, projectName: "blog", problem: "bad JSON" };
+    data = applyFrame(data, {
+      type: "automations",
+      automations: [automation("nightly", { nextRunAt: "2026-10-02T01:00:00.000Z" })],
+      paused: true,
+      problems: [problem],
+    });
+    expect(data.automations).toEqual([automation("nightly", { nextRunAt: "2026-10-02T01:00:00.000Z" })]);
+    expect(data.automationsPaused).toBe(true);
+    expect(data.automationProblems).toEqual([problem]);
+    // Threads and items are untouched.
+    expect(data.threads).toBe(threads);
   });
 
   it("adds a new thread at the end and updates a known one in place", () => {

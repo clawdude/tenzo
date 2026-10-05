@@ -7,8 +7,10 @@
 		meanwhile: readonly MeanwhileRow[];
 		/** Brings a snoozed item back now. */
 		onwake: (itemId: string) => void;
+		/** The automations in a few words ("next in 12m", "paused"); null when there are none. */
+		automations?: string | null;
 	}
-	let { meanwhile, onwake }: Props = $props();
+	let { meanwhile, onwake, automations = null }: Props = $props();
 </script>
 
 <!-- Nothing needs you: the card becomes the way to start something. -->
@@ -37,7 +39,7 @@
 		</span>
 	</a>
 
-	{#if meanwhile.length > 0}
+	{#if meanwhile.length > 0 || automations}
 		<section class="flex flex-col gap-0.5 px-2" data-testid="meanwhile">
 			<h2 class="mb-2 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">Meanwhile</h2>
 			{#each meanwhile as row (row.key)}
@@ -63,6 +65,18 @@
 					</button>
 				{/if}
 			{/each}
+			{#if automations}
+				<!-- What runs by itself: a quiet way to the list. -->
+				<a
+					href="/automations"
+					class="opt flex min-h-12 items-center gap-3"
+					data-testid="meanwhile-automations"
+				>
+					<svg class="shrink-0 text-faint" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3 2"></path></svg>
+					<span class="grow truncate text-[17px] text-ink-soft">Automations</span>
+					<span class="shrink-0 text-[15px] text-faint">{automations}</span>
+				</a>
+			{/if}
 		</section>
 	{/if}
 </div>

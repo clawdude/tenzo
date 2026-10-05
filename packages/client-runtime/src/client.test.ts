@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { CommandError, TenzoClient, type TenzoState } from "./client.ts";
 import type { Feed } from "./feed.ts";
 import {
+  automation,
   FakeClock,
   FakeSocket,
   hello,
@@ -78,6 +79,17 @@ describe("TenzoClient", () => {
     expect(client.state.threads.map((t) => t.id)).toEqual([thread("a").id, thread("b").id]);
     expect(client.state.items.map((i) => i.id)).toEqual([item("y", "b").id]);
     expect(seen.length).toBe(before + 3);
+  });
+
+  it("takes each automations frame as news for every view", () => {
+    const { client, latest, synced, seen } = setup();
+    client.connect();
+    synced();
+    const before = seen.length;
+    latest().serverSends({ type: "automations", automations: [automation("nightly")], paused: true, problems: [] });
+    expect(client.state.automations.map((a) => a.name)).toEqual(["nightly"]);
+    expect(client.state.automationsPaused).toBe(true);
+    expect(seen.length).toBe(before + 1);
   });
 
   it("sends a command with an id and resolves with its validated result", async () => {

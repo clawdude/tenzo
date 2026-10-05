@@ -9,6 +9,9 @@ export { isSnoozed } from "@tenzo/contracts";
 export { attachmentUrl, liveOriginFor, liveUrl } from "@tenzo/contracts";
 export type {
   Attachment,
+  AutomationProblem,
+  AutomationRunView,
+  AutomationView,
   Check,
   CheckStatus,
   Command,
