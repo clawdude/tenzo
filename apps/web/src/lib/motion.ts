@@ -44,6 +44,23 @@ export function forward(_node: Element): TransitionConfig {
 const AWAY = 520;
 const TURN = 14;
 
+/*
+ * Svelte hands a transition `params ?? {}`: a null or undefined parameter arrives as `{}`. So the
+ * parameters below are objects, never a bare null, and each helper reads them defensively: a
+ * side that isn't -1 or 1, or an offset that isn't a finite number, falls back to the plain
+ * motion (lifted, forward) or no offset, never to a NaN in a keyframe.
+ */
+
+/** -1 (left) or 1 (right); anything else: no side. */
+function sideOf(value: unknown): -1 | 1 | null {
+	return value === -1 || value === 1 ? value : null;
+}
+
+/** A finite number of px, else 0. */
+function offsetOf(value: unknown): number {
+	return typeof value === 'number' && Number.isFinite(value) ? value : 0;
+}
+
 /** How a card leaves the top of the pile: lifted (answered), or flung aside (snoozed). */
 export type Departure = { kind: 'lift' } | { kind: 'fling'; direction: -1 | 1; from: number };
 
@@ -51,10 +68,12 @@ export type Departure = { kind: 'lift' } | { kind: 'fling'; direction: -1 | 1; f
  * A card leaving: lifted up and away when answered, or carried on off the side it was swiped to,
  * from where the finger let go, when snoozed.
  */
-export function leave(node: Element, how: Departure | null): TransitionConfig {
+export function leave(node: Element, how: Departure | null | undefined): TransitionConfig {
 	if (how?.kind !== 'fling') return lift(node);
+	const direction = sideOf(how.direction);
+	if (direction === null) return lift(node);
 	if (still()) return { duration: 0 };
-	const { direction, from } = how;
+	const from = offsetOf(how.from);
 	return {
 		duration: 300,
 		easing: ease,
@@ -67,17 +86,26 @@ export function leave(node: Element, how: Departure | null): TransitionConfig {
 }
 
 /**
+ * Where a card arriving on top comes from: `side` null, forward out of the pile; -1 or 1, back in
+ * from the side it was swiped off to (Undo, a refused snooze).
+ */
+export interface Arrival {
+	side: -1 | 1 | null;
+}
+
+/**
  * A card arriving on top: forward from the pile, or, brought back by Undo, in from the side it
  * was swiped off to.
  */
-export function arrive(node: Element, from: -1 | 1 | null): TransitionConfig {
-	if (from === null) return forward(node);
+export function arrive(node: Element, how: Arrival | null | undefined): TransitionConfig {
+	const side = sideOf(how?.side);
+	if (side === null) return forward(node);
 	if (still()) return { duration: 0 };
 	return {
 		duration: PACE,
 		easing: ease,
 		css: (t, u) =>
-			`transform: translateX(${from * AWAY * u}px) rotate(${from * TURN * u}deg); opacity: ${t};`
+			`transform: translateX(${side * AWAY * u}px) rotate(${side * TURN * u}deg); opacity: ${t};`
 	};
 }
 
@@ -94,7 +122,7 @@ export function move(node: Element, rects: { from: DOMRect; to: DOMRect }): Anim
  * (`live` false): only what arrives while you look moves.
  */
 export function appear(_node: Element, live: boolean): TransitionConfig {
-	if (!live || still()) return { duration: 0 };
+	if (live !== true || still()) return { duration: 0 };
 	return {
 		duration: PACE,
 		easing: ease,
