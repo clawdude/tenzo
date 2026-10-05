@@ -44,6 +44,8 @@ export interface StartSessionInput {
    * user's own `defaultMode` applies, as in their terminal.
    */
   permissionMode?: PermissionModeName;
+  /** An automation run's spend cap (`SessionSettings.budget`). Unset: none, as in the terminal. */
+  budget?: SpendBudget;
   /**
    * Where the thread is: which of Tenzo's thread prompts the session gets. Discussing: talk, don't
    * change anything yet. Building or review: build. The permission mode is never Tenzo's unless
@@ -63,10 +65,24 @@ export interface StartSessionInput {
   host?: SessionHost;
 }
 
-/** What Tenzo chooses for a session: the models per phase, and the permission mode if any. */
+/**
+ * What Tenzo chooses for a session: the models per phase, the permission mode if any, and for an
+ * automation's run with a cost budget, what it may spend.
+ */
 export interface SessionSettings {
   models: SessionModels;
   permissionMode?: PermissionModeName | undefined;
+  budget?: SpendBudget | undefined;
+}
+
+/**
+ * What an automation's run may spend, in USD: `capUsd` in all, `spentUsd` of it already (by the
+ * agent's own running total). The agent stops a turn of its own when the cap is reached, and
+ * says so (`turn.completed` `stoppedBy: "budget"`). A new cap takes a new session.
+ */
+export interface SpendBudget {
+  capUsd: number;
+  spentUsd: number;
 }
 
 /** What a session asks of the daemon while it runs. */

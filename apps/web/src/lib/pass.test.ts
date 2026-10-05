@@ -168,6 +168,20 @@ describe('error cards', () => {
 		expect(answerOf(e, [{ choice: step!.others[0]! }])).toEqual({ kind: 'error', action: 'dismiss' });
 	});
 
+	it("a budget card offers Continue and Stop; words go on with what they say", () => {
+		const base = failure('b', 'This run of "nightly" reached its budget.');
+		const e = { ...base, error: { cause: 'budget' as const, message: base.error!.message, prompts: ['Carry on.'] } };
+		const [step] = stepsOf(e);
+		expect(step).toMatchObject({
+			suggested: { label: 'Continue', value: 'retry' },
+			others: [{ label: 'Stop', value: 'archive' }],
+			placeholder: 'Or tell it what to do'
+		});
+		expect(answerOf(e, [{ choice: step!.suggested! }])).toEqual({ kind: 'error', action: 'retry' });
+		expect(answerOf(e, [{ choice: step!.others[0]! }])).toEqual({ kind: 'error', action: 'archive' });
+		expect(answerOf(e, [{ text: 'Only the lockfile.' }])).toEqual({ kind: 'error', action: 'tell', text: 'Only the lockfile.' });
+	});
+
 	it('puts finished work behind every card where an agent is stuck, however old it is', () => {
 		const done = finished('f', {});
 		const older = { ...finished('g'), createdAt: '2026-10-01T00:00:00.000Z' };

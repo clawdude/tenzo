@@ -161,6 +161,21 @@ export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[]
 			}
 		];
 	}
+	if (item.kind === 'error' && item.error?.cause === 'budget') {
+		// An automation's run reached its budget and is paused: go on with as much again, or stop
+		// (archive). Words go to the agent, and it goes on too.
+		return [
+			{
+				key: 'error',
+				ask: item.ask,
+				suggested: { label: 'Continue', value: 'retry', description: '' },
+				recommended: false,
+				others: [{ label: 'Stop', value: 'archive', description: '' }],
+				row: [],
+				placeholder: 'Or tell it what to do'
+			}
+		];
+	}
 	if (item.kind === 'error') {
 		return [
 			{

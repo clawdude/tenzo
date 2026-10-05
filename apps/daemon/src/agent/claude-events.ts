@@ -247,7 +247,7 @@ function onResult(state: ClaudeTranslation, message: SDKResultMessage): Translat
   if (turnId === null) return same(state);
   if (isForAnotherTurn(state, turnId, message)) return same(state);
 
-  const { state: turnState, errorMessage } = outcome(message);
+  const { state: turnState, errorMessage, stoppedBy } = outcome(message);
   const events: EventDraft[] = [];
   if (turnState === "failed") {
     events.push({
@@ -265,6 +265,7 @@ function onResult(state: ClaudeTranslation, message: SDKResultMessage): Translat
         ? { result: message.result }
         : {}),
       ...(errorMessage ? { errorMessage } : {}),
+      ...(stoppedBy ? { stoppedBy } : {}),
       costUsd: message.total_cost_usd,
       durationMs: message.duration_ms,
     },
@@ -293,10 +294,17 @@ function isForAnotherTurn(
   return message.origin !== undefined && message.origin.kind !== "human";
 }
 
-function outcome(message: SDKResultMessage): { state: TurnState; errorMessage?: string } {
+function outcome(message: SDKResultMessage): {
+  state: TurnState;
+  errorMessage?: string;
+  stoppedBy?: "budget";
+} {
   const errors = (message.subtype === "success" ? [] : message.errors).filter(
     (e) => !e.startsWith("[ede_diagnostic]"),
   );
+  // The spend cap Tenzo set for an automation's run (`maxBudgetUsd`): a pause the daemon asked
+  // for, not a failure. It asks you whether to go on (`budget.exceeded`).
+  if (message.subtype === "error_max_budget_usd") return { state: "interrupted", stoppedBy: "budget" };
   if (
     message.terminal_reason === "aborted_tools" ||
     message.terminal_reason === "aborted_streaming" ||

@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { AutomationRunView, AutomationView } from "./automations.ts";
 import { ModelName, ThinkingLevel } from "./config.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
@@ -98,6 +99,18 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("item.snooze"), itemId: z.string().min(1) }),
   /** Brings a snoozed item back now (Undo). An item that is awake already stays as it is. */
   z.object({ type: z.literal("item.unsnooze"), itemId: z.string().min(1) }),
+  /** The automations the projects' configs define (all projects, or one). */
+  z.object({ type: z.literal("automation.list"), project: z.string().min(1).optional() }),
+  /**
+   * Runs an automation now (Run now): an ordinary thread on its prompt, unless its previous run
+   * is still going (then the run is recorded as skipped). Running it by hand is also what turns
+   * its schedule on for this definition (`AutomationView.approved`).
+   */
+  z.object({
+    type: z.literal("automation.run"),
+    project: z.string().min(1),
+    name: z.string().min(1).max(100),
+  }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -111,6 +124,8 @@ export const Snapshot = z.object({
   projects: z.array(ProjectView).default([]),
   /** Where threads' live apps are served (Open live); null when this daemon serves none. */
   live: LiveInfo.nullable().default(null),
+  /** The projects' automations, by project and name: next run and last run. */
+  automations: z.array(AutomationView).default([]),
 });
 export type Snapshot = z.infer<typeof Snapshot>;
 
@@ -157,6 +172,13 @@ export const CommandResults = {
   }),
   "item.snooze": z.object({ item: QueueItem, thread: ThreadView }),
   "item.unsnooze": z.object({ item: QueueItem, thread: ThreadView }),
+  "automation.list": z.object({ automations: z.array(AutomationView) }),
+  "automation.run": z.object({
+    automation: AutomationView,
+    run: AutomationRunView,
+    /** The run's thread; null when it was skipped. */
+    thread: ThreadView.nullable(),
+  }),
 } satisfies Record<CommandType, z.ZodType>;
 export type CommandResult<T extends CommandType> = z.infer<(typeof CommandResults)[T]>;
 

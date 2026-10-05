@@ -95,5 +95,9 @@ async function run(engine: Engine, command: Command): Promise<CommandResult<Comm
       return engine.snooze(command.itemId);
     case "item.unsnooze":
       return engine.unsnooze(command.itemId);
+    case "automation.list":
+      return { automations: engine.automations(command.project) };
+    case "automation.run":
+      return engine.runAutomation(command.project, command.name);
   }
 }

@@ -1,4 +1,4 @@
-import type { ProjectView, QueueItem, StoredEvent, ThreadView } from "@tenzo/contracts";
+import type { AutomationView, ProjectView, QueueItem, StoredEvent, ThreadView } from "@tenzo/contracts";
 
 /**
  * Test-only doubles: a WebSocket the test drives by hand, a clock the test advances, and
@@ -124,6 +124,7 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
     phase: "discussing",
     origin: "user",
     parentId: null,
+    automation: null,
     wakeAt: null,
     activity: "working",
     working: true,
@@ -195,6 +196,6 @@ export function snapshotFrame(
 ) {
   return {
     type: "snapshot",
-    snapshot: { environmentId, threads, items, projects, live },
+    snapshot: { environmentId, threads, items, projects, live, automations: [] as AutomationView[] },
   } as const;
 }

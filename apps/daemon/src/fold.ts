@@ -109,6 +109,15 @@ export const CONFIG_OPTIONS: readonly UserInputOption[] = [
   { label: "Dismiss", value: "dismiss", description: "", recommended: false },
 ];
 
+/**
+ * A budget card's buttons: go on, with as much budget again (Retry), or stop (archive the
+ * thread). Words go to the agent with the same raise.
+ */
+export const BUDGET_OPTIONS: readonly UserInputOption[] = [
+  { label: "Continue", value: "retry", description: "Give the run as much budget again", recommended: true },
+  { label: "Stop", value: "archive", description: "Archive the thread", recommended: false },
+];
+
 /** A permission request's buttons: allowing is the suggestion, as in Claude Code's own prompt. */
 export const PERMISSION_OPTIONS: readonly UserInputOption[] = [
   { label: "Allow", value: "allow", description: "", recommended: true },
@@ -458,6 +467,20 @@ export function foldEvent(
       const { cause, message, prompts } = event.payload;
       return withError(rest, superseded, event, runtime, environmentId, { cause, message, prompts });
     }
+    case "budget.exceeded": {
+      // One budget card at a time: a newer one says how it stands now.
+      const superseded = supersedeErrors(state, "budget", event.createdAt);
+      const rest: FoldState = {
+        ...state,
+        open: state.open.filter((open) => !superseded.some((s) => s.item.id === open.id)),
+      };
+      const { message, prompts } = event.payload;
+      return withError(rest, superseded, event, runtime, environmentId, {
+        cause: "budget",
+        message,
+        prompts,
+      });
+    }
     case "config.checked": {
       // One config card at a time: a newer problem replaces it, none resolves it.
       const problem = event.payload.problem;
@@ -555,6 +578,8 @@ export function errorHeadline(cause: ItemError["cause"], agent: AgentKind): stri
       return "Landed, but not archived";
     case "config":
       return "The project's Tenzo config is invalid";
+    case "budget":
+      return "Budget reached: paused";
   }
 }
 
@@ -721,6 +746,18 @@ function readyItem(
   };
 }
 
+/** The thread's open error items of `cause`, resolved as replaced by a newer one. */
+function supersedeErrors(state: FoldState, cause: ItemError["cause"], at: string): ItemChange[] {
+  return state.open
+    .filter((open) => open.kind === "error" && open.error?.cause === cause)
+    .map(
+      (open): ItemChange => ({
+        type: "resolved",
+        item: { ...open, status: "resolved", resolvedAt: at, resolution: { kind: "superseded" } },
+      }),
+    );
+}
+
 /** The thread's open items of `kind`, resolved as replaced by a newer one. */
 function supersede(state: FoldState, kind: QueueItem["kind"], at: string): ItemChange[] {
   return state.open
@@ -755,7 +792,9 @@ function withError(
     ...(turnId ? { turnId } : {}),
     context: runtime.context,
     ask: errorHeadline(error.cause, event.agent),
-    options: [...(error.cause === "config" ? CONFIG_OPTIONS : ERROR_OPTIONS)],
+    options: [
+      ...(error.cause === "config" ? CONFIG_OPTIONS : error.cause === "budget" ? BUDGET_OPTIONS : ERROR_OPTIONS),
+    ],
     suggested: "retry",
     questions: [],
     error: { ...error, message: cutMessage(error.message.trim()) },

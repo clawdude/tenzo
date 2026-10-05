@@ -1,6 +1,8 @@
 import { existsSync } from "node:fs";
 import {
   type AgentKind,
+  type AutomationRunView,
+  type AutomationView,
   type ItemAnswer,
   ModelName,
   type LiveInfo,
@@ -20,6 +22,19 @@ import {
 } from "@tenzo/contracts";
 import type { AgentAdapter, AgentSession, SessionSettings } from "./agent/agent.ts";
 import { attachmentsDir, removeAttachments, removeCopies } from "./attachments.ts";
+import {
+  type AutomationRun,
+  Automations,
+  finishRun,
+  insertRun,
+  raiseAllowance,
+  recordCost,
+  type RunBudget,
+  type RunStart,
+  runOfThread,
+  runThreadOptions,
+  unfinishedRuns,
+} from "./automations.ts";
 import {
   checkAnswer,
   deliveryPrompt,
@@ -110,6 +125,17 @@ export function sentence(text: string): string {
   return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`;
 }
 
+/** A duration in a word or two: "45s", "12m", "2h 5m", "1d 3h". */
+export function formatDuration(ms: number): string {
+  const minutes = Math.floor(ms / 60_000);
+  if (minutes < 1) return `${Math.max(0, Math.round(ms / 1000))}s`;
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return minutes % 60 ? `${hours}h ${minutes % 60}m` : `${hours}h`;
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
+}
+
 /**
  * The daemon's thread runner: it owns every running agent session. It starts and resumes them,
  * sends each thread's prompts one turn at a time from a queue, appends every event the agents
@@ -146,6 +172,8 @@ export interface EngineOptions {
    * to end when it is restarted to change its settings. Default 15 s.
    */
   switchTimeoutMs?: number;
+  /** How often the automations' scheduler looks at the configs when nothing is due sooner. */
+  automationTickMs?: number;
   log?: (message: string) => void;
 }
 
@@ -161,6 +189,8 @@ export interface NewThread {
   clientKey?: string;
   /** The thread whose agent starts this one (`start_thread`): its origin is then `agent`. */
   parent?: ThreadId;
+  /** The automation run this thread is (automations.ts): its origin is then `automation`. */
+  run?: Omit<RunStart, "title" | "prompt">;
 }
 
 /** What a `thread.create` asked for, to tell a retry (the same) from a reused key (not). */
@@ -239,6 +269,10 @@ export class Engine {
   readonly #snoozes = new Timers<QueueItemId>();
   /** A timer per thread whose agent asked to be woken (`wake_me`). */
   readonly #wakes = new Timers<ThreadId>();
+  /** A timer per automation run with a wall-clock budget: its deadline. */
+  readonly #budgets = new Timers<ThreadId>();
+  /** The projects' automations: their schedules and runs (automations.ts). */
+  readonly #automations: Automations;
   #closing = false;
   #liveInfo: LiveInfo | null = null;
 
@@ -252,6 +286,17 @@ export class Engine {
     this.#snoozeMs = options.snoozeMs ?? SNOOZE_MS;
     this.#switchTimeoutMs = options.switchTimeoutMs ?? 15_000;
     this.#log = options.log ?? ((message) => console.error(`tenzo: ${message}`));
+    this.#automations = new Automations(
+      {
+        store: this.store,
+        config: (root) => this.#readConfig(root),
+        start: (run) =>
+          this.#create({ project: run.project.name, title: run.title, prompt: run.prompt, run }),
+        state: (threadId) => this.#runState(threadId),
+        log: this.#log,
+      },
+      { ...(options.automationTickMs ? { tickMs: options.automationTickMs } : {}) },
+    );
   }
 
   /**
@@ -301,6 +346,9 @@ export class Engine {
     for (const threadId of threadsToWake(this.store)) this.#armWake(threadId);
     // Snoozed items come back on time across restarts; any whose time came meanwhile, now.
     for (const item of openItems(this.store)) if (item.snoozedUntil) this.#armSnooze(item);
+    // Automation runs keep their budgets across restarts; schedules missed meanwhile run once.
+    for (const run of unfinishedRuns(this.store)) if (run.threadId) this.#armBudget(run.threadId);
+    this.#automations.start();
   }
 
   subscribe(listener: (change: EngineChange) => void): () => void {
@@ -340,15 +388,34 @@ export class Engine {
     if (title === "") throw new TenzoError("A new thread needs a title or a prompt.");
     // Only a model asked for is the thread's own: TENZO_DEFAULT_MODEL and the project's config
     // are looked up as each session starts, so a change to either applies to running threads.
-    const model = input.model;
+    const run = input.run;
+    // An automation's run takes its model and thinking as the thread's own choice.
+    const own = run ? runThreadOptions(run.automation) : input.model ? { model: input.model } : {};
     const thread = await createThread(this.store, input.project, title, {
-      ...(model ? { model } : {}),
+      ...own,
       ...(prompt && !given ? { naming: prompt } : {}),
       ...(client ? { client } : {}),
       ...(input.parent ? { parent: input.parent } : {}),
+      ...(run ? { automation: run.name } : {}),
     });
-    if (prompt) enqueuePrompt(this.store, thread.id, prompt);
+    // The run is on record before its session starts, so the session starts with its budget.
+    transaction(this.store, () => {
+      if (run) {
+        insertRun(this.store, {
+          projectId: run.project.id,
+          name: run.name,
+          trigger: run.trigger,
+          result: "started",
+          reason: null,
+          threadId: thread.id,
+          at: thread.createdAt,
+          budget: run.budget,
+        });
+      }
+      if (prompt) enqueuePrompt(this.store, thread.id, prompt);
+    });
     this.#pump(thread.id);
+    if (run) this.#armBudget(thread.id);
     const view = this.#changed(thread.id);
     if (prompt && !given) this.#name(thread.id, prompt);
     return view;
@@ -433,6 +500,9 @@ export class Engine {
     }
     clearPrompts(this.store, thread.id);
     this.#wakes.clear(thread.id);
+    this.#budgets.clear(thread.id);
+    const run = runOfThread(this.store, thread.id);
+    if (run) finishRun(this.store, run.id);
     await removeAttachments(this.store.home, thread.id).catch((error: unknown) => {
       this.#log(`couldn't remove the attachments of ${thread.id}: ${String(error)}`);
     });
@@ -538,7 +608,32 @@ export class Engine {
       items: openItems(this.store).filter((i) => !this.#quiet.has(i.id)),
       projects: this.projects(),
       live: this.#liveInfo,
+      automations: this.automations(),
     };
+  }
+
+  /** The automations the projects' configs define, with their next and last runs. */
+  automations(project?: string): AutomationView[] {
+    try {
+      return this.#automations.list(project);
+    } catch (error) {
+      if (project !== undefined) throw error;
+      this.#log(`couldn't list the automations: ${String(error)}`);
+      return [];
+    }
+  }
+
+  /**
+   * Runs an automation now, by hand (Run now): an ordinary thread, origin `automation`. This is
+   * also what turns its schedule on for this definition (automations.ts).
+   */
+  runAutomation(project: string, name: string) {
+    return this.#automations.run(project, name);
+  }
+
+  /** Looks at the automations' schedules now (tests; the daemon does it on its own). */
+  tickAutomations(): Promise<void> {
+    return this.#automations.tick();
   }
 
   /**
@@ -644,8 +739,10 @@ export class Engine {
     this.#closing = true;
     this.#snoozes.clearAll();
     this.#wakes.clearAll();
+    this.#budgets.clearAll();
     this.#stopNaming.abort();
     stopDetachedGit(); // a `landed` check still fetching
+    await this.#automations.close();
     await Promise.all([
       ...[...this.#live.values()].map(async (live) => {
         // Tenzo's own restart is no error of the agent's: the turn picks up when it is back.
@@ -712,12 +809,16 @@ export class Engine {
       ...(item.turnId ? { turnId: item.turnId } : {}),
       ...resolutionOf(item, answer),
     } as Draft);
+    // Continue on a budget card (Retry, or words): the run gets as much budget again.
+    const run = item.error?.cause === "budget" ? runOfThread(this.store, thread.id) : undefined;
     const appended = transaction(this.store, () => {
       const result = appendEvent(this.store, resolution);
+      if (run) raiseAllowance(this.store, run.id);
       for (const prompt of errorPrompts(item, answer)) enqueuePrompt(this.store, thread.id, prompt);
       return result;
     });
     this.#publish(resolution, appended);
+    if (run) this.#armBudget(thread.id);
     this.#pump(thread.id);
     return {
       item: getItem(this.store, item.id) ?? item,
@@ -793,11 +894,191 @@ export class Engine {
     return read;
   }
 
-  /** What the thread's sessions run with, its project's config read now (`#checkConfig`). */
+  /**
+   * What the thread's sessions run with, its project's config read now (`#checkConfig`), and,
+   * for an automation's run with a cost budget, what it may spend (the agent stops its own turn
+   * there, `budget.exceeded`).
+   */
   #settingsOf(thread: Thread): SessionSettings {
     const read = this.#checkConfig(thread);
     const permissionMode = permissionsOf(read);
-    return { models: this.#modelsOf(thread, read), ...(permissionMode ? { permissionMode } : {}) };
+    const budget = this.#budgetOf(thread);
+    return {
+      models: this.#modelsOf(thread, read),
+      ...(permissionMode ? { permissionMode } : {}),
+      ...(budget?.capUsd !== undefined
+        ? { budget: { capUsd: budget.capUsd, spentUsd: budget.run.costUsd ?? 0 } }
+        : {}),
+    };
+  }
+
+  /** A project's config, for the automations' scheduler: never throws. */
+  #readConfig(root: string): ConfigRead {
+    try {
+      return this.#configs.read(root);
+    } catch (error) {
+      return { config: null, problem: `Couldn't read the project's config: ${String(error)}` };
+    }
+  }
+
+  // Automation runs' budgets (PRODUCT.md §7): a run that reaches its budget is paused and asks.
+
+  /**
+   * The budget of the automation run `thread` is, while it applies (the run hasn't finished):
+   * the spend cap and the wall-clock deadline its allowance gives, and why it is over, if it is.
+   */
+  #budgetOf(thread: Thread): {
+    run: AutomationRun;
+    budget: RunBudget;
+    capUsd?: number;
+    deadline?: number;
+    over: string | null;
+  } | null {
+    if (thread.origin !== "automation") return null;
+    const run = runOfThread(this.store, thread.id);
+    if (!run?.budget || run.finishedAt !== null) return null;
+    const budget = run.budget;
+    const capUsd = budget.costUsd !== undefined ? budget.costUsd * run.allowance : undefined;
+    const deadline =
+      budget.wallClockMs !== undefined ? Date.parse(run.at) + budget.wallClockMs * run.allowance : undefined;
+    let over: string | null = null;
+    if (deadline !== undefined && Date.now() >= deadline) {
+      over = `it has run for ${formatDuration(Date.now() - Date.parse(run.at))}, and its budget is ${formatDuration(deadline - Date.parse(run.at))}`;
+    } else if (capUsd !== undefined && (run.costUsd ?? 0) >= capUsd) {
+      over = `it has spent $${(run.costUsd ?? 0).toFixed(2)}, and its budget is $${capUsd.toFixed(2)}`;
+    }
+    return {
+      run,
+      budget,
+      ...(capUsd !== undefined ? { capUsd } : {}),
+      ...(deadline !== undefined ? { deadline } : {}),
+      over,
+    };
+  }
+
+  /** The thread's open budget card, if it has one: the run is paused. */
+  #budgetCard(threadId: ThreadId): QueueItem | undefined {
+    return openItems(this.store, threadId).find(
+      (item) => item.kind === "error" && item.error?.cause === "budget",
+    );
+  }
+
+  /**
+   * Whether the next turn waits: the thread is an automation run over its budget, or paused by
+   * it (a card asks). Over and not yet asked: the card goes up now.
+   */
+  #heldByBudget(thread: Thread): boolean {
+    const budget = this.#budgetOf(thread);
+    if (!budget) return false;
+    if (this.#budgetCard(thread.id)) return true;
+    if (budget.over === null) return false;
+    this.#pauseRun(thread, budget.over);
+    return true;
+  }
+
+  /** Puts the run's budget card on the Pass (once): Continue gives it as much again; Stop archives. */
+  #pauseRun(thread: Thread, why: string): void {
+    if (this.#budgetCard(thread.id)) return;
+    const name = thread.automation ?? "an automation";
+    try {
+      this.#append(
+        draft(thread, {
+          type: "budget.exceeded",
+          payload: {
+            message: `This run of "${name}" reached its budget: ${why}. It's paused. Continue gives it as much again; Stop archives the thread.`,
+            prompts: [
+              `Tenzo paused you: this run of the automation "${name}" reached its budget (${why}). I've given it as much again. Carry on where you stopped: check what's already done first.`,
+            ],
+          },
+        }),
+      );
+      this.#changed(thread.id);
+    } catch (error) {
+      this.#log(`couldn't pause ${thread.id} for its budget: ${String(error)}`);
+    }
+  }
+
+  /** Sets the run's wall-clock timer, for its deadline as its allowance stands. */
+  #armBudget(threadId: ThreadId): void {
+    if (this.#closing) return;
+    let deadline: number | undefined;
+    try {
+      deadline = this.#budgetOf(getThread(this.store, threadId))?.deadline;
+    } catch {
+      deadline = undefined;
+    }
+    if (deadline === undefined) return this.#budgets.clear(threadId);
+    this.#budgets.set(threadId, deadline, (id) => this.#checkBudget(id));
+  }
+
+  /**
+   * The run's deadline came. A turn running then is interrupted and the card goes up; one that
+   * waits on your answer is left to it and looked at again in a minute; a run with no turn
+   * running waits at its next turn (`#heldByBudget`).
+   */
+  #checkBudget(threadId: ThreadId): void {
+    if (this.#closing) return;
+    try {
+      const thread = getThread(this.store, threadId);
+      if (thread.status !== "active") return;
+      const budget = this.#budgetOf(thread);
+      if (!budget) return;
+      if (budget.over === null) return this.#armBudget(threadId); // allowance raised, or early
+      const live = this.#live.get(threadId);
+      const { runtime, open } = loadFoldState(this.store, threadId);
+      if (!live || (live.turnId === null && runtime.turnId === null)) return;
+      if (waitsOnYou(open)) {
+        this.#budgets.set(threadId, Date.now() + 60_000, (id) => this.#checkBudget(id));
+        return;
+      }
+      this.#pauseRun(thread, budget.over);
+      void live.session.interrupt().catch((error: unknown) => {
+        this.#log(`couldn't interrupt ${threadId} for its budget: ${String(error)}`);
+      });
+    } catch (error) {
+      this.#log(`couldn't check ${threadId}'s budget: ${String(error)}`);
+    }
+  }
+
+  /**
+   * A turn of an automation run ended: what Claude says the session has spent is kept; a run
+   * over its budget (or one the agent stopped at its spending limit) is paused.
+   */
+  #budgetTurnEnded(live: Live, event: Extract<RuntimeEvent, { type: "turn.completed" }>): void {
+    const thread = getThread(this.store, live.threadId);
+    if (thread.origin !== "automation") return;
+    const run = runOfThread(this.store, thread.id);
+    if (!run) return;
+    if (event.payload.costUsd !== undefined) recordCost(this.store, run.id, event.payload.costUsd);
+    const budget = this.#budgetOf(thread);
+    if (!budget) return;
+    if (budget.over !== null) this.#pauseRun(thread, budget.over);
+    else if (event.payload.stoppedBy === "budget") {
+      this.#pauseRun(thread, "Claude stopped at the spend it was allowed");
+    }
+  }
+
+  /** An automation run whose agent is done (`#runState` finished) is finished: no more budget. */
+  #finishRunIfDone(threadId: ThreadId): void {
+    const run = runOfThread(this.store, threadId);
+    if (!run || run.finishedAt !== null || this.#runState(threadId) !== "finished") return;
+    finishRun(this.store, run.id);
+    this.#budgets.clear(threadId);
+  }
+
+  /**
+   * Where an automation run's thread is. Finished: archived, or nothing running or queued, not
+   * landing, and nothing open but finished work (its card waits for you; the run is done).
+   * Paused: its budget card is open. Otherwise it is still going (working, or waiting on you).
+   */
+  #runState(threadId: ThreadId): NonNullable<AutomationRunView["state"]> {
+    const thread = getThread(this.store, threadId);
+    if (thread.status !== "active") return "archived";
+    if (this.#budgetCard(threadId)) return "paused";
+    const view = this.#viewOf(thread);
+    if (view.working || view.phase === "landing") return "going";
+    const open = openItems(this.store, threadId);
+    return open.some((item) => item.kind !== "finished") ? "going" : "finished";
   }
 
   /** The models: the thread's own choice, then its project's config, then the default. */
@@ -1071,6 +1352,8 @@ export class Engine {
     if (live?.turnId || live?.restarting || live?.switching) return;
     const prompt = nextPrompt(this.store, threadId);
     if (!prompt) return;
+    // An automation run over its budget, or paused by it, sends nothing until you say Continue.
+    if (this.#heldByBudget(thread)) return;
 
     // The thread's settings may have changed since its session started (its own model, its
     // project's config, Build it): the session takes them before the turn goes, or, when it
@@ -1229,7 +1512,7 @@ export class Engine {
     const adapter = this.#adapters[agent];
     if (!adapter) throw new TenzoError(`No ${agent} adapter.`);
     // Read as each session starts (and before each turn, #pump), so an edit applies at once.
-    const { models, permissionMode } = this.#settingsOf(thread);
+    const { models, permissionMode, budget } = this.#settingsOf(thread);
     const session = adapter.start({
       threadId: thread.id,
       cwd: thread.worktreePath,
@@ -1237,6 +1520,7 @@ export class Engine {
       ...(restarted ? { restarted } : {}),
       models,
       ...(permissionMode ? { permissionMode } : {}),
+      ...(budget ? { budget } : {}),
       ...(() => {
         const runtime = loadFoldState(this.store, thread.id).runtime;
         // The attach cap counts what this thread already holds for its next report.
@@ -1333,12 +1617,15 @@ export class Engine {
           live.turnId = null;
           live.standing = [];
         }
+        // An automation run: what it spent, and whether that pauses it (before anything goes).
+        this.#budgetTurnEnded(live, event);
         // The turn that landed the thread is over: it archives instead of going on.
         if (live.landed) this.#archiveLanded(live.threadId);
         else if (ours) {
           this.#pump(live.threadId);
           if (event.payload.state === "completed") this.#checkStalled(live);
         }
+        this.#finishRunIfDone(live.threadId);
         this.#changed(live.threadId);
         break;
       }
@@ -1474,6 +1761,7 @@ export class Engine {
       phase: runtime.phase,
       origin: thread.origin,
       parentId: thread.parentId,
+      automation: thread.automation,
       wakeAt: thread.status === "active" ? (runtime.wake?.at ?? null) : null,
       activity: awake > 0 ? "needs-you" : open > 0 ? "snoozed" : working ? "working" : "idle",
       working,

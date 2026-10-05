@@ -182,8 +182,11 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       /** The agent's final answer for the turn, when it gave one. */
       result: z.string().optional(),
       errorMessage: z.string().optional(),
+      /** What the session has spent so far, all turns (Claude's running total), in USD. */
       costUsd: z.number().optional(),
       durationMs: z.number().optional(),
+      /** The agent ended the turn itself because the spend Tenzo allowed it ran out. */
+      stoppedBy: z.literal("budget").optional(),
     }),
   }),
   z.object({ ...base, itemId: ItemId, type: z.literal("item.started"), payload: ItemPayload }),
@@ -368,6 +371,17 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       message: z.string(),
       prompts: z.array(z.string()),
     }),
+  }),
+  /**
+   * Recorded by the daemon: an automation's run reached its budget (wall clock or cost), so it
+   * is paused: its running turn interrupted, nothing more sent to it. It opens a quick-lane card
+   * (an error item, cause `budget`): Continue (Retry) gives the run as much budget again and
+   * sends `prompts`; Stop archives the thread. Never a kill without asking.
+   */
+  z.object({
+    ...base,
+    type: z.literal("budget.exceeded"),
+    payload: z.object({ message: z.string(), prompts: z.array(z.string()) }),
   }),
   /**
    * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.

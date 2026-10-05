@@ -291,6 +291,23 @@ export async function removeWorktree(root: string, path: string, force: boolean)
   await git(root, ["worktree", "remove", ...(force ? ["--force"] : []), "--", path]);
 }
 
+/**
+ * The newest commit that changed `path` among `refs` (branches, `base` among them), and whether
+ * `base` already has it: a worktree cut from `base` then holds that version. Null when no ref
+ * has the file. Reads only.
+ */
+export async function latestChange(
+  root: string,
+  refs: readonly string[],
+  base: string,
+  path: string,
+): Promise<{ commit: string; onBase: boolean } | null> {
+  const found = await runGit(root, ["log", "-1", "--format=%H", ...refs, "--", path]);
+  const commit = found.stdout.trim();
+  if (found.code !== 0 || !/^[0-9a-f]{40,64}$/.test(commit)) return null;
+  return { commit, onBase: await succeeds(root, ["merge-base", "--is-ancestor", commit, base]) };
+}
+
 export async function deleteBranch(root: string, branch: string): Promise<void> {
   await git(root, ["branch", "-D", branch]);
 }

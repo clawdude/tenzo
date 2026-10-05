@@ -75,6 +75,7 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		phase: 'discussing',
 		origin: 'user',
 		parentId: null,
+		automation: null,
 		wakeAt: null,
 		activity: 'idle',
 		working: false,

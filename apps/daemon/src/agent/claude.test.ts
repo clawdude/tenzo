@@ -789,6 +789,21 @@ describe("Claude adapter: models, thinking, subagents, permissions", () => {
     });
   });
 
+  it("gives an automation run's spend cap as maxBudgetUsd: what is left of it; none otherwise", async () => {
+    expect(start(simpleTurn).fake.calls[0]).not.toHaveProperty("maxBudgetUsd");
+    const { fake, session } = start(simpleTurn, { budget: { capUsd: 1, spentUsd: 0.25 } });
+    expect(fake.calls[0]?.maxBudgetUsd).toBeCloseTo(0.75);
+    // Nothing left: a cent, never zero or less (the daemon holds the turn before that).
+    expect(start(simpleTurn, { budget: { capUsd: 1, spentUsd: 3 } }).fake.calls[0]?.maxBudgetUsd).toBe(0.01);
+    // Claude counts the cap from the session's start: another cap takes a new session; the
+    // same cap with more spent doesn't.
+    const models = { discuss: {}, build: {} };
+    expect(session.reconfigure({ models, budget: { capUsd: 1, spentUsd: 0.6 } })).toBe("unchanged");
+    expect(session.reconfigure({ models, budget: { capUsd: 2, spentUsd: 0.6 } })).toBe("restart");
+    expect(session.reconfigure({ models })).toBe("restart");
+    await session.stop();
+  });
+
   it("sets the permission mode only when the project's config does, never with the dangerous opt-in", () => {
     for (const mode of ["default", "acceptEdits", "dontAsk"] as const) {
       const options = start(simpleTurn, { permissionMode: mode }).fake.calls[0];

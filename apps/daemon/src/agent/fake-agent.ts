@@ -224,9 +224,13 @@ export class FakeSession implements AgentSession {
     this.emit({ type: "thread.landed", ...this.#inTurn(), payload: { url } });
   }
 
-  complete(state: "completed" | "failed" | "interrupted" = "completed"): void {
+  /** Ends the turn; `usage` as Claude reports it (its running total, a stop at the spend cap). */
+  complete(
+    state: "completed" | "failed" | "interrupted" = "completed",
+    usage: { costUsd?: number; stoppedBy?: "budget"; result?: string } = {},
+  ): void {
     if (!this.turnId) throw new Error("no turn to complete");
-    this.emit({ type: "turn.completed", turnId: this.turnId, payload: { state } });
+    this.emit({ type: "turn.completed", turnId: this.turnId, payload: { state, ...usage } });
     this.turnId = null;
   }
 

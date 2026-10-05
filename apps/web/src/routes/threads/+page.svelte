@@ -140,13 +140,17 @@
 										>{row.thread.title}</span
 									>
 									{#if row.origin}
-										<!-- Started by another thread's agent, not by you. -->
+										<!-- Started by another thread's agent, or by an automation, not by you. -->
 										<span
 											class="flex min-w-0 items-center gap-1 text-[13px] leading-[1.3] text-mute"
 											data-testid="origin"
 											data-kind={row.origin.kind}
 										>
-											<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a4 4 0 0 0 4 4h9"></path><path d="M15 11l4 4-4 4"></path></svg>
+											{#if row.origin.kind === 'automation'}
+												<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="8.5"></circle><path d="M12 7.5V12l3 2"></path></svg>
+											{:else}
+												<svg class="shrink-0" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 4v7a4 4 0 0 0 4 4h9"></path><path d="M15 11l4 4-4 4"></path></svg>
+											{/if}
 											<span class="truncate">{row.origin.label}</span>
 										</span>
 									{/if}
