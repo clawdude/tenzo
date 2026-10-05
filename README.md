@@ -33,12 +33,13 @@ pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
 
 `pnpm tenzo <command>` runs `apps/daemon/src/cli.ts` on Node's type stripping, with no build step. The file is executable and is the package's `tenzo` bin, so a symlink to it on your PATH gives you a bare `tenzo`.
 
-The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS. From anywhere but the Mac itself, a device must be paired first (`tenzo pair`, see [Remote access](#remote-access-pairing-devices)). Threads' live apps (`expose`, below) are served by a second loopback listener on `TENZO_LIVE_PORT` (default the next port), an origin of their own; to open them from the phone, give that port a second Serve route and name it in `TENZO_LIVE_ORIGIN`:
+The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. Threads' live apps (`expose`, below) are served by a second loopback listener on `TENZO_LIVE_PORT` (default the next port), an origin of their own. To reach Tenzo from a phone, put Tailscale Serve in front of both (two HTTPS routes) and pair the phone; the page switches to `wss:` by itself under HTTPS. One command does it, asking before it changes anything:
 
 ```bash
-tailscale serve --bg --https=8444 http://127.0.0.1:4781
-TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net TENZO_LIVE_ORIGIN=https://my-mac.tailnet-1234.ts.net:8444 pnpm tenzo serve
+pnpm tenzo pair --tailscale --name "My iPhone"
 ```
+
+**[docs/REMOTE.md](docs/REMOTE.md)** is the whole setup: what it does, the commands by hand, the settings, pairing Safari and the home-screen app, revoking, and troubleshooting. The security model is under [Remote access](#remote-access-pairing-devices) below.
 
 On `/ws` the daemon sends a snapshot of active threads and open items, then every thread and item change as it happens; clients send the same commands as `POST /api/commands`, each answered by id. The frames are in `packages/contracts/src/frames.ts`; `packages/client-runtime` keeps the connection (reconnect, ping, wake-on-foreground) and a store the web app reads. A command whose connection drops before its answer fails as lost and isn't resent; to make trying again safe, `thread.create` takes a `clientKey` (New thread sends one per request), and the daemon answers a key it has seen, even before a restart, with the thread it made then (the same key with another project, title, prompt or model is refused).
 
@@ -271,8 +272,8 @@ On the Mac itself Tenzo needs no login. Everything else is **remote** and needs 
 
 **Pair your phone** (once per browser):
 
-1. Tailscale Serve in front of the daemon with `--https` (never `--tcp`, see below), its name in `TENZO_ALLOWED_HOSTS`, and where the phone reaches it in the daemon's `TENZO_PUBLIC_URL`, port included, e.g. `https://my-mac.tailnet-1234.ts.net:8443`. (Or give it each time: `tenzo pair --url https://…:8443`.)
-2. On the Mac: `tenzo pair --name "My iPhone"`. It prints a link and a QR code.
+1. Tailscale Serve in front of the daemon with `--https` (never `--tcp`, see below), its name in `TENZO_ALLOWED_HOSTS`, and where the phone reaches it in the daemon's `TENZO_PUBLIC_URL`, port included, e.g. `https://my-mac.tailnet-1234.ts.net:8443`. (Or give it each time: `tenzo pair --url https://…:8443`.) `tenzo pair --tailscale` sets all of it up, live route included: see [docs/REMOTE.md](docs/REMOTE.md).
+2. On the Mac: `tenzo pair --name "My iPhone"` (or `tenzo pair --tailscale --name "My iPhone"`). It prints a link and a QR code.
 3. Scan it with the phone's camera within 10 minutes. The page pairs and lands on the Pass. The link works once.
 4. Using Tenzo as a home-screen app on iOS? It keeps cookies of its own, apart from Safari's, and the camera opens links in Safari. Open the app (it shows "Pair this device"), copy the link on the Mac and paste it into the app's field (Universal Clipboard carries it over). Open live still works from the app: its links carry their own pass into Safari.
 

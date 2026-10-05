@@ -56,17 +56,38 @@ export class Devices {
   #key: Buffer | undefined;
   /** Where devices reach the daemon (`TENZO_PUBLIC_URL`), for pairing links; null: not said. */
   readonly #publicOrigin: string | null;
+  /** The daemon's other remote settings (`settings`). */
+  readonly #remote: { allowedHosts: string[]; liveOrigins: string[] };
   /** Failed pairing attempts (`POST /api/pair`); every new code lifts the limit. */
   readonly pairingAttempts: RateLimit;
 
   constructor(
     store: Store,
-    { now = Date.now, publicOrigin = null }: { now?: () => number; publicOrigin?: string | null } = {},
+    {
+      now = Date.now,
+      publicOrigin = null,
+      allowedHosts = [],
+      liveOrigins = [],
+    }: {
+      now?: () => number;
+      publicOrigin?: string | null;
+      allowedHosts?: readonly string[];
+      liveOrigins?: readonly string[];
+    } = {},
   ) {
     this.#store = store;
     this.#now = now;
     this.#publicOrigin = publicOrigin;
+    this.#remote = { allowedHosts: [...allowedHosts], liveOrigins: [...liveOrigins] };
     this.pairingAttempts = new RateLimit(PAIR_ATTEMPTS.limit, PAIR_ATTEMPTS.windowMs, now);
+  }
+
+  /**
+   * What remote devices reach the daemon by: its public URL, allowed hosts and live origins. Read
+   * only; `tenzo pair --tailscale` checks them against the Serve routes.
+   */
+  settings(): { publicUrl: string | null; allowedHosts: string[]; liveOrigins: string[] } {
+    return { publicUrl: this.#publicOrigin, ...structuredClone(this.#remote) };
   }
 
   /**

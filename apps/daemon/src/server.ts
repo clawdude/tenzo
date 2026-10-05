@@ -113,7 +113,11 @@ export async function startDaemon(
     ...(config.snoozeMs ? { snoozeMs: config.snoozeMs } : {}),
   });
   const environmentId = store.environmentId;
-  const devices = new Devices(store, { publicOrigin: config.publicUrl ?? null });
+  const devices = new Devices(store, {
+    publicOrigin: config.publicUrl ?? null,
+    allowedHosts: config.allowedHosts,
+    liveOrigins: config.liveOrigins ?? [],
+  });
   const push = new Push({
     devices,
     keys: pushKeys,

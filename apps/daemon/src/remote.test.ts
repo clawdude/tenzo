@@ -318,6 +318,22 @@ describe("pairing", () => {
     expect(JSON.parse(fromPhone.body).error).toMatch(/on the Mac itself/);
   });
 
+  it("tells the Mac its remote settings, read only: no code made, the pairing limit left as it is", async () => {
+    const pair = (code: string) =>
+      call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code } });
+    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) await pair("e".repeat(26));
+    const local = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "daemon.settings" });
+    expect(JSON.parse(local.body)).toEqual({
+      ok: true,
+      result: { publicUrl: null, allowedHosts: [TS], liveOrigins: [LIVE] },
+    });
+    expect((await pair("e".repeat(26))).status).toBe(429);
+    const { cookie } = pairDevice(daemon.devices);
+    const fromPhone = await command(remote({ cookie }), { type: "daemon.settings" });
+    expect(fromPhone.status).toBe(400);
+    expect(JSON.parse(fromPhone.body).error).toMatch(/on the Mac itself/);
+  });
+
   it("survives a daemon restart", async () => {
     const { cookie } = pairDevice(daemon.devices);
     await daemon.close();
