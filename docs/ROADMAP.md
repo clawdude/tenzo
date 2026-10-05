@@ -40,7 +40,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 
 - [x] #41 Local vs. remote mode; one-time pairing link / QR; revocable device tokens (cookie for the Pass, its own pass for the live origin; Devices view)
 - [x] #42 Tailscale Serve setup docs and `tenzo pair --tailscale`
-- [ ] Web Push for quick-lane items, per-device mute; iOS home-screen install polish
+- [x] #43 Web Push for quick-lane items, per-device mute; iOS home-screen install polish
 
 ## M5 · Codex
 

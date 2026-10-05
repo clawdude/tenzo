@@ -1,4 +1,5 @@
 {
+	"id": "/",
 	"name": "Tenzo",
 	"short_name": "Tenzo",
 	"description": "An attention queue for coding agents.",

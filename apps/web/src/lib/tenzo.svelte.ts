@@ -110,6 +110,13 @@ function openClient(): void {
 	});
 	// Screens may start watching before the layout connects (children mount first).
 	for (const w of watchers) w.detach = opened.watch(w.threadId, w.listener);
+	// Whether the page is in view: a paired device looking at Tenzo gets no push (push.ts).
+	const sayVisible = () => opened.setVisible(document.visibilityState === 'visible');
+	const sayHidden = () => opened.setVisible(false);
+	sayVisible();
+	document.addEventListener('visibilitychange', sayVisible);
+	window.addEventListener('pagehide', sayHidden);
+	window.addEventListener('pageshow', sayVisible);
 	opened.connect();
 	// Back on the page with a stale Open live grant (the socket slept through its renewals): a
 	// new socket now, whose snapshot brings a fresh one before Open live is tapped.
@@ -125,6 +132,9 @@ function openClient(): void {
 	closeClient = () => {
 		document.removeEventListener('visibilitychange', onResume);
 		window.removeEventListener('pageshow', onResume);
+		document.removeEventListener('visibilitychange', sayVisible);
+		window.removeEventListener('pagehide', sayHidden);
+		window.removeEventListener('pageshow', sayVisible);
 		for (const w of watchers) {
 			w.detach?.();
 			w.detach = null;

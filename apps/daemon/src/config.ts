@@ -51,6 +51,16 @@ export interface DaemonConfig {
    * waiting; unset, 15 minutes (engine.ts).
    */
   snoozeMs?: number;
+  /**
+   * How much a notification says (push.ts): `short`, the thread's name and a short line (the
+   * default); `none`, only "A thread needs you". `TENZO_PUSH_PREVIEW`.
+   */
+  pushPreview?: "short" | "none";
+  /**
+   * Who sends the pushes, for the push services (VAPID `sub`): a `mailto:` or `https:` URL.
+   * `TENZO_PUSH_CONTACT`; unset, Tenzo's project page.
+   */
+  pushContact?: string;
 }
 
 /** Reads daemon settings from the environment, failing loudly on nonsense. */
@@ -76,6 +86,32 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     ...publicUrl(env.TENZO_PUBLIC_URL),
     ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
     ...(env.TENZO_SNOOZE_MS?.trim() ? { snoozeMs: readSnooze(env.TENZO_SNOOZE_MS.trim()) } : {}),
+    ...readPush(env),
+  };
+}
+
+function readPush(env: Record<string, string | undefined>): Pick<DaemonConfig, "pushPreview" | "pushContact"> {
+  const preview = env.TENZO_PUSH_PREVIEW?.trim() as "short" | "none" | "" | undefined;
+  if (preview && preview !== "short" && preview !== "none") {
+    throw new Error(`TENZO_PUSH_PREVIEW is "short" or "none", got "${preview}"`);
+  }
+  const contact = env.TENZO_PUSH_CONTACT?.trim();
+  if (contact) {
+    let url: URL | undefined;
+    try {
+      url = new URL(contact);
+    } catch {
+      // reported below
+    }
+    if (!url || (url.protocol !== "mailto:" && url.protocol !== "https:")) {
+      throw new Error(
+        `TENZO_PUSH_CONTACT is a mailto: or https: URL, like mailto:you@example.com, got "${contact}"`,
+      );
+    }
+  }
+  return {
+    ...(preview ? { pushPreview: preview } : {}),
+    ...(contact ? { pushContact: contact } : {}),
   };
 }
 

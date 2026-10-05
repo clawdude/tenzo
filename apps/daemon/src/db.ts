@@ -253,6 +253,24 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    name: "web push",
+    sql: `
+      -- A muted device gets no notifications (push.ts), subscribed or not.
+      ALTER TABLE devices ADD COLUMN push_muted INTEGER NOT NULL DEFAULT 0;
+
+      -- Each paired device's browser push subscription (one per device): where its push
+      -- service takes messages, and the keys they are encrypted to. Revoking the device deletes it.
+      CREATE TABLE push_subscriptions (
+        device_id      TEXT PRIMARY KEY REFERENCES devices(id),
+        environment_id TEXT NOT NULL,
+        endpoint       TEXT NOT NULL UNIQUE,  -- https URL of the push service, per browser
+        p256dh         TEXT NOT NULL,         -- the browser's public key, base64url
+        auth           TEXT NOT NULL,         -- the shared auth secret, base64url
+        created_at     TEXT NOT NULL
+      ) STRICT;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

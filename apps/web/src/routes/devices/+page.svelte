@@ -3,6 +3,16 @@
 	import { onMount } from 'svelte';
 	import { deviceLine, splitDevices } from '#lib/devices.ts';
 	import { back } from '#lib/nav.ts';
+	import {
+		browserFacts,
+		currentSubscription,
+		pushLine,
+		subscribeBrowser,
+		requireSubscriptionInfo,
+		type Support,
+		supportOf,
+		unsubscribeBrowser
+	} from '#lib/push.ts';
 	import { connectionLabel } from '#lib/status.ts';
 	import { command, tenzo } from '#lib/tenzo.svelte.ts';
 
@@ -19,6 +29,12 @@
 	let confirming = $state<string | null>(null);
 	let busy = $state(false);
 	let now = $state(Date.now());
+	/** The daemon's push key; null: it sends no notifications. */
+	let pushKey = $state<string | null>(null);
+	/** What this browser can do about notifications. */
+	let support = $state.raw<Support>({ kind: 'none' });
+	/** This browser holds a push subscription. */
+	let subscribedHere = $state(false);
 
 	const split = $derived(splitDevices(devices, current));
 
@@ -27,6 +43,8 @@
 			const result = await command({ type: 'device.list' });
 			devices = result.devices;
 			current = result.current;
+			pushKey = result.pushKey;
+			subscribedHere = (await currentSubscription().catch(() => null)) !== null;
 			loaded = true;
 			now = Date.now();
 		} catch (error) {
@@ -34,7 +52,7 @@
 		}
 	}
 
-	async function run(fn: () => Promise<unknown>) {
+	async function run(fn: () => Promise<unknown>): Promise<void> {
 		busy = true;
 		note = null;
 		try {
@@ -59,12 +77,47 @@
 		void run(() => command({ type: 'device.revoke', deviceId: id }));
 	}
 
+	// Notifications (PRODUCT.md §9). Turning them on asks the browser first, straight from the
+	// tap: iOS shows the prompt only then, and only in the home-screen app.
+	function enablePush() {
+		const key = pushKey;
+		if (!key) return;
+		void run(async () => {
+			const subscription = requireSubscriptionInfo(await subscribeBrowser(key));
+			await command({ type: 'device.subscribe', subscription });
+		}).then(() => {
+			if (note === null) note = 'Notifications are on. Test sends one now.';
+		});
+	}
+
+	function disablePush() {
+		void run(async () => {
+			await command({ type: 'device.unsubscribe' });
+			await unsubscribeBrowser();
+		});
+	}
+
+	function mute(id: string, muted: boolean) {
+		void run(() => command({ type: 'device.mute', deviceId: id, muted }));
+	}
+
+	function testPush(device: Device) {
+		let said: string | null = null;
+		void run(async () => {
+			const { sent, error } = await command({ type: 'device.testPush', deviceId: device.id });
+			said = sent ? `Sent to ${device.name}. It should arrive in a few seconds.` : error;
+		}).then(() => {
+			if (note === null) note = said;
+		});
+	}
+
 	// Load once connected (a reload lands here before the socket is up).
 	$effect(() => {
 		if (tenzo.online && !loaded) void load();
 	});
 
 	onMount(() => {
+		support = supportOf(browserFacts());
 		const tick = setInterval(() => (now = Date.now()), 60_000);
 		return () => clearInterval(tick);
 	});
@@ -108,6 +161,9 @@
 			<span class="min-w-0 truncate font-semibold" data-testid="device-name">{device.name}</span>
 		{/if}
 		<p class="text-[14px] leading-[1.35] text-mute">{deviceLine(device, now)}</p>
+		{#if pushKey}
+			<p class="text-[14px] leading-[1.35] text-mute" data-testid="push-line">{pushLine(device)}</p>
+		{/if}
 
 		{#if confirming === device.id}
 			<div class="mt-1 flex flex-col gap-2.5" data-testid="confirm-revoke">
@@ -150,8 +206,64 @@
 					data-testid="revoke">Revoke</button
 				>
 			</div>
+			{#if pushKey}
+				{@render notifications(device)}
+			{/if}
 		{/if}
 	</article>
+{/snippet}
+
+{#snippet notifications(device: Device)}
+	{@const here = device.id === current}
+	{@const on = device.push.subscribed && (!here || subscribedHere)}
+	{#if here && !on && support.kind === 'home-screen'}
+		<p class="text-[14px] leading-[1.35] text-mute" data-testid="push-home-screen">
+			Notifications on iPhone need Tenzo on the Home Screen: Share → Add to Home Screen, open it
+			from there and pair it, then turn them on in its Devices.
+		</p>
+	{:else if here && !on && support.kind === 'none'}
+		<p class="text-[14px] leading-[1.35] text-mute">This browser can't show notifications.</p>
+	{:else if here && !on && support.kind === 'ready' && support.permission === 'denied'}
+		<p class="text-[14px] leading-[1.35] text-mute">
+			Notifications are blocked for Tenzo in this browser's settings.
+		</p>
+	{:else if here && !on}
+		<div class="flex flex-wrap items-center gap-2">
+			<button
+				type="button"
+				class="opt min-h-11 rounded-full bg-fill px-4 text-[15px] font-medium disabled:opacity-50"
+				disabled={!tenzo.online || busy}
+				onclick={enablePush}
+				data-testid="push-enable">Turn on notifications</button
+			>
+		</div>
+	{:else if on}
+		<div class="flex flex-wrap items-center gap-2">
+			<button
+				type="button"
+				class="opt min-h-11 rounded-full bg-fill px-4 text-[15px] font-medium disabled:opacity-50"
+				disabled={!tenzo.online || busy}
+				onclick={() => mute(device.id, !device.push.muted)}
+				data-testid="push-mute">{device.push.muted ? 'Unmute' : 'Mute'}</button
+			>
+			<button
+				type="button"
+				class="opt min-h-11 rounded-full px-3 text-[15px] text-mute disabled:opacity-50"
+				disabled={!tenzo.online || busy}
+				onclick={() => testPush(device)}
+				data-testid="push-test">Test</button
+			>
+			{#if here}
+				<button
+					type="button"
+					class="opt min-h-11 rounded-full px-3 text-[15px] text-mute disabled:opacity-50"
+					disabled={!tenzo.online || busy}
+					onclick={disablePush}
+					data-testid="push-disable">Turn off</button
+				>
+			{/if}
+		</div>
+	{/if}
 {/snippet}
 
 <main class="fixed inset-0 overflow-hidden bg-black text-ink" data-testid="devices-list">
@@ -187,7 +299,8 @@
 				</h2>
 				{#if tenzo.access === 'local'}
 					<p class="rounded-[20px] bg-card px-[18px] py-3.5 text-[15px] leading-[1.35] text-mute" data-testid="this-mac">
-						The Mac Tenzo runs on. It needs no pairing.
+						The Mac Tenzo runs on. It needs no pairing, and gets no notifications: they go to
+						paired devices.
 					</p>
 				{:else if split.mine}
 					{@render card(split.mine, true, true)}

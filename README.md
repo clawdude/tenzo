@@ -48,7 +48,7 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_PORT` | `4780` | port to listen on |
 | `TENZO_LIVE_PORT` | `TENZO_PORT` + 1 | port of the second listener, which serves only threads' live apps (`/live/`) |
 | `TENZO_LIVE_ORIGIN` | none | the live listener's public origins, comma-separated (e.g. a second Tailscale Serve route, `https://my-mac.tailnet.ts.net:8444`); Open live links to the one with the host name you reached Tenzo by, else to the live port on that name |
-| `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
+| `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/`, `push-keys.json` (the VAPID keys notifications are signed with) |
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
 | `TENZO_PUBLIC_URL` | none | where devices elsewhere reach Tenzo, port included, e.g. `https://my-mac.tailnet.ts.net:8443` (the Tailscale Serve route): the daemon gives it to `tenzo pair` for its links. Unset, `tenzo pair` needs `--url` |
@@ -56,6 +56,8 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 | `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads whose project's `.tenzo/config.json` names none and that weren't given one (e.g. `haiku` for cheap trial runs) |
 | `TENZO_SNOOZE_MS` | 15 minutes | how long a swipe snoozes a card, in ms (e.g. `20000` to watch one come back) |
+| `TENZO_PUSH_PREVIEW` | `short` | what a notification says: `short` (the thread's name and a short line) or `none` ("A thread needs you."); see [Notifications](#notifications-web-push) |
+| `TENZO_PUSH_CONTACT` | Tenzo's project page | the `mailto:` or `https:` contact push services see (VAPID `sub`) |
 
 ### Keep it running (macOS)
 
@@ -292,3 +294,24 @@ On the Mac itself Tenzo needs no login. Everything else is **remote** and needs 
 **No page frames Tenzo.** A live page is same-site with the Pass (cookies ignore ports), so a frame of the Pass there would load with your cookie, and an invisible one under a decoy button would answer cards with your tap; on the Mac, any website could do the same to the login-free Pass in Safari. Every response of the daemon's listener carries `Content-Security-Policy: frame-ancestors 'none'` and `X-Frame-Options: DENY`, plus `X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer`.
 
 What's public: the web app's files, `/health`, `GET /api/session` (whether this browser is local, paired or neither) and `POST /api/pair`.
+
+### Notifications (Web Push)
+
+A paired device can get a notification when a thread needs it, without Tenzo open. There is no cloud of ours: the daemon signs each message with its own VAPID key and posts it to the browser's push service (Apple's for iPhone, Google's for Chrome, Mozilla's for Firefox), encrypted end to end to that browser's key. That is the only connection it needs, and it is outbound, so a tailnet-only daemon can still reach your phone.
+
+**What pushes.** Quick-lane cards only: a question, a permission, a proposal, an error or budget pause, a PR ready to merge. Never finished work (the review lane), and never a card already answered: the push waits out a 3 s burst and goes only if the card is still open. One notification per thread: its tag is the thread's id, so a newer card replaces it (and buzzes again), and cards arriving together make one push. A snoozed card pushes again when it comes back. No push goes to a muted device, nor to one that has Tenzo open and in view: the page tells the daemon over its socket (`visibility` frame), and a page that stops talking (a phone that froze it) counts as away after 45 s. Pushes are sent with `Urgency: high`, a one-hour TTL, and the thread as `Topic`, so an undelivered one is replaced rather than queued. A push service that fails (5xx, 429, no answer) is retried after 5 s, 30 s and 2 min (or its `Retry-After`) while the card is still open, is still its thread's latest push (a retry never replaces a newer card's notification), and the device still wants it; one that answers 404 or 410 gets the subscription forgotten. A push that can't even be built is not retried.
+
+**Only to push services.** The daemon POSTs to whatever endpoint a subscription names, so it takes only endpoints on a known push service, checked when a device subscribes and again before every send: `https` on the default port, a host name (no IP literal in any spelling) under `googleapis.com`, `google.com`, `push.apple.com`, `push.services.mozilla.com` or `notify.windows.com`. Loopback, the LAN, cloud metadata and the tailnet are refused. The keys must be real Web Push keys (a P-256 point, a 16-byte secret). A test notification says only whether the push service took it, never what it answered, and goes at most once every 10 s per device.
+
+**Turn them on** in Devices (Threads → the phone icon): on this device's card, *Turn on notifications* asks the browser's permission and hands the daemon the browser's subscription; then *Mute* / *Unmute* and *Test* (sends one now, muted or not), and *Turn off*. Other devices' cards show whether theirs are on, with Mute and Test. Each device has one subscription; revoking it deletes it. Push services rotate subscriptions now and then: the service worker re-subscribes and hands the daemon the new one (`pushsubscriptionchange`), and each time the app opens with notifications allowed it sends its subscription again (the daemon just replaces it). On the Mac itself Tenzo doesn't push: notifications are for paired devices.
+
+**On iPhone** (iOS 16.4 or later), push works only in the home-screen app:
+
+1. Pair Safari as above, open Tenzo, Share → **Add to Home Screen**.
+2. Open Tenzo from the Home Screen. It has its own cookies, so pair it too (paste a fresh `tenzo pair` link into its field).
+3. In the app: Threads → the phone icon → **Turn on notifications**, and allow. Tap **Test**.
+4. Lock the phone and get a thread to ask something: the notification arrives within seconds. Tapping it opens the app on that card.
+
+**Privacy.** A message says the thread's name and one short line (the question, "Allow Bash?" for a permission, never the command or its input, never context), cut to 60 and 120 characters, plus the card's id for the tap. It is encrypted to your browser, but Apple or Google still see when, how big, and to which subscription. `TENZO_PUSH_PREVIEW=none` makes every notification just "Tenzo · A thread needs you." The push services also see the VAPID contact, `TENZO_PUSH_CONTACT` (default `https://github.com/clawdude/tenzo`, so your tailnet name isn't sent; Apple rejects `localhost`). The keys are made once in `$TENZO_HOME/push-keys.json` (0600); deleting it means every device turns notifications on again. Push can't take a notification back, so when you open Tenzo it clears the notifications of threads that no longer need you.
+
+The service worker (`/service-worker.js`) does notifications only: it caches nothing and handles no requests.

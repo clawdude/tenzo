@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { AutomationProblem, AutomationRunView, AutomationsState, AutomationView } from "./automations.ts";
 import { ModelName, ThinkingLevel } from "./config.ts";
-import { Device, DeviceId, DeviceName } from "./devices.ts";
+import { Device, DeviceId, DeviceName, PushSubscriptionInfo } from "./devices.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
 import { EnvironmentId, ThreadId } from "./ids.ts";
@@ -137,6 +137,18 @@ export const Command = z.discriminatedUnion("type", [
   /** Unpairs a device: its token stops working and its connections close at once. */
   z.object({ type: z.literal("device.revoke"), deviceId: z.string().min(1) }),
   /**
+   * Notifications for the device asking: its browser's push subscription, made with the
+   * daemon's key (`device.list`'s `pushKey`). Replaces the one it had. Paired devices only: on
+   * the Mac itself Tenzo doesn't push.
+   */
+  z.object({ type: z.literal("device.subscribe"), subscription: PushSubscriptionInfo }),
+  /** No more notifications for the device asking: its subscription is forgotten. */
+  z.object({ type: z.literal("device.unsubscribe") }),
+  /** Mutes or unmutes a device's notifications; any device can do it for any other. */
+  z.object({ type: z.literal("device.mute"), deviceId: z.string().min(1), muted: z.boolean() }),
+  /** Sends a device a test notification now, muted or not; answers once its push service has. */
+  z.object({ type: z.literal("device.testPush"), deviceId: z.string().min(1) }),
+  /**
    * The daemon's remote-access settings, read only, so `tenzo pair --tailscale` can tell whether
    * the running daemon is set up for the tailnet. Only from the Mac itself.
    */
@@ -239,9 +251,19 @@ export const CommandResults = {
     devices: z.array(Device),
     /** The device asking; null on the Mac itself. */
     current: DeviceId.nullable(),
+    /** The daemon's VAPID public key (base64url), to subscribe with; null: it sends no pushes. */
+    pushKey: z.string().nullable().default(null),
   }),
   "device.rename": z.object({ device: Device }),
   "device.revoke": z.object({ device: Device }),
+  "device.subscribe": z.object({ device: Device }),
+  "device.unsubscribe": z.object({ device: Device }),
+  "device.mute": z.object({ device: Device }),
+  "device.testPush": z.object({
+    /** The push service took it. False: `error` says why (no subscription, refused, offline). */
+    sent: z.boolean(),
+    error: z.string().nullable(),
+  }),
 } satisfies Record<CommandType, z.ZodType>;
 export type CommandResult<T extends CommandType> = z.infer<(typeof CommandResults)[T]>;
 

@@ -277,6 +277,25 @@ describe("TenzoClient", () => {
     expect(seen.at(-1)?.items).toHaveLength(2);
     expect(logged).toContain("a listener threw");
   });
+
+  it("tells the daemon whether the page is in view, again on every new connection", () => {
+    const { client, clock, latest, synced } = setup();
+    const visibility = () => latest().frames.filter((f) => f.type === "visibility");
+    client.setVisible(true); // not connected yet: nothing to send it on
+    client.connect();
+    synced();
+    expect(visibility()).toEqual([{ type: "visibility", visible: true }]);
+    client.setVisible(true); // unchanged: not sent again
+    client.setVisible(false);
+    expect(visibility()).toEqual([
+      { type: "visibility", visible: true },
+      { type: "visibility", visible: false },
+    ]);
+    latest().serverDrops();
+    clock.advance(100);
+    synced();
+    expect(visibility()).toEqual([{ type: "visibility", visible: false }]);
+  });
 });
 
 describe("TenzoClient.watch", () => {

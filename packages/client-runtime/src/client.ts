@@ -77,6 +77,8 @@ export class TenzoClient {
   /** This connection's snapshot has arrived. */
   #snapshotted = false;
   #state: TenzoState;
+  /** The page is in view (`setVisible`); null until the view says. */
+  #visible: boolean | null = null;
 
   constructor(options: ConnectionOptions) {
     this.#log = options.log ?? consoleLog;
@@ -113,6 +115,21 @@ export class TenzoClient {
 
   close(): void {
     this.connection.close();
+  }
+
+  /**
+   * Whether the page is in view, for the daemon: a paired device looking at Tenzo gets no push
+   * for a card it can see. Sent now if connected, and again on every new connection.
+   */
+  setVisible(visible: boolean): void {
+    if (this.#visible === visible) return;
+    this.#visible = visible;
+    this.#sendVisible();
+  }
+
+  #sendVisible(): void {
+    if (this.#visible === null || this.connection.current.state !== "connected") return;
+    this.connection.send({ type: "visibility", visible: this.#visible });
   }
 
   /**
@@ -234,6 +251,10 @@ export class TenzoClient {
 
   #receive(frame: ServerFrame): void {
     switch (frame.type) {
+      case "hello":
+        // A new connection knows nothing of this page yet.
+        this.#sendVisible();
+        return;
       case "snapshot":
         this.#snapshotted = true;
         this.#set({
