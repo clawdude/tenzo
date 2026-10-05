@@ -19,12 +19,13 @@
 		/** The item's thread, when the Pass has it: for its worktree and title. */
 		thread: ThreadView | undefined;
 		liveOrigin: string | null;
+		liveGrant: string | null;
 		/** Shows a screenshot full screen (the card's own viewer). */
 		onenlarge: (shot: Shot) => void;
 		/** Leaving for the timeline: the card is to be turned over still when you come back. */
 		ondeeper: () => void;
 	}
-	let { item, thread, liveOrigin, onenlarge, ondeeper }: Props = $props();
+	let { item, thread, liveOrigin, liveGrant, onenlarge, ondeeper }: Props = $props();
 
 	const labels = $derived(backLabels(item));
 
@@ -61,7 +62,7 @@
 		return () => (gone = true);
 	});
 	const change = $derived(diff ? changeView(diff) : null);
-	const done = $derived(finishedView(item, thread?.title ?? '', liveOrigin));
+	const done = $derived(finishedView(item, thread?.title ?? '', liveOrigin, liveGrant));
 </script>
 
 {#snippet label(text: string)}

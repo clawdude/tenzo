@@ -2,6 +2,7 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { Devices } from "./devices.ts";
 import { REDIRECTING_ENV } from "./git.ts";
 
 /**
@@ -61,4 +62,15 @@ export function commitFile(
   sh(dir, "add", file);
   sh(dir, "commit", "--quiet", "-m", message);
   return sh(dir, "rev-parse", "HEAD");
+}
+
+/** A device paired the way a browser would (devices.ts): its token, and the cookie carrying it. */
+export function pairDevice(
+  devices: Devices,
+  name = "Test phone",
+): { id: string; token: string; cookie: string } {
+  const { code } = devices.pair(name);
+  const paired = devices.exchange(code, name);
+  if (!paired) throw new Error("pairing failed");
+  return { id: paired.device.id, token: paired.token, cookie: `__Host-tenzo=${paired.token}` };
 }

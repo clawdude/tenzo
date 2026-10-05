@@ -9,7 +9,7 @@ import { VERSION } from "./app.ts";
 import { callDaemon } from "./client.ts";
 import { addProject } from "./projects.ts";
 import { openStore } from "./store.ts";
-import { initRepo, removeTempDirs } from "./testing.ts";
+import { initRepo, pairDevice, removeTempDirs } from "./testing.ts";
 
 afterAll(removeTempDirs);
 import { type RunningDaemon, startDaemon } from "./server.ts";
@@ -117,10 +117,17 @@ describe("startDaemon", () => {
       { adapters: { claude: new FakeAdapter() } },
     );
     running.push(daemon);
-    const status = (origin: string) =>
+    const { cookie } = pairDevice(daemon.devices);
+    const status = (origin: string, headers: Record<string, string> = { Cookie: cookie }) =>
       new Promise<number>((resolve, reject) => {
         const ws = new WebSocket(`ws://127.0.0.1:${daemon.port}/ws`, {
-          headers: { Host: `${ts}:8443`, "X-Forwarded-Host": `${ts}:8443`, Origin: origin },
+          headers: {
+            Host: `${ts}:8443`,
+            "X-Forwarded-Host": `${ts}:8443`,
+            "X-Forwarded-For": "100.101.102.103",
+            Origin: origin,
+            ...headers,
+          },
         });
         ws.on("open", () => {
           ws.close();
@@ -132,6 +139,9 @@ describe("startDaemon", () => {
     expect(await status(`https://${ts}:8443`)).toBe(101);
     expect(await status(`https://${ts}:9443`)).toBe(403);
     expect(await status(`http://${ts}:8443`)).toBe(403);
+    // From the tailnet, only a paired device gets a socket.
+    expect(await status(`https://${ts}:8443`, {})).toBe(401);
+    expect(await status(`https://${ts}:8443`, { Cookie: "__Host-tenzo=forged" })).toBe(401);
   });
 
   it("refuses WebSocket upgrades from another origin or host", async () => {

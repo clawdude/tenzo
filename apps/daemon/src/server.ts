@@ -8,6 +8,7 @@ import type { AgentAdapter } from "./agent/agent.ts";
 import { createClaudeAdapter } from "./agent/claude.ts";
 import { createApp } from "./app.ts";
 import type { DaemonConfig } from "./config.ts";
+import { Devices } from "./devices.ts";
 import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
@@ -23,6 +24,8 @@ export interface RunningDaemon {
   livePort: number;
   environmentId: EnvironmentId;
   engine: Engine;
+  /** Paired devices: pairing codes, tokens, revocation (devices.ts). */
+  devices: Devices;
   /** Stops every agent session (open items stay for next time), drops every WebSocket, stops listening. */
   close(): Promise<void>;
 }
@@ -93,12 +96,14 @@ export async function startDaemon(
     ...(config.snoozeMs ? { snoozeMs: config.snoozeMs } : {}),
   });
   const environmentId = store.environmentId;
+  const devices = new Devices(store);
   const app = createApp({
     environmentId,
     webDir: config.webDir,
     engine,
     allowedHosts: config.allowedHosts,
     devOrigins: config.devOrigins,
+    devices,
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.
@@ -121,7 +126,7 @@ export async function startDaemon(
     const portOf = (threadId: string) => engine.livePort(threadId);
     try {
       liveServer = await listen(
-        { fetch: createLiveApp({ policy, portOf }).fetch, hostname: config.host, port: livePort },
+        { fetch: createLiveApp({ policy, portOf, devices }).fetch, hostname: config.host, port: livePort },
         `${config.host}:${livePort} (threads' live apps) is already in use. Set TENZO_LIVE_PORT to use another port.`,
       );
     } catch (error) {
@@ -130,9 +135,13 @@ export async function startDaemon(
       throw error;
     }
     liveServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) =>
-      liveUpgrade(request, socket, head, { policy, portOf }),
+      liveUpgrade(request, socket, head, { policy, portOf, devices }),
     );
-    engine.setLive({ port: (liveServer.address() as AddressInfo).port, origins: liveOrigins });
+    engine.setLive({
+      port: (liveServer.address() as AddressInfo).port,
+      origins: liveOrigins,
+      grant: null,
+    });
   } catch (error) {
     store.close();
     unlock();
@@ -149,6 +158,7 @@ export async function startDaemon(
     livePort: (liveServer.address() as AddressInfo).port,
     environmentId,
     engine,
+    devices,
     close: () => {
       closing ??= (async () => {
         stopHeartbeat();

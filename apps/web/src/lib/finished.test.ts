@@ -25,6 +25,14 @@ describe('finishedView', () => {
 		});
 	});
 
+	it("goes through the live origin's door with a paired device's grant", () => {
+		const card = finished('f');
+		const live = finishedView(card, 'T', 'https://mac.ts.net:8444', 'dev_x.1.sig')?.live;
+		expect(live).toBe(
+			`https://mac.ts.net:8444/_tenzo/live?grant=dev_x.1.sig&to=${encodeURIComponent(`/live/${card.threadId}/counter`)}`
+		);
+	});
+
 	it('has no live link when the daemon publishes no live origin', () => {
 		expect(finishedView(finished('f'), 'T', null)?.live).toBeNull();
 	});

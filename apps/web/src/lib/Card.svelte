@@ -29,6 +29,8 @@
 		compact?: boolean;
 		/** Where threads' live apps are, for Open live; null: no link. */
 		liveOrigin?: string | null;
+		/** This device's pass to the live origin, for Open live; null on the Mac itself. */
+		liveGrant?: string | null;
 		/** The item's thread, for the back (its worktree, its title). */
 		threadView?: ThreadView | undefined;
 		/** Sends the answer; false when it couldn't go (offline), and the card stays. */
@@ -41,6 +43,7 @@
 		failure,
 		compact = false,
 		liveOrigin = null,
+		liveGrant = null,
 		threadView = undefined,
 		onanswer
 	}: Props = $props();
@@ -65,7 +68,7 @@
 
 	const steps = $derived(stepsOf(item, threadView?.landing));
 	/** Finished work's content; null on every other card. */
-	const view = $derived(finishedView(item, thread, liveOrigin));
+	const view = $derived(finishedView(item, thread, liveOrigin, liveGrant));
 	/** The screenshot shown full screen, if one was tapped. */
 	let enlarged = $state.raw<Shot | null>(null);
 	// Which question the card is on, whether its answer has gone, and which taps to ignore.
@@ -176,6 +179,7 @@
 				{item}
 				thread={threadView}
 				{liveOrigin}
+				{liveGrant}
 				onenlarge={(shot) => (enlarged = shot)}
 				ondeeper={() => (returnTo = item.id)}
 			/>

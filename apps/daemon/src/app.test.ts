@@ -21,6 +21,9 @@ afterEach(() => {
 
 const app = () => createApp({ environmentId, webDir });
 
+/** What Node's server hands Hono for a request from this Mac (auth.ts reads the socket). */
+const LOCAL = { incoming: { socket: { remoteAddress: "127.0.0.1" } } };
+
 describe("GET /health", () => {
   it("returns the daemon version and environment id per the contract", async () => {
     const res = await app().request("/health");
@@ -80,11 +83,11 @@ describe("web app", () => {
 
 describe("who may call", () => {
   const post = (headers: Record<string, string>, body = '{"type":"snapshot"}') =>
-    app().request("/api/commands", {
-      method: "POST",
-      headers: { "content-type": "application/json", ...headers },
-      body,
-    });
+    app().request(
+      "/api/commands",
+      { method: "POST", headers: { "content-type": "application/json", ...headers }, body },
+      LOCAL,
+    );
 
   it("refuses a foreign Host everywhere (DNS rebinding)", async () => {
     for (const path of ["/health", "/", "/api/commands"]) {
@@ -104,11 +107,15 @@ describe("who may call", () => {
     expect((await post({ Host: "127.0.0.1:4780", Origin: "http://127.0.0.1:4780" })).status).toBe(503);
     expect((await post({})).status).toBe(503);
     const withDev = createApp({ environmentId, webDir, devOrigins: ["http://localhost:5173"] });
-    const res = await withDev.request("/api/commands", {
-      method: "POST",
-      headers: { "content-type": "application/json", Origin: "http://localhost:5173" },
-      body: '{"type":"snapshot"}',
-    });
+    const res = await withDev.request(
+      "/api/commands",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", Origin: "http://localhost:5173" },
+        body: '{"type":"snapshot"}',
+      },
+      LOCAL,
+    );
     expect(res.status).toBe(503);
   });
 
@@ -116,17 +123,22 @@ describe("who may call", () => {
     const ts = "andreas-mac-mini.tail6259b4.ts.net";
     const behind = createApp({ environmentId, webDir, allowedHosts: [ts] });
     const call = (origin: string) =>
-      behind.request("/api/commands", {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          Host: `${ts}:8443`,
-          "X-Forwarded-Host": `${ts}:8443`,
-          Origin: origin,
+      behind.request(
+        "/api/commands",
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            Host: `${ts}:8443`,
+            "X-Forwarded-Host": `${ts}:8443`,
+            Origin: origin,
+          },
+          body: '{"type":"snapshot"}',
         },
-        body: '{"type":"snapshot"}',
-      });
-    expect((await call(`https://${ts}:8443`)).status).toBe(503); // through to the API
+        LOCAL,
+      );
+    // Its own page: through the Origin check, then refused for want of a paired device.
+    expect((await call(`https://${ts}:8443`)).status).toBe(401);
     expect((await call(`https://${ts}:9443`)).status).toBe(403);
     expect((await call(`http://${ts}:8443`)).status).toBe(403);
   });
@@ -140,7 +152,7 @@ describe("who may call", () => {
   });
 
   it("answers unknown API paths with JSON, not the web app", async () => {
-    const res = await app().request("/api/nope");
+    const res = await app().request("/api/nope", {}, LOCAL);
     expect(res.status).toBe(404);
     expect(await res.json()).toMatchObject({ ok: false });
   });

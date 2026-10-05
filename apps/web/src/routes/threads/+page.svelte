@@ -65,6 +65,15 @@
 				</p>
 			</div>
 			<span class="flex shrink-0 items-center gap-2.5">
+				<!-- The paired devices: rarely needed, so the quietest of the three. -->
+				<a
+					href="/devices"
+					aria-label="Devices"
+					class="opt flex size-11 shrink-0 items-center justify-center rounded-full bg-card text-mute"
+					data-testid="to-devices"
+				>
+					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="6.5" y="3" width="11" height="18" rx="2.5"></rect><path d="M11 17.5h2"></path></svg>
+				</a>
 				{#if live.automations.length > 0 || live.automationProblems.length > 0}
 					<!-- The automations: what runs by itself, quietly beside the way back. -->
 					<a

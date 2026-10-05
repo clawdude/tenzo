@@ -38,7 +38,9 @@ export interface FinishedView {
 export function finishedView(
 	item: QueueItem,
 	threadTitle: string,
-	liveOrigin: string | null
+	liveOrigin: string | null,
+	/** This device's pass to the live origin (a paired phone's); null on the Mac itself. */
+	liveGrant: string | null = null
 ): FinishedView | null {
 	const f = item.finished;
 	if (item.kind !== 'finished' || !f) return null;
@@ -56,6 +58,6 @@ export function finishedView(
 			alt: a.caption || a.name,
 			caption: a.caption ?? ''
 		})),
-		live: f.live && liveOrigin ? liveUrl(liveOrigin, item.threadId, f.live) : null
+		live: f.live && liveOrigin ? liveUrl(liveOrigin, item.threadId, f.live, liveGrant) : null
 	};
 }

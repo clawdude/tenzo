@@ -3,6 +3,7 @@ import { EnvironmentId } from "./ids.ts";
 
 export * from "./automations.ts";
 export * from "./config.ts";
+export * from "./devices.ts";
 export * from "./diff.ts";
 export * from "./finished.ts";
 export * from "./ids.ts";

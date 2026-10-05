@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { AutomationProblem, AutomationRunView, AutomationsState, AutomationView } from "./automations.ts";
 import { ModelName, ThinkingLevel } from "./config.ts";
+import { Device, DeviceId, DeviceName } from "./devices.ts";
 import { ThreadDiff } from "./diff.ts";
 import { LiveInfo } from "./finished.ts";
 import { EnvironmentId, ThreadId } from "./ids.ts";
@@ -125,6 +126,16 @@ export const Command = z.discriminatedUnion("type", [
     project: z.string().min(1),
     name: z.string().min(1).max(100),
   }),
+  /**
+   * A one-time pairing link's code (`tenzo pair`): short-lived, single use. Only from the Mac
+   * itself; a paired device can't make more.
+   */
+  z.object({ type: z.literal("device.pair"), name: DeviceName.optional() }),
+  /** The paired devices, and which one is asking (none on the Mac itself). */
+  z.object({ type: z.literal("device.list") }),
+  z.object({ type: z.literal("device.rename"), deviceId: z.string().min(1), name: DeviceName }),
+  /** Unpairs a device: its token stops working and its connections close at once. */
+  z.object({ type: z.literal("device.revoke"), deviceId: z.string().min(1) }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -204,6 +215,18 @@ export const CommandResults = {
     /** Finished runs left as they were, and why (uncommitted changes, say). */
     kept: z.array(z.object({ threadId: ThreadId, reason: z.string() })),
   }),
+  "device.pair": z.object({
+    /** Goes in the link's fragment (`pairingUrl`); the daemon keeps only its hash. */
+    code: z.string(),
+    expiresAt: z.string(),
+  }),
+  "device.list": z.object({
+    devices: z.array(Device),
+    /** The device asking; null on the Mac itself. */
+    current: DeviceId.nullable(),
+  }),
+  "device.rename": z.object({ device: Device }),
+  "device.revoke": z.object({ device: Device }),
 } satisfies Record<CommandType, z.ZodType>;
 export type CommandResult<T extends CommandType> = z.infer<(typeof CommandResults)[T]>;
 

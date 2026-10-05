@@ -33,7 +33,7 @@ pnpm tenzo serve    # daemon + web app on http://127.0.0.1:4780
 
 `pnpm tenzo <command>` runs `apps/daemon/src/cli.ts` on Node's type stripping, with no build step. The file is executable and is the package's `tenzo` bin, so a symlink to it on your PATH gives you a bare `tenzo`.
 
-The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS. Threads' live apps (`expose`, below) are served by a second loopback listener on `TENZO_LIVE_PORT` (default the next port), an origin of their own; to open them from the phone, give that port a second Serve route and name it in `TENZO_LIVE_ORIGIN`:
+The daemon serves the web app, `GET /health` (version and environment id) and the WebSocket at `/ws` from one origin, on loopback only. To reach it from a phone, put Tailscale Serve in front of that one port; the page switches to `wss:` by itself under HTTPS. From anywhere but the Mac itself, a device must be paired first (`tenzo pair`, see [Remote access](#remote-access-pairing-devices)). Threads' live apps (`expose`, below) are served by a second loopback listener on `TENZO_LIVE_PORT` (default the next port), an origin of their own; to open them from the phone, give that port a second Serve route and name it in `TENZO_LIVE_ORIGIN`:
 
 ```bash
 tailscale serve --bg --https=8444 http://127.0.0.1:4781
@@ -50,6 +50,7 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_HOME` | `~/.tenzo` | Tenzo's state, private to you: `environment-id` (this machine's stable identity), `tenzo.db` (SQLite), `worktrees/` |
 | `TENZO_WEB_DIR` | `apps/web/build` | the built web app to serve |
 | `TENZO_ALLOWED_HOSTS` | none | host names besides loopback that may reach the daemon, comma-separated (e.g. the Tailscale Serve name); see below |
+| `TENZO_PUBLIC_URL` | `https://` + the first allowed host | where devices elsewhere reach Tenzo, e.g. `https://my-mac.tailnet.ts.net:8443`: `tenzo pair` makes its links on it |
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | origins of dev servers whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: by default the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 | `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads whose project's `.tenzo/config.json` names none and that weren't given one (e.g. `haiku` for cheap trial runs) |
@@ -261,3 +262,26 @@ TENZO_ALLOWED_HOSTS=my-mac.tailnet-1234.ts.net pnpm tenzo serve
 ```
 
 One daemon runs per `TENZO_HOME` (`daemon.pid`); a second one refuses to start. A lock left by a daemon that died is taken over; if it names a pid that something else now runs as, delete `daemon.pid`.
+
+### Remote access: pairing devices
+
+On the Mac itself Tenzo needs no login. Everything else is **remote** and needs a **paired device**: the API, `/ws`, attachments and threads' live apps. The web app's own files hold no data and stay open, so an unpaired phone gets a calm "Pair this device" page instead of a broken Pass.
+
+**Pair your phone** (once per browser):
+
+1. Tailscale Serve in front of the daemon, and its name in `TENZO_ALLOWED_HOSTS`, as above. If Serve's route isn't on 443, say where it is in `TENZO_PUBLIC_URL` (or `tenzo pair --url`), e.g. `https://my-mac.tailnet-1234.ts.net:8443`.
+2. On the Mac: `tenzo pair --name "My iPhone"`. It prints a link and a QR code.
+3. Scan it with the phone's camera within 10 minutes. The page pairs and lands on the Pass. The link works once.
+4. Using Tenzo as a home-screen app on iOS? It keeps cookies of its own, apart from Safari's, and the camera opens links in Safari. Open the app (it shows "Pair this device"), copy the link on the Mac and paste it into the app's field (Universal Clipboard carries it over). Open live still works from the app: its links carry their own pass into Safari.
+
+`tenzo devices` lists paired devices (name, when paired, last seen), `tenzo devices rename <id> <name…>` renames one, and `tenzo devices revoke <id>` unpairs it: its token stops working and its open connections (the Pass's socket, live apps' sockets) close at once. Threads → the phone icon shows the same list in the app, with Rename and Revoke. New devices are paired from the Mac only.
+
+**Local or remote.** A request is local only when its socket comes from loopback, its `Host` names loopback (127.0.0.1, localhost, ::1), and it carries no proxy's forwarding header (`X-Forwarded-For`, `Forwarded`, `Tailscale-User-*`, …). Tailscale Serve connects from 127.0.0.1 but passes on the name the phone used and adds `X-Forwarded-For`, so its requests are remote on both counts: a phone that sends `Host: localhost` through Serve is still remote. Spoofing goes only one way: a local process that sends a tailnet `Host` or a forwarding header makes itself remote, and then needs a token like anyone else. (An SSH tunnel to the daemon's port is local: that is the Mac's own login. Don't put a proxy in front that rewrites Host to loopback and drops every forwarding header.)
+
+**Pairing.** `tenzo pair` asks the running daemon for a one-time code (26 random characters, 10 minutes, single use; only its hash is stored). The link is `https://<host>/pair#<code>`: the code rides in the fragment, which no request carries (nor logs, nor Referer). The page reads it, removes it from the address bar and posts it to `POST /api/pair` (JSON only, same origin only); the daemon trades it, once, for the device's own 256-bit token, stored as a SHA-256 hash in SQLite (`devices`, migration "paired devices"). Pairing attempts are limited to 10 a minute, for everyone together (behind Serve every request comes from 127.0.0.1). Devices survive daemon restarts.
+
+**The token** travels only in a cookie: `__Host-tenzo`, `HttpOnly; Secure; SameSite=Strict; Path=/`, no Domain, 400 days. No script reads it and the response body never carries it; it needs HTTPS (Tailscale Serve), and the pair page says so when a browser drops it. The daemon takes it only from its own pages (`Sec-Fetch-Site` same-origin or none) on top of the Origin check.
+
+**The live origin keeps its own credential.** Cookies ignore ports, so the browser sends `__Host-tenzo` to the live listener (`:8444`) too, and SameSite can't stop a live page from sending it to the daemon (same site). So: the daemon refuses the live origin's requests (Origin, and `Sec-Fetch-Site: same-site`); the live listener never accepts `__Host-tenzo`, strips it (and its own cookie) from every request before it reaches a dev server, and drops any `Set-Cookie` for them from the dev server, WebSocket handshakes included. The live listener takes only `__Host-tenzo-live`: a pass signed by the daemon (HMAC, key in SQLite) naming the device, checked against revocation on every request. A paired device gets a day-long grant in its snapshot; Open live goes through the live origin's door (`/_tenzo/live?grant=…&to=/live/<thread>/…`), which sets the live cookie (30 days) and redirects to the page. The live pass grants live apps and nothing else; a live page can't reach the API with it or anything else.
+
+What's public: the web app's files, `/health`, `GET /api/session` (whether this browser is local, paired or neither) and `POST /api/pair`.

@@ -1,6 +1,19 @@
-import type { Command, CommandResult, CommandType } from "@tenzo/contracts";
+import type { Command, CommandResult, CommandType, Device } from "@tenzo/contracts";
+import type { Devices } from "./devices.ts";
 import type { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
+
+/**
+ * Who sent a command (auth.ts): the Mac itself, or a paired device. Transports run commands only
+ * for one of the two; an unpaired remote request never gets this far.
+ */
+export type Caller = { mode: "local"; device: null } | { mode: "remote"; device: Device };
+
+/** What the device commands need besides the engine. */
+export interface CommandContext {
+  devices?: Devices | undefined;
+  caller?: Caller | undefined;
+}
 
 /** How a command ended, ready for a transport to put on the wire. */
 export type Outcome =
@@ -16,11 +29,15 @@ export type Outcome =
 export async function executeCommand(
   engine: Engine | undefined,
   command: Command,
+  context: CommandContext = {},
   log: (message: string, error: unknown) => void = (message, error) =>
     console.error(`tenzo: ${message}`, error),
 ): Promise<Outcome> {
-  if (!engine) return { ok: false, error: "This daemon runs no threads.", fault: "daemon" };
   try {
+    if (isDeviceCommand(command)) {
+      return { ok: true, result: runDeviceCommand(command, context) };
+    }
+    if (!engine) return { ok: false, error: "This daemon runs no threads.", fault: "daemon" };
     return { ok: true, result: await runCommand(engine, command) };
   } catch (error) {
     if (error instanceof TenzoError) return { ok: false, error: error.message, fault: "client" };
@@ -34,10 +51,44 @@ export async function runCommand<C extends Command>(
   engine: Engine,
   command: C,
 ): Promise<CommandResult<C["type"]>> {
-  return (await run(engine, command)) as CommandResult<C["type"]>;
+  if (isDeviceCommand(command)) {
+    throw new TenzoError(`${command.type} needs to know who asks: use executeCommand.`);
+  }
+  return (await run(engine, command as Exclude<Command, DeviceCommand>)) as CommandResult<C["type"]>;
 }
 
-async function run(engine: Engine, command: Command): Promise<CommandResult<CommandType>> {
+type DeviceCommand = Extract<Command, { type: `device.${string}` }>;
+
+function isDeviceCommand(command: Command): command is DeviceCommand {
+  return command.type.startsWith("device.");
+}
+
+/** The `device.*` commands: pairing and the paired devices, not the engine's business. */
+function runDeviceCommand(
+  command: DeviceCommand,
+  { devices, caller }: CommandContext,
+): CommandResult<CommandType> {
+  if (!devices || !caller) throw new TenzoError("This daemon keeps no devices.");
+  switch (command.type) {
+    case "device.pair":
+      // A paired device can do everything else, but new devices are let in from the Mac only.
+      if (caller.mode !== "local") {
+        throw new TenzoError("Pairing links are made on the Mac itself: run `tenzo pair` there.");
+      }
+      return devices.pair(command.name);
+    case "device.list":
+      return { devices: devices.list(), current: caller.device?.id ?? null };
+    case "device.rename":
+      return { device: devices.rename(command.deviceId, command.name) };
+    case "device.revoke":
+      return { device: devices.revoke(command.deviceId) };
+  }
+}
+
+async function run(
+  engine: Engine,
+  command: Exclude<Command, DeviceCommand>,
+): Promise<CommandResult<CommandType>> {
   switch (command.type) {
     case "thread.create":
       return {

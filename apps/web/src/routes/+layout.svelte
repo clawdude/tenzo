@@ -1,9 +1,11 @@
 <script lang="ts">
 	import '../app.css';
 	import { afterNavigate } from '$app/navigation';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import { track } from '#lib/nav.ts';
-	import { connectTenzo } from '#lib/tenzo.svelte.ts';
+	import PairDevice from '#lib/PairDevice.svelte';
+	import { connectTenzo, tenzo } from '#lib/tenzo.svelte.ts';
 
 	let { children } = $props();
 
@@ -17,4 +19,9 @@
 	<title>Tenzo</title>
 </svelte:head>
 
-{@render children()}
+{#if tenzo.access === 'unpaired' && page.url.pathname !== '/pair'}
+	<!-- From elsewhere and not paired: how to pair, instead of a Pass that can't load. -->
+	<PairDevice />
+{:else}
+	{@render children()}
+{/if}

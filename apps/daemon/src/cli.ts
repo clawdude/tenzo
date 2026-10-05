@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 import { setTimeout as sleep } from "node:timers/promises";
+import { renderUnicodeCompact } from "uqr";
 import {
   type AutomationView,
+  type Device,
+  pairingUrl,
   type Command,
   type CommandResult,
   isSnoozed,
@@ -13,6 +16,7 @@ import { VERSION } from "./app.ts";
 import { parseArgs } from "./args.ts";
 import { callDaemon } from "./client.ts";
 import { readConfig } from "./config.ts";
+import { pairingOrigin } from "./devices.ts";
 import { TenzoError } from "./errors.ts";
 import { formatEvent, formatItem } from "./format.ts";
 import { readProjectConfig } from "./project-config.ts";
@@ -59,6 +63,13 @@ Usage:
   tenzo automation archive <project> <name>
                                          archive its finished runs with a clean worktree
                                          (branches kept); runs going or waiting on you stay
+  tenzo pair [--name <name>]             a one-time link and QR code that pairs a phone (or any
+                                         browser elsewhere) with this daemon: open it there within
+                                         10 minutes (--url <origin>: where the device reaches
+                                         Tenzo, default TENZO_PUBLIC_URL or the allowed host)
+  tenzo devices                          the paired devices: name, when paired, last seen
+  tenzo devices rename <id> <name…>      call a device something else
+  tenzo devices revoke <id>              unpair it: its token stops working, its connections close
   tenzo --version                        print the version
 
 start, send and answer then show the thread's events until it needs you or goes idle
@@ -73,6 +84,8 @@ Environment:
                        (e.g. its Tailscale Serve name)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
   TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
+  TENZO_PUBLIC_URL     where devices elsewhere reach Tenzo, for tenzo pair's link
+                       (e.g. https://my-mac.tailnet.ts.net:8443)
   TENZO_SNOOZE_MS      how long a swipe snoozes an item, for trying it out (default 15 minutes)
 `;
 
@@ -343,6 +356,59 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
   }
 }
 
+async function pair(args: string[]): Promise<void> {
+  const { options } = parseArgs(args, [], ["--name", "--url"]);
+  const origin = pairingOrigin(config(), options.get("--url"));
+  const name = options.get("--name");
+  const { code, expiresAt } = await call({ type: "device.pair", ...(name ? { name } : {}) });
+  const url = pairingUrl(origin, code);
+  console.log(`Open this on the device you want to pair${name ? ` (${name})` : ""}:\n`);
+  console.log(`  ${url}\n`);
+  console.log(renderUnicodeCompact(url, { border: 2 }));
+  console.log(
+    `\nScan it with the phone's camera. It works once, until ${localTime(expiresAt)}; the browser that opens it gets its own token and lands on the Pass.`,
+  );
+  console.log("`tenzo devices` lists paired devices; `tenzo devices revoke <id>` unpairs one.");
+}
+
+async function devices([sub, ...rest]: string[]): Promise<void> {
+  const { positional } = parseArgs(rest);
+  switch (sub) {
+    case undefined:
+    case "list":
+    case "ls": {
+      const { devices: list } = await call({ type: "device.list" });
+      if (list.length === 0) {
+        console.log("No paired devices. Pair one with `tenzo pair`.");
+        return;
+      }
+      printTable([
+        ["ID", "NAME", "PAIRED", "LAST SEEN"],
+        ...list.map((d: Device) => [d.id, d.name, localTime(d.createdAt), d.lastSeenAt ? localTime(d.lastSeenAt) : "never"]),
+      ]);
+      return;
+    }
+    case "rename": {
+      const [id, ...words] = positional;
+      const name = words.join(" ").trim();
+      if (!id || name === "") usageError("tenzo devices rename needs a device id and a name.");
+      const { device } = await call({ type: "device.rename", deviceId: id, name });
+      console.log(`Renamed ${device.id} to "${device.name}".`);
+      return;
+    }
+    case "revoke":
+    case "rm": {
+      const [id] = positional;
+      if (!id) usageError("tenzo devices revoke needs a device id (`tenzo devices` lists them).");
+      const { device } = await call({ type: "device.revoke", deviceId: id });
+      console.log(`Revoked "${device.name}" (${device.id}): it is disconnected and needs \`tenzo pair\` to come back.`);
+      return;
+    }
+    default:
+      usageError(`Unknown devices command "${sub}".`);
+  }
+}
+
 function scheduleCell(a: AutomationView): string {
   if (!a.schedule) return "run by hand";
   if (!a.enabled) return `${a.schedule} (switched off)`;
@@ -497,6 +563,11 @@ async function main([command, ...args]: string[]): Promise<void> {
       return automation(args);
     case "answer":
       return answer(args);
+    case "pair":
+      return pair(args);
+    case "devices":
+    case "device":
+      return devices(args);
     case "--version":
     case "-v":
       console.log(VERSION);

@@ -4,9 +4,21 @@ import type { IncomingMessage } from "node:http";
 import { connect } from "node:net";
 import { isAbsolute, relative, sep } from "node:path";
 import type { Duplex } from "node:stream";
-import { liveBase, type Preview, ThreadId } from "@tenzo/contracts";
+import { type Device, LIVE_DOOR, liveBase, type Preview, ThreadId } from "@tenzo/contracts";
 import { type Context, Hono, type MiddlewareHandler } from "hono";
 import { type AccessPolicy, accessGuard, hostAllowed, originAllowed } from "./access.ts";
+import {
+  factsOf,
+  factsOfIncoming,
+  LIVE_COOKIE,
+  liveCookie,
+  type RequestFacts,
+  readCookie,
+  requestMode,
+  setsTenzoCookie,
+  withoutTenzoCookies,
+} from "./auth.ts";
+import type { Devices } from "./devices.ts";
 import { TenzoError } from "./errors.ts";
 
 /**
@@ -20,8 +32,14 @@ import { TenzoError } from "./errors.ts";
  * threads). On the live origin it can't: the daemon refuses its Origin, and the live listener
  * serves nothing but `/live/`. Same Host allowlist; an Origin is accepted only if it is the live
  * listener's own. Different threads' apps share the live origin with each other, never Tenzo's.
- * Over the tailnet that means a second Tailscale Serve route (`TENZO_LIVE_ORIGIN`). Cookies
- * don't keep ports apart, but Tenzo uses none.
+ * Over the tailnet that means a second Tailscale Serve route (`TENZO_LIVE_ORIGIN`).
+ *
+ * From elsewhere (remote mode, auth.ts) the live origin takes only its own credential: a cookie
+ * holding a signed pass for a paired device, set by its door (`/_tenzo/live`) from the grant in
+ * an Open live link. Cookies don't keep ports apart, so the browser sends Tenzo's own device
+ * cookie here too: it is never taken here, and like the live cookie it is stripped from every
+ * request before it reaches a dev server, and a dev server can't set either (its Set-Cookie for
+ * them is dropped, WebSocket handshakes included). Revoking a device closes its live sockets too.
  *
  * The path is forwarded unchanged, so the dev server must serve under the thread's base
  * (`vite --base /live/<thread>/`, Next's `basePath`, …). An app that only works at `/` loads its
@@ -197,6 +215,25 @@ export async function checkListener(
   );
 }
 
+/** Who may use live apps: the Mac itself, or a paired device by its live cookie. */
+export function liveCaller(
+  facts: RequestFacts,
+  devices: Devices | undefined,
+): { mode: "local" } | { mode: "remote"; device: Device } | null {
+  if (requestMode(facts) === "local") return { mode: "local" };
+  const device = devices?.checkLivePass(readCookie(facts.header("cookie"), LIVE_COOKIE)) ?? null;
+  return device ? { mode: "remote", device } : null;
+}
+
+/** What a browser from elsewhere gets without the live origin's cookie. */
+function notPaired(c: Context, why: string): Response {
+  return c.html(
+    `<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Tenzo · live app</title><body style="margin:0;padding:32px 24px;background:#000;color:#f5f5f7;font:17px/1.4 -apple-system,system-ui,sans-serif"><h1 style="font-size:28px">Open it from Tenzo</h1><p style="color:#8e8e93">${why} Open live on a finished card opens it, on a device paired with <code>tenzo pair</code>.</p></body>`,
+    401,
+    { "Cache-Control": "no-store" },
+  );
+}
+
 /** `/live/<thread>/…` over HTTP: a Hono handler, behind the access guard. */
 export function liveHandler(portOf: LivePort) {
   return async (c: Context): Promise<Response> => {
@@ -210,9 +247,14 @@ export function liveHandler(portOf: LivePort) {
     const url = new URL(c.req.url);
     const headers = new Headers();
     c.req.raw.headers.forEach((value, key) => {
-      if (!HOP_BY_HOP.has(key) && key !== "host" && key !== "accept-encoding") {
-        headers.set(key, value);
+      if (HOP_BY_HOP.has(key) || key === "host" || key === "accept-encoding") return;
+      if (key === "cookie") {
+        // Tenzo's cookies are Tenzo's: a dev server never sees them.
+        const kept = withoutTenzoCookies(value);
+        if (kept !== null) headers.set(key, kept);
+        return;
       }
+      headers.set(key, value);
     });
     // The dev server sees a request from its own machine, as if opened there: dev servers
     // refuse a foreign Host (DNS-rebinding checks); the access guard has already vetted it.
@@ -247,7 +289,9 @@ export function liveHandler(portOf: LivePort) {
       if (key === "set-cookie") return; // appended one by one below
       out.set(key, key === "location" ? sameOriginLocation(value, port) : value);
     });
-    for (const cookie of upstream.headers.getSetCookie()) out.append("set-cookie", cookie);
+    for (const cookie of upstream.headers.getSetCookie()) {
+      if (!setsTenzoCookie(cookie)) out.append("set-cookie", cookie);
+    }
     return new Response(upstream.body, {
       status: upstream.status,
       statusText: upstream.statusText,
@@ -261,10 +305,43 @@ export function liveHandler(portOf: LivePort) {
  * like the daemon's (Host allowlist), and a request with an Origin must come from the live
  * origin itself, never from Tenzo's pages or anyone else's.
  */
-export function createLiveApp(options: { policy: AccessPolicy; portOf: LivePort }): Hono {
+export function createLiveApp(options: {
+  policy: AccessPolicy;
+  portOf: LivePort;
+  devices?: Devices | undefined;
+}): Hono {
   const app = new Hono();
   app.use("*", markDaemon());
   app.use("*", accessGuard({ allowedHosts: options.policy.allowedHosts }, () => true));
+  // The door: an Open live link's grant (a paired device's, from its snapshot) for the live
+  // origin's cookie, then on to the page. Nothing else here sets a cookie.
+  app.get(LIVE_DOOR, (c) => {
+    const to = c.req.query("to") ?? "";
+    if (!/^\/live\/thr_[a-z0-9]{20}\/[^\\\s\u0000-\u001f\u007f]*$/.test(to)) {
+      return c.text("Open live links go to a thread's live app.\n", 400);
+    }
+    const facts = factsOf(c);
+    if (requestMode(facts) === "local") return c.redirect(to, 303);
+    const device = options.devices?.checkLivePass(c.req.query("grant")) ?? null;
+    if (!device || !options.devices) {
+      return notPaired(c, "This link has expired, or this device isn't paired.");
+    }
+    return new Response(null, {
+      status: 303,
+      headers: {
+        location: to,
+        "set-cookie": liveCookie(options.devices.livePass(device.id)),
+        "cache-control": "no-store",
+        "referrer-policy": "no-referrer",
+      },
+    });
+  });
+  app.use("/live/*", async (c, next) => {
+    if (!liveCaller(factsOf(c), options.devices)) {
+      return notPaired(c, "Live apps are for devices paired with Tenzo.");
+    }
+    await next();
+  });
   app.all("/live/:thread", (c) => {
     const thread = c.req.param("thread");
     if (!ThreadId.safeParse(thread).success) return c.text("This thread has no live app.\n", 404);
@@ -297,7 +374,7 @@ export function liveUpgrade(
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer,
-  options: { policy: AccessPolicy; portOf: LivePort },
+  options: { policy: AccessPolicy; portOf: LivePort; devices?: Devices | undefined },
 ): void {
   const refuse = (status: number, reason: string) => {
     socket.end(
@@ -312,6 +389,8 @@ export function liveUpgrade(
     return refuse(403, "Forbidden");
   }
   if (request.headers[LIVE_HEADER]) return refuse(508, "Loop Detected");
+  const caller = liveCaller(factsOfIncoming(request), options.devices);
+  if (!caller) return refuse(401, "Unauthorized");
   const threadId = /^\/live\/([^/?#]+)\//.exec(request.url ?? "")?.[1] ?? "";
   const port = ThreadId.safeParse(threadId).success ? options.portOf(threadId) : null;
   if (port === null) return refuse(404, "Not Found");
@@ -322,16 +401,44 @@ export function liveUpgrade(
   for (let i = 0; i + 1 < raw.length; i += 2) {
     const key = (raw[i] ?? "").toLowerCase();
     if (key === "host" || key === "origin" || key === LIVE_HEADER) continue;
+    if (key === "cookie") {
+      const kept = withoutTenzoCookies(raw[i + 1]);
+      if (kept !== null) lines.push(`${raw[i]}: ${kept}`);
+      continue;
+    }
     lines.push(`${raw[i]}: ${raw[i + 1]}`);
   }
   lines.push(`Host: localhost:${port}`, `${LIVE_HEADER}: 1`);
   if (origin) lines.push(`Origin: http://localhost:${port}`);
   let connected = false;
+  // A revoked device's live sockets close with its other connections.
+  const untrack =
+    caller.mode === "remote" && options.devices
+      ? options.devices.track(caller.device.id, () => {
+          socket.destroy();
+          upstream.destroy();
+        })
+      : () => {};
   upstream.once("connect", () => {
     connected = true;
     upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
     if (head.length > 0) upstream.write(head);
-    socket.pipe(upstream).pipe(socket);
+    socket.pipe(upstream);
+    // The handshake's answer without any Tenzo cookie it tries to set; then the bytes as they come.
+    let held = Buffer.alloc(0);
+    const onHead = (chunk: Buffer) => {
+      held = Buffer.concat([held, chunk]);
+      const end = held.indexOf("\r\n\r\n");
+      if (end < 0) {
+        if (held.length > 64 * 1024) socket.destroy();
+        return;
+      }
+      upstream.off("data", onHead);
+      socket.write(Buffer.from(withoutTenzoSetCookie(held.subarray(0, end).toString("latin1")), "latin1"));
+      socket.write(held.subarray(end));
+      upstream.pipe(socket);
+    };
+    upstream.on("data", onHead);
   });
   upstream.on("error", () => {
     // Nothing listening: say so. Mid-connection: the pipe just ends.
@@ -342,5 +449,20 @@ export function liveUpgrade(
     if (connected) socket.destroy();
   });
   socket.on("error", () => upstream.destroy());
-  socket.once("close", () => upstream.destroy());
+  socket.once("close", () => {
+    untrack();
+    upstream.destroy();
+  });
+}
+
+/** An HTTP response head without the `Set-Cookie` lines that set Tenzo's cookies. */
+export function withoutTenzoSetCookie(head: string): string {
+  return head
+    .split("\r\n")
+    .filter((line) => {
+      const colon = line.indexOf(":");
+      if (colon < 0 || line.slice(0, colon).trim().toLowerCase() !== "set-cookie") return true;
+      return !setsTenzoCookie(line.slice(colon + 1).trim());
+    })
+    .join("\r\n");
 }

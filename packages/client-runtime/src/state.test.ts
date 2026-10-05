@@ -12,7 +12,7 @@ describe("applyFrame", () => {
       projects: [project("app")],
       automations: [automation("old")],
     };
-    const live = { port: 4781, origins: ["https://mac.ts.net:8444"] };
+    const live = { port: 4781, origins: ["https://mac.ts.net:8444"], grant: null };
     const after = applyFrame(before, snapshotFrame([thread("b")], [], [project("blog")], live));
     expect(after).toEqual({
       threads: [thread("b")],
