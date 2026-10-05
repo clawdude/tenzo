@@ -1938,6 +1938,14 @@ describe("Engine: project config", () => {
   }
   const configItems = (d: ReturnType<typeof daemon>) =>
     d.engine.snapshot().items.filter((i) => i.kind === "error" && i.error?.cause === "config");
+  /**
+   * The switch and stop timeouts on a fake clock, so a test says when they run out instead of
+   * racing them with a sleep of its own (#45); setImmediate stays real, for `settle`.
+   */
+  const fakeClock = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
 
   it("passes the config's models per phase, subagents' model and permission mode to each session", async () => {
     const d = daemon();
@@ -2164,6 +2172,7 @@ describe("Engine: project config", () => {
   });
 
   it("a switch that never answers times out into a restart at the turn boundary", async () => {
+    fakeClock();
     const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
     await settle();
@@ -2171,7 +2180,13 @@ describe("Engine: project config", () => {
     first.reconfigureResult = new Promise<void>(() => {});
     first.complete();
     d.engine.send(thread.id, "Next");
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    // The switch was asked for, and the turn waits for it until the timeout.
+    expect(first.reconfigured).toHaveLength(1);
+    vi.advanceTimersByTime(29);
+    await settle();
+    expect(first.stopped).toBe(false);
+    vi.advanceTimersByTime(1);
     await settle();
     expect(first.stopped).toBe(true);
     expect(first.prompts).toEqual(["Go"]);
@@ -2185,6 +2200,7 @@ describe("Engine: project config", () => {
   });
 
   it("a switch that always hangs restarts the session once, then the turn goes as things are", async () => {
+    fakeClock();
     const d = daemon(new FakeAdapter(), { switchTimeoutMs: 20 });
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
     await settle();
@@ -2194,7 +2210,13 @@ describe("Engine: project config", () => {
     d.adapter.last.reconfigureResult = new Promise<void>(() => {});
     d.adapter.last.complete();
     d.engine.send(thread.id, "Next");
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await settle();
+    // The first switch times out into a restart; the restarted session's switch times out too.
+    vi.advanceTimersByTime(20);
+    await settle();
+    expect(d.adapter.sessions).toHaveLength(2);
+    expect(d.adapter.last.prompts).toEqual([]);
+    vi.advanceTimersByTime(20);
     await settle();
     expect(d.adapter.sessions).toHaveLength(2);
     expect(d.adapter.sessions[0]?.prompts).toEqual(["Go"]);
@@ -2226,6 +2248,7 @@ describe("Engine: project config", () => {
   });
 
   it("a session that won't end for a restart is let go of: its prompts go on a card, and Retry sends them", async () => {
+    fakeClock();
     const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
     await settle();
@@ -2234,7 +2257,13 @@ describe("Engine: project config", () => {
     first.stopHangs = true;
     first.complete();
     d.engine.send(thread.id, "Next");
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    await settle();
+    // Told to stop, it doesn't; the thread waits for it until the timeout.
+    expect(first.stopped).toBe(true);
+    vi.advanceTimersByTime(29);
+    await settle();
+    expect(d.engine.snapshot().items).toEqual([]);
+    vi.advanceTimersByTime(1);
     await settle();
     const [card] = d.engine.snapshot().items;
     expect(card).toMatchObject({ kind: "error", error: { cause: "start", prompts: ["Next"] } });
@@ -2270,6 +2299,7 @@ describe("Engine: project config", () => {
   });
 
   it("nor after a switch times out while it has background work", async () => {
+    fakeClock();
     const d = daemon(new FakeAdapter(), { switchTimeoutMs: 30 });
     const thread = await d.engine.createThread({ project: "app", prompt: "Go" });
     await settle();
@@ -2282,7 +2312,7 @@ describe("Engine: project config", () => {
     // Asked again after the timeout, it has nothing more to switch (as Claude's adapter, which
     // counts a switch as done once asked).
     first.reconfigureResult = "unchanged";
-    await new Promise((resolve) => setTimeout(resolve, 80));
+    vi.advanceTimersByTime(30);
     await settle();
     expect(first.stopped).toBe(false);
     expect(first.prompts).toEqual(["Go", "Next"]);
