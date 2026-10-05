@@ -86,4 +86,17 @@ describe("readConfig", () => {
       expect(() => readConfig({ TENZO_SNOOZE_MS: bad })).toThrow(/TENZO_SNOOZE_MS/);
     }
   });
+
+  it("takes how much a notification says, and who sends them", () => {
+    expect(readConfig({}).pushPreview).toBeUndefined();
+    expect(readConfig({ TENZO_PUSH_PREVIEW: "none" }).pushPreview).toBe("none");
+    expect(() => readConfig({ TENZO_PUSH_PREVIEW: "full" })).toThrow(/TENZO_PUSH_PREVIEW/);
+    expect(readConfig({}).pushContact).toBeUndefined();
+    expect(readConfig({ TENZO_PUSH_CONTACT: "mailto:me@example.com" }).pushContact).toBe(
+      "mailto:me@example.com",
+    );
+    for (const bad of ["me@example.com", "http://example.com"]) {
+      expect(() => readConfig({ TENZO_PUSH_CONTACT: bad })).toThrow(/TENZO_PUSH_CONTACT/);
+    }
+  });
 });

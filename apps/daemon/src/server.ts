@@ -13,6 +13,7 @@ import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
 import { createLiveApp, liveUpgrade } from "./live.ts";
+import { loadVapidKeys, Push, type PushSend } from "./push.ts";
 import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
 import { createClaudeTitler, type Titler } from "./titles.ts";
@@ -26,6 +27,8 @@ export interface RunningDaemon {
   engine: Engine;
   /** Paired devices: pairing codes, tokens, revocation (devices.ts). */
   devices: Devices;
+  /** Notifications to paired devices (push.ts). */
+  push: Push;
   /** Stops every agent session (open items stay for next time), drops every WebSocket, stops listening. */
   close(): Promise<void>;
 }
@@ -42,6 +45,10 @@ export interface DaemonDeps {
   titler?: Titler;
   /** How often a paired device's socket gets a fresh Open live grant (auth.ts). Tests shorten it. */
   liveGrantRenewMs?: number;
+  /** Posts Web Push messages (push.ts). Default: `fetch` to the push service. Tests pass fakes. */
+  pushSend?: PushSend;
+  /** How long a burst of cards on one thread waits to make one push (push.ts). Tests shorten it. */
+  pushDebounceMs?: number;
 }
 
 /** Starts listening, with a plain message when the port is taken. */
@@ -89,6 +96,14 @@ export async function startDaemon(
     unlock();
     throw error;
   }
+  let pushKeys: ReturnType<typeof loadVapidKeys>;
+  try {
+    pushKeys = loadVapidKeys(store.home);
+  } catch (error) {
+    store.close();
+    unlock();
+    throw error;
+  }
   const titler = deps.titler ?? (deps.adapters ? undefined : createClaudeTitler());
   const engine = new Engine({
     store,
@@ -99,6 +114,14 @@ export async function startDaemon(
   });
   const environmentId = store.environmentId;
   const devices = new Devices(store, { publicOrigin: config.publicUrl ?? null });
+  const push = new Push({
+    devices,
+    keys: pushKeys,
+    ...(config.pushContact ? { contact: config.pushContact } : {}),
+    ...(config.pushPreview ? { preview: config.pushPreview } : {}),
+    ...(deps.pushSend ? { send: deps.pushSend } : {}),
+    ...(deps.pushDebounceMs !== undefined ? { debounceMs: deps.pushDebounceMs } : {}),
+  });
   const app = createApp({
     environmentId,
     webDir: config.webDir,
@@ -107,6 +130,7 @@ export async function startDaemon(
     devOrigins: config.devOrigins,
     devices,
     liveGrantRenewMs: deps.liveGrantRenewMs,
+    push,
   });
   const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_FRAME_BYTES });
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.
@@ -150,6 +174,7 @@ export async function startDaemon(
     unlock();
     throw error;
   }
+  push.start(engine);
   engine.start();
   const stopHeartbeat = heartbeat(wss, deps.heartbeatMs);
   const { port } = server.address() as AddressInfo;
@@ -162,9 +187,11 @@ export async function startDaemon(
     environmentId,
     engine,
     devices,
+    push,
     close: () => {
       closing ??= (async () => {
         stopHeartbeat();
+        push.close();
         await engine.close();
         for (const client of wss.clients) client.terminate();
         await Promise.all([stopServer(server), stopServer(liveServer)]);

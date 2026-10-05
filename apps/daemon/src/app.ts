@@ -28,6 +28,7 @@ import { type Caller, executeCommand } from "./commands.ts";
 import { type Devices, nameFromUserAgent } from "./devices.ts";
 import type { Engine } from "./engine.ts";
 import { markDaemon } from "./live.ts";
+import type { Push } from "./push.ts";
 import { socketHandlers } from "./socket.ts";
 
 export const VERSION: string = pkg.version;
@@ -46,6 +47,8 @@ export interface AppOptions {
   devices?: Devices | undefined;
   /** How often a paired device's socket gets a fresh Open live grant; tests shorten it. */
   liveGrantRenewMs?: number | undefined;
+  /** Notifications to paired devices (push.ts). Without it, nothing is pushed. */
+  push?: Push | undefined;
 }
 
 /** What a request carries through the app: who asked (set for the API and /ws). */
@@ -84,6 +87,7 @@ export function createApp({
   devOrigins = [],
   devices,
   liveGrantRenewMs,
+  push,
 }: AppOptions): Hono<AppEnv> {
   const app = new Hono<AppEnv>();
 
@@ -135,7 +139,11 @@ export function createApp({
     if (!engine && !parsed.data.type.startsWith("device.")) {
       return fail("This daemon runs no threads.", 503);
     }
-    const outcome = await executeCommand(engine, parsed.data, { devices, caller: c.var.caller });
+    const outcome = await executeCommand(engine, parsed.data, {
+      devices,
+      caller: c.var.caller,
+      push,
+    });
     if (outcome.ok) return c.json({ ok: true, result: outcome.result } satisfies CommandResponse);
     return fail(outcome.error, outcome.fault === "client" ? 400 : 500);
   });
@@ -234,6 +242,7 @@ export function createApp({
         devices,
         caller: c.var.caller,
         liveGrantRenewMs,
+        push,
       }),
     ),
   );

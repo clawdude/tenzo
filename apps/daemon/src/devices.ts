@@ -1,5 +1,10 @@
 import { randomBytes } from "node:crypto";
-import { type Device, DeviceId, PAIRING_TTL_MS } from "@tenzo/contracts";
+import {
+  type Device,
+  DeviceId,
+  PAIRING_TTL_MS,
+  type PushSubscriptionInfo,
+} from "@tenzo/contracts";
 import {
   DEVICE_TTL_MS,
   hashToken,
@@ -16,6 +21,18 @@ import { type Store, transaction } from "./store.ts";
 
 /** Failed pairing attempts, all devices together, before attempts wait (auth.ts). */
 export const PAIR_ATTEMPTS = { limit: 10, windowMs: 60_000 };
+
+/** A device's row with whether it has a push subscription (`toDevice` reads both). */
+const DEVICE_ROWS =
+  "SELECT d.*, s.device_id IS NOT NULL AS subscribed FROM devices d LEFT JOIN push_subscriptions s ON s.device_id = d.id";
+
+/** Where a device's notifications go (push.ts): its subscription, and whether it is muted. */
+export interface PushTarget {
+  deviceId: DeviceId;
+  name: string;
+  muted: boolean;
+  subscription: { endpoint: string; keys: { p256dh: string; auth: string } };
+}
 
 /** How often a device's "last seen" is written, at most. */
 const SEEN_EVERY_MS = 60_000;
@@ -94,7 +111,16 @@ export class Devices {
       this.#store.db
         .prepare("UPDATE pairings SET used_at = ?, device_id = ? WHERE code_hash = ?")
         .run(now, id, hashToken(code));
-      return { device: { id, name, createdAt: now, lastSeenAt: now }, token };
+      return {
+        device: {
+          id: DeviceId.parse(id),
+          name,
+          createdAt: now,
+          lastSeenAt: now,
+          push: { subscribed: false, muted: false },
+        },
+        token,
+      };
     });
   }
 
@@ -102,7 +128,7 @@ export class Devices {
   authenticate(token: string | null | undefined): Device | null {
     if (!token) return null;
     const row = this.#store.db
-      .prepare("SELECT * FROM devices WHERE token_hash = ? AND revoked_at IS NULL")
+      .prepare(`${DEVICE_ROWS} WHERE d.token_hash = ? AND d.revoked_at IS NULL`)
       .get(hashToken(token));
     if (!row) return null;
     return this.#touch(toDevice(row));
@@ -111,7 +137,7 @@ export class Devices {
   /** The active device with this id, or null. */
   find(id: string): Device | null {
     const row = this.#store.db
-      .prepare("SELECT * FROM devices WHERE id = ? AND revoked_at IS NULL")
+      .prepare(`${DEVICE_ROWS} WHERE d.id = ? AND d.revoked_at IS NULL`)
       .get(id);
     return row ? toDevice(row) : null;
   }
@@ -119,7 +145,7 @@ export class Devices {
   /** Active devices, oldest first. */
   list(): Device[] {
     return this.#store.db
-      .prepare("SELECT * FROM devices WHERE revoked_at IS NULL ORDER BY created_at, id")
+      .prepare(`${DEVICE_ROWS} WHERE d.revoked_at IS NULL ORDER BY d.created_at, d.id`)
       .all()
       .map(toDevice);
   }
@@ -130,12 +156,18 @@ export class Devices {
     return { ...device, name };
   }
 
-  /** Revokes a device: its token stops working, and its open connections close now. */
+  /**
+   * Revokes a device: its token stops working, its push subscription is forgotten, and its open
+   * connections close now.
+   */
   revoke(id: string): Device {
     const device = this.#active(id);
-    this.#store.db
-      .prepare("UPDATE devices SET revoked_at = ? WHERE id = ?")
-      .run(iso(this.#now()), device.id);
+    transaction(this.#store, () => {
+      this.#store.db
+        .prepare("UPDATE devices SET revoked_at = ? WHERE id = ?")
+        .run(iso(this.#now()), device.id);
+      this.#store.db.prepare("DELETE FROM push_subscriptions WHERE device_id = ?").run(device.id);
+    });
     const open = this.#open.get(device.id);
     this.#open.delete(device.id);
     this.#seen.delete(device.id);
@@ -147,6 +179,77 @@ export class Devices {
       }
     }
     return device;
+  }
+
+  /**
+   * Keeps a device's push subscription, replacing the one it had. A browser that paired again
+   * (a new device, the old one not revoked) keeps one subscription: whichever device had the
+   * same endpoint loses it, so nothing is pushed to one browser twice.
+   */
+  subscribe(id: string, subscription: PushSubscriptionInfo): Device {
+    const device = this.#active(id);
+    transaction(this.#store, () => {
+      this.#store.db
+        .prepare("DELETE FROM push_subscriptions WHERE device_id = ? OR endpoint = ?")
+        .run(device.id, subscription.endpoint);
+      this.#store.db
+        .prepare(
+          "INSERT INTO push_subscriptions (device_id, environment_id, endpoint, p256dh, auth, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          device.id,
+          this.#store.environmentId,
+          subscription.endpoint,
+          subscription.keys.p256dh,
+          subscription.keys.auth,
+          iso(this.#now()),
+        );
+    });
+    return this.#active(id);
+  }
+
+  /** Forgets a device's push subscription. */
+  unsubscribe(id: string): Device {
+    const device = this.#active(id);
+    this.#store.db.prepare("DELETE FROM push_subscriptions WHERE device_id = ?").run(device.id);
+    return this.#active(id);
+  }
+
+  /**
+   * Forgets a subscription its push service says is gone (404, 410). Not a newer one the device
+   * made meanwhile: only if it still has this `endpoint`. True when it was dropped.
+   */
+  dropSubscription(id: string, endpoint: string): boolean {
+    const result = this.#store.db
+      .prepare("DELETE FROM push_subscriptions WHERE device_id = ? AND endpoint = ?")
+      .run(id, endpoint);
+    return Number(result.changes) > 0;
+  }
+
+  /** Mutes or unmutes a device's notifications. */
+  mute(id: string, muted: boolean): Device {
+    const device = this.#active(id);
+    this.#store.db
+      .prepare("UPDATE devices SET push_muted = ? WHERE id = ?")
+      .run(muted ? 1 : 0, device.id);
+    return this.#active(id);
+  }
+
+  /** Where notifications can go: every active device with a subscription, muted ones too. */
+  pushTargets(): PushTarget[] {
+    return this.#store.db
+      .prepare(
+        `SELECT d.id, d.name, d.push_muted, s.endpoint, s.p256dh, s.auth
+           FROM devices d JOIN push_subscriptions s ON s.device_id = d.id
+          WHERE d.revoked_at IS NULL ORDER BY d.created_at, d.id`,
+      )
+      .all()
+      .map(toTarget);
+  }
+
+  /** One device's, if it is active and subscribed. */
+  pushTarget(id: string): PushTarget | null {
+    return this.pushTargets().find((t) => t.deviceId === id) ?? null;
   }
 
   /**
@@ -281,5 +384,18 @@ function toDevice(row: Record<string, unknown>): Device {
     name: String(row.name),
     createdAt: String(row.created_at),
     lastSeenAt: row.last_seen_at === null ? null : String(row.last_seen_at),
+    push: { subscribed: Boolean(row.subscribed), muted: Boolean(row.push_muted) },
+  };
+}
+
+function toTarget(row: Record<string, unknown>): PushTarget {
+  return {
+    deviceId: DeviceId.parse(row.id),
+    name: String(row.name),
+    muted: Boolean(row.push_muted),
+    subscription: {
+      endpoint: String(row.endpoint),
+      keys: { p256dh: String(row.p256dh), auth: String(row.auth) },
+    },
   };
 }

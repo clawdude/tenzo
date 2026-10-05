@@ -26,6 +26,7 @@ describe("openDatabase", () => {
       "pairings",
       "projects",
       "prompts",
+      "push_subscriptions",
       "sqlite_sequence",
       "threads",
     ]);

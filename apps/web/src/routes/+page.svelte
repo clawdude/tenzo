@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { type ItemAnswer, liveOriginFor, type QueueItem } from '@tenzo/client-runtime';
+	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import AllClear from '#lib/AllClear.svelte';
 	import Card from '#lib/Card.svelte';
@@ -7,6 +8,7 @@
 	import type { Failure } from '#lib/answering.ts';
 	import { automationsSummary } from '#lib/automations.ts';
 	import { meanwhileOf } from '#lib/meanwhile.ts';
+	import { itemParam } from '#lib/notifications.ts';
 	import { arrive, type Departure, leave } from '#lib/motion.ts';
 	import { MAX_EDGES, pileEdges, pileOf, snoozedLabel } from '#lib/pass.ts';
 	import { connectionLabel } from '#lib/status.ts';
@@ -60,6 +62,16 @@
 	/** Darker the further back, from the mock-up. */
 	const SHADES = ['#19191B', '#151517', '#121214', '#0F0F11'];
 	const edgeDepths = $derived(Array.from({ length: edges }, (_, i) => edges - i));
+
+	// A tapped notification's card (`/?item=…`) comes to the front once the daemon's data is
+	// here, each time the link asks for another; one answered meanwhile is simply not there.
+	let opened: string | null = null;
+	$effect(() => {
+		const wanted = itemParam(page.url.search);
+		if (wanted === null || wanted === opened || !live.synced) return;
+		opened = wanted;
+		if (live.items.some((i) => i.id === wanted)) bringing = wanted;
+	});
 
 	// The card on top stays on top until it leaves; one being brought back takes its place.
 	$effect(() => {

@@ -21,12 +21,14 @@
     "@tenzo/contracts": "workspace:*",
     "hono": "^4.13.12",
     "uqr": "0.1.3",
+    "web-push": "3.6.7",
     "ws": "^8.22.0",
     "zod": "^4.6.5"
   },
   "devDependencies": {
     "@modelcontextprotocol/sdk": "^1.32.0",
     "@types/node": "^22.20.5",
+    "@types/web-push": "3.6.4",
     "@types/ws": "^8.18.2",
     "typescript": "^5.9.3",
     "vitest": "^5.0.3"

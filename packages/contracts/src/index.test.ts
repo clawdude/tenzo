@@ -2,11 +2,13 @@ import { describe, expect, it } from "vitest";
 import {
   ClientFrame,
   Command,
+  Device,
   EnvironmentId,
   liveOriginFor,
   liveUrl,
   MAX_EVENT_PAGE,
   ProjectId,
+  PushSubscriptionInfo,
   ServerFrame,
   ThreadId,
 } from "./index.ts";
@@ -152,5 +154,36 @@ describe("contracts", () => {
     expect(liveUrl("http://127.0.0.1:4781", "thr_x", { path: "a?b" })).toBe(
       "http://127.0.0.1:4781/live/thr_x/a?b",
     );
+  });
+
+  it("takes a browser's push subscription only over https, keys well-formed", () => {
+    const keys = { p256dh: `B${"a".repeat(86)}`, auth: "a".repeat(22) };
+    const ok = (endpoint: string, k: object = keys) =>
+      PushSubscriptionInfo.safeParse({ endpoint, expirationTime: null, keys: k }).success;
+    expect(ok("https://fcm.googleapis.com/fcm/send/abc:def")).toBe(true);
+    expect(ok("https://web.push.apple.com/QGlk")).toBe(true);
+    expect(ok("http://fcm.googleapis.com/fcm/send/abc")).toBe(false);
+    expect(ok("https://user:pw@push.example/x")).toBe(false);
+    expect(ok("javascript:alert(1)")).toBe(false);
+    expect(ok("https://push.example/x", { ...keys, auth: "short" })).toBe(false);
+    expect(ok("https://push.example/x", { ...keys, p256dh: "not base64!" })).toBe(false);
+  });
+
+  it("carries whether a page is in view", () => {
+    expect(ClientFrame.parse({ type: "visibility", visible: true })).toEqual({
+      type: "visibility",
+      visible: true,
+    });
+    expect(ClientFrame.safeParse({ type: "visibility" }).success).toBe(false);
+  });
+
+  it("gives a device from before notifications none", () => {
+    const device = Device.parse({
+      id: "dev_abcdefghij0123456789",
+      name: "Phone",
+      createdAt: "2026-10-05T00:00:00.000Z",
+      lastSeenAt: null,
+    });
+    expect(device.push).toEqual({ subscribed: false, muted: false });
   });
 });

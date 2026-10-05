@@ -19,7 +19,9 @@ import { QueueItem, StoredEvent, ThreadView } from "./queue.ts";
  *   each with `ok` or `error` carrying that id; commands are the same vocabulary as
  *   `POST /api/commands` and run through the same code;
  * - the client sends `ping` now and then and the daemon answers `pong`, so either side notices a
- *   dead connection (phones and tailnets drop sockets without closing them).
+ *   dead connection (phones and tailnets drop sockets without closing them);
+ * - the client says whether its page is in view (`visibility`), on connecting and whenever that
+ *   changes: a paired device looking at Tenzo gets no push for what it can already see.
  *
  * Every frame is JSON text, validated against these schemas on arrival at either end.
  */
@@ -120,5 +122,11 @@ export const ClientCommand = z.object({
   command: Command,
 });
 
-export const ClientFrame = z.discriminatedUnion("type", [ClientPing, ClientCommand]);
+/** The page is in view (true) or hidden (false). Unanswered. */
+export const ClientVisibility = z.object({
+  type: z.literal("visibility"),
+  visible: z.boolean(),
+});
+
+export const ClientFrame = z.discriminatedUnion("type", [ClientPing, ClientCommand, ClientVisibility]);
 export type ClientFrame = z.infer<typeof ClientFrame>;

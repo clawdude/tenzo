@@ -12,6 +12,7 @@ import { type Caller, executeCommand } from "./commands.ts";
 import type { Devices } from "./devices.ts";
 import type { Engine, EngineChange } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
+import type { Presence, Push } from "./push.ts";
 
 /**
  * The daemon's side of `/ws` (the protocol is in contracts' frames.ts). Each socket gets a hello
@@ -32,6 +33,8 @@ export interface SocketOptions {
   caller?: Caller | undefined;
   /** How often a paired device's socket gets a fresh Open live grant (auth.ts). */
   liveGrantRenewMs?: number | undefined;
+  /** Notifications: a paired device's socket says whether its page is in view (push.ts). */
+  push?: Push | undefined;
   log?: (message: string) => void;
 }
 
@@ -55,6 +58,7 @@ export function socketHandlers({
   devices,
   caller,
   liveGrantRenewMs = LIVE_GRANT_RENEW_MS,
+  push,
   log = (message) => console.error(`tenzo: ${message}`),
 }: SocketOptions): WSEvents {
   let unsubscribe: (() => void) | undefined;
@@ -62,6 +66,8 @@ export function socketHandlers({
   let untrack: (() => void) | undefined;
   /** Renews a paired device's Open live grant while the socket is open. */
   let renew: ReturnType<typeof setInterval> | undefined;
+  /** A paired device's page, in view or not: no push for what it sees (push.ts). */
+  let presence: Presence | undefined;
   /** Threads this socket watches: it gets their new events (`thread.watch`). */
   const watching = new Set<string>();
 
@@ -112,6 +118,7 @@ export function socketHandlers({
         // Revoked between the upgrade's check and now: no socket after all.
         if (!devices.find(device.id)) return kick();
         untrack = devices.track(device.id, kick);
+        presence = push?.presence(device.id);
       }
       send(ws, { type: "hello", environmentId, version, serverTime: new Date().toISOString() });
       if (!engine) return;
@@ -144,6 +151,7 @@ export function socketHandlers({
       });
     },
     onMessage(event, ws) {
+      presence?.heard();
       const frame = readFrame(event.data);
       if (!frame.ok) {
         log(`ignored a WebSocket frame: ${frame.error}`);
@@ -154,12 +162,16 @@ export function socketHandlers({
         send(ws, { type: "pong", at: new Date().toISOString() });
         return;
       }
+      if (frame.value.type === "visibility") {
+        presence?.visible(frame.value.visible);
+        return;
+      }
       const { id, command } = frame.value;
       if (command.type === "thread.watch" || command.type === "thread.unwatch") {
         send(ws, watch(id, command));
         return;
       }
-      void executeCommand(engine, command, { devices, caller })
+      void executeCommand(engine, command, { devices, caller, push })
         .then((outcome) => {
           send(
             ws,
@@ -175,6 +187,8 @@ export function socketHandlers({
     },
     onClose() {
       clearInterval(renew);
+      presence?.close();
+      presence = undefined;
       untrack?.();
       untrack = undefined;
       unsubscribe?.();

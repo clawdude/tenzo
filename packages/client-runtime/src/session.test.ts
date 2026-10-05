@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { fetchSession, pairBrowser } from "./session.ts";
 
-const device = { id: "dev_aaaaaaaaaaaaaaaaaaaa", name: "iPhone", createdAt: "t", lastSeenAt: null };
+const device = { id: "dev_aaaaaaaaaaaaaaaaaaaa", name: "iPhone", createdAt: "t", lastSeenAt: null, push: { subscribed: false, muted: false } };
 
 function answering(status: number, body: unknown, seen: RequestInit[] = []): typeof fetch {
   return (async (_url: string, init: RequestInit) => {

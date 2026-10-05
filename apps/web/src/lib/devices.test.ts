@@ -6,7 +6,8 @@ const device = (id: string, createdAt: string, lastSeenAt: string | null = null)
 	id,
 	name: id,
 	createdAt,
-	lastSeenAt
+	lastSeenAt,
+	push: { subscribed: false, muted: false }
 });
 
 describe('devices', () => {

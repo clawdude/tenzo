@@ -2,6 +2,7 @@ import type { Command, CommandResult, CommandType, Device } from "@tenzo/contrac
 import type { Devices } from "./devices.ts";
 import type { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
+import type { Push } from "./push.ts";
 
 /**
  * Who sent a command (auth.ts): the Mac itself, or a paired device. Transports run commands only
@@ -13,6 +14,8 @@ export type Caller = { mode: "local"; device: null } | { mode: "remote"; device:
 export interface CommandContext {
   devices?: Devices | undefined;
   caller?: Caller | undefined;
+  /** Notifications (push.ts); without it the daemon pushes nothing. */
+  push?: Push | undefined;
 }
 
 /** How a command ended, ready for a transport to put on the wire. */
@@ -35,7 +38,7 @@ export async function executeCommand(
 ): Promise<Outcome> {
   try {
     if (isDeviceCommand(command)) {
-      return { ok: true, result: runDeviceCommand(command, context) };
+      return { ok: true, result: await runDeviceCommand(command, context) };
     }
     if (!engine) return { ok: false, error: "This daemon runs no threads.", fault: "daemon" };
     return { ok: true, result: await runCommand(engine, command) };
@@ -63,11 +66,14 @@ function isDeviceCommand(command: Command): command is DeviceCommand {
   return command.type.startsWith("device.");
 }
 
-/** The `device.*` commands: pairing and the paired devices, not the engine's business. */
-function runDeviceCommand(
+/**
+ * The `device.*` commands: pairing, the paired devices and their notifications, not the
+ * engine's business.
+ */
+async function runDeviceCommand(
   command: DeviceCommand,
-  { devices, caller }: CommandContext,
-): CommandResult<CommandType> {
+  { devices, caller, push }: CommandContext,
+): Promise<CommandResult<CommandType>> {
   if (!devices || !caller) throw new TenzoError("This daemon keeps no devices.");
   switch (command.type) {
     case "device.pair":
@@ -77,12 +83,42 @@ function runDeviceCommand(
       }
       return devices.pair(command.name);
     case "device.list":
-      return { devices: devices.list(), current: caller.device?.id ?? null };
+      return {
+        devices: devices.list(),
+        current: caller.device?.id ?? null,
+        pushKey: push?.publicKey ?? null,
+      };
     case "device.rename":
       return { device: devices.rename(command.deviceId, command.name) };
     case "device.revoke":
       return { device: devices.revoke(command.deviceId) };
+    case "device.subscribe":
+      if (!push) throw new TenzoError("This daemon sends no notifications.");
+      return { device: devices.subscribe(pairedCaller(caller).id, command.subscription) };
+    case "device.unsubscribe":
+      return { device: devices.unsubscribe(pairedCaller(caller).id) };
+    case "device.mute":
+      return { device: devices.mute(command.deviceId, command.muted) };
+    case "device.testPush":
+      if (!push) throw new TenzoError("This daemon sends no notifications.");
+      if (!devices.find(command.deviceId)) {
+        throw new TenzoError(`No paired device "${command.deviceId}". \`tenzo devices\` lists them.`);
+      }
+      return push.test(command.deviceId);
   }
+}
+
+/**
+ * The paired device asking. Notifications are a paired device's: on the Mac itself Tenzo
+ * doesn't push (it is the machine at hand), so there is nothing to subscribe.
+ */
+function pairedCaller(caller: Caller): Device {
+  if (caller.mode !== "remote") {
+    throw new TenzoError(
+      "Notifications are for paired devices (a phone, another computer); on the Mac itself Tenzo doesn't push.",
+    );
+  }
+  return caller.device;
 }
 
 async function run(
