@@ -1,4 +1,6 @@
 #!/usr/bin/env node
+import { existsSync, readFileSync } from "node:fs";
+import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { renderUnicodeCompact } from "uqr";
 import {
@@ -22,8 +24,17 @@ import { formatEvent, formatItem } from "./format.ts";
 import { readProjectConfig } from "./project-config.ts";
 import { addProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
-import { installService, serviceStatus, uninstallService } from "./service.ts";
+import {
+  installService,
+  loadService,
+  plistPath,
+  serviceStatus,
+  uninstallService,
+  writePlist,
+} from "./service.ts";
 import { openStore, type Store } from "./store.ts";
+import { systemTailscale } from "./tailscale.ts";
+import { servicePorts, setUpTailscale } from "./tailscale-setup.ts";
 
 const USAGE = `tenzo ${VERSION}
 
@@ -67,6 +78,12 @@ Usage:
                                          browser elsewhere) with this daemon: open it there within
                                          10 minutes (--url <origin>: where the device reaches
                                          Tenzo, default the daemon's TENZO_PUBLIC_URL)
+  tenzo pair --tailscale [--name <name>] the same over Tailscale Serve, set up first if need be:
+                                         adds the HTTPS routes for the Pass (8443) and live apps
+                                         (8444) after asking, leaves other routes alone, and sets
+                                         the service's TENZO_* to match (--yes: don't ask;
+                                         --https-port, --live-https-port: other ports). See
+                                         docs/REMOTE.md
   tenzo devices                          the paired devices: name, when paired, last seen
   tenzo devices rename <id> <name…>      call a device something else
   tenzo devices revoke <id>              unpair it: its token stops working, its connections close
@@ -357,13 +374,117 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
 }
 
 async function pair(args: string[]): Promise<void> {
-  const { options } = parseArgs(args, [], ["--name", "--url"]);
+  // Raw TCP through Serve makes every client local, unpaired (README, docs/REMOTE.md).
+  for (const tcp of ["--tcp", "--tls-terminated-tcp"]) {
+    if (args.some((a) => a === tcp || a.startsWith(`${tcp}=`))) {
+      throw new TenzoError(
+        `Tenzo never uses Tailscale Serve's ${tcp}: through raw TCP every client looks like this Mac itself, with no pairing at all. \`tenzo pair --tailscale\` sets up HTTPS routes.`,
+      );
+    }
+  }
+  const { flags, options } = parseArgs(
+    args,
+    ["--tailscale", "--yes"],
+    ["--name", "--url", "--https-port", "--live-https-port"],
+  );
+  const name = options.get("--name");
+  if (flags.has("--tailscale")) {
+    if (options.has("--url")) usageError("--url and --tailscale don't go together: --tailscale finds the URL.");
+    return pairTailscale(name, {
+      yes: flags.has("--yes"),
+      httpsPort: portOption(options, "--https-port"),
+      liveHttpsPort: portOption(options, "--live-https-port"),
+    });
+  }
+  for (const only of ["--yes", "--https-port", "--live-https-port"]) {
+    if (flags.has(only) || options.has(only)) usageError(`${only} goes with --tailscale.`);
+  }
   const flag = options.get("--url");
   if (flag !== undefined) pairingOrigin(null, flag); // a bad --url fails before a code is made
-  const name = options.get("--name");
   const paired = await call({ type: "device.pair", ...(name ? { name } : {}) });
+  printPairing(pairingOrigin(paired.origin, flag), paired, name);
+}
+
+function portOption(options: Map<string, string>, name: string): number | undefined {
+  const raw = options.get(name);
+  if (raw === undefined) return undefined;
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65_535) {
+    throw new TenzoError(`${name} takes a port number, like 8443; got "${raw}".`);
+  }
+  return port;
+}
+
+async function pairTailscale(
+  name: string | undefined,
+  options: { yes: boolean; httpsPort: number | undefined; liveHttpsPort: number | undefined },
+): Promise<void> {
+  const path = plistPath();
+  const service =
+    process.platform === "darwin" && existsSync(path)
+      ? {
+          path,
+          read: () => readFileSync(path, "utf8"),
+          write: (plist: string) => writePlist(path, plist),
+          reload: () => loadService(path),
+        }
+      : null;
+  // The service's daemon listens where its plist says, whatever this shell's TENZO_PORT is.
+  const cfg = config();
+  const { port, livePort } = service
+    ? servicePorts(service.read())
+    : { port: cfg.port, livePort: cfg.livePort ?? cfg.port + 1 };
+  const daemon = { host: cfg.host, port };
+  const answers = () =>
+    fetch(`http://${daemon.host}:${daemon.port}/health`, { signal: AbortSignal.timeout(1_000) }).then(
+      (r) => r.ok,
+      () => false,
+    );
+  const done = await setUpTailscale(
+    {
+      tailscale: systemTailscale(),
+      daemonPort: port,
+      livePort,
+      settings: async () => ((await answers()) ? callDaemon(daemon, { type: "daemon.settings" }) : null),
+      pair: () => callDaemon(daemon, { type: "device.pair", ...(name ? { name } : {}) }),
+      waitForDaemon: async () => {
+        for (let i = 0; i < 60; i++) {
+          if (await answers()) return true;
+          await sleep(500);
+        }
+        return false;
+      },
+      service,
+      env: process.env,
+      confirm: ask,
+      say: (line) => console.log(line),
+    },
+    options,
+  );
+  if (!done) {
+    process.exitCode = 1;
+    return;
+  }
+  console.log("");
+  printPairing(done.origin, done.paired, name);
+}
+
+/** A yes/no question on the terminal; without one, say how to go on. */
+async function ask(question: string): Promise<boolean> {
+  if (!process.stdin.isTTY) {
+    throw new TenzoError(`${question.trim()} There's no terminal to ask on: run it again with --yes to go ahead.`);
+  }
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    const answer = await rl.question(`${question} [y/N] `);
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+function printPairing(origin: string, paired: { code: string; expiresAt: string }, name: string | undefined): void {
   const { code, expiresAt } = paired;
-  const origin = pairingOrigin(paired.origin, flag);
   const url = pairingUrl(origin, code);
   console.log(`Open this on the device you want to pair${name ? ` (${name})` : ""}:\n`);
   console.log(`  ${url}\n`);

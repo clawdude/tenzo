@@ -57,13 +57,17 @@ export async function runCommand<C extends Command>(
   return (await run(engine, command as Exclude<Command, DeviceCommand>)) as CommandResult<C["type"]>;
 }
 
-type DeviceCommand = Extract<Command, { type: `device.${string}` }>;
+type DeviceCommand = Extract<Command, { type: `device.${string}` | "daemon.settings" }>;
 
-function isDeviceCommand(command: Command): command is DeviceCommand {
-  return command.type.startsWith("device.");
+/** Commands the engine has nothing to do with: devices, and the remote-access settings. */
+export function isDeviceCommand(command: Command): command is DeviceCommand {
+  return command.type.startsWith("device.") || command.type === "daemon.settings";
 }
 
-/** The `device.*` commands: pairing and the paired devices, not the engine's business. */
+/**
+ * The `device.*` commands (pairing and the paired devices) and `daemon.settings`: not the
+ * engine's business.
+ */
 function runDeviceCommand(
   command: DeviceCommand,
   { devices, caller }: CommandContext,
@@ -82,6 +86,12 @@ function runDeviceCommand(
       return { device: devices.rename(command.deviceId, command.name) };
     case "device.revoke":
       return { device: devices.revoke(command.deviceId) };
+    case "daemon.settings":
+      // How the daemon is reached from elsewhere is the Mac's business, not a phone's.
+      if (caller.mode !== "local") {
+        throw new TenzoError("The daemon's settings are read on the Mac itself.");
+      }
+      return devices.settings();
   }
 }
 
