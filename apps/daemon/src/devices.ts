@@ -39,7 +39,7 @@ export class Devices {
   #key: Buffer | undefined;
   /** Where devices reach the daemon (`TENZO_PUBLIC_URL`), for pairing links; null: not said. */
   readonly #publicOrigin: string | null;
-  /** The daemon's other remote settings, told to `tenzo pair` (`--tailscale` checks them). */
+  /** The daemon's other remote settings (`settings`). */
   readonly #remote: { allowedHosts: string[]; liveOrigins: string[] };
   /** Failed pairing attempts (`POST /api/pair`); every new code lifts the limit. */
   readonly pairingAttempts: RateLimit;
@@ -66,17 +66,19 @@ export class Devices {
   }
 
   /**
-   * A new one-time pairing code; `name` is what the device will be called. `origin` is where the
-   * link points (`TENZO_PUBLIC_URL`), null when the daemon wasn't told; with its other remote
-   * settings. Lifts the limit on failed attempts: the Mac asked, so pairing must work now.
+   * What remote devices reach the daemon by: its public URL, allowed hosts and live origins. Read
+   * only; `tenzo pair --tailscale` checks them against the Serve routes.
    */
-  pair(name?: string): {
-    code: string;
-    expiresAt: string;
-    origin: string | null;
-    allowedHosts: string[];
-    liveOrigins: string[];
-  } {
+  settings(): { publicUrl: string | null; allowedHosts: string[]; liveOrigins: string[] } {
+    return { publicUrl: this.#publicOrigin, ...structuredClone(this.#remote) };
+  }
+
+  /**
+   * A new one-time pairing code; `name` is what the device will be called. `origin` is where the
+   * link points (`TENZO_PUBLIC_URL`), null when the daemon wasn't told. Lifts the limit on failed
+   * attempts: the Mac asked, so pairing must work now.
+   */
+  pair(name?: string): { code: string; expiresAt: string; origin: string | null } {
     const code = randomCode();
     const now = this.#now();
     const expiresAt = new Date(now + PAIRING_TTL_MS).toISOString();
@@ -86,7 +88,7 @@ export class Devices {
       )
       .run(hashToken(code), this.#store.environmentId, name ?? null, iso(now), expiresAt);
     this.pairingAttempts.reset();
-    return { code, expiresAt, origin: this.#publicOrigin, ...structuredClone(this.#remote) };
+    return { code, expiresAt, origin: this.#publicOrigin };
   }
 
   /**

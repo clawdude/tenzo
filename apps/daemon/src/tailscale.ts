@@ -86,6 +86,9 @@ export interface TailscaleNode {
   https: boolean;
 }
 
+/** A MagicDNS name: dot-separated labels of a-z, 0-9 and inner hyphens, at least two. */
+const DNS_NAME = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/;
+
 /** Parses `tailscale status --json`; a node that can't serve yet is an error saying what to do. */
 export function parseStatus(json: string): TailscaleNode {
   const status = parseJson(json, "tailscale status --json") as {
@@ -105,6 +108,12 @@ export function parseStatus(json: string): TailscaleNode {
   if (dnsName === "" || status?.CurrentTailnet?.MagicDNSEnabled === false) {
     throw new TenzoError(
       "This machine has no MagicDNS name, and Serve's HTTPS needs one. Turn MagicDNS on in the Tailscale admin console (DNS page), then run this again.",
+    );
+  }
+  // It goes into commands, settings and a plist: a host name, labels of [a-z0-9-], or nothing.
+  if (!DNS_NAME.test(dnsName) || dnsName.length > 253) {
+    throw new TenzoError(
+      `Tailscale gives this machine the name "${dnsName}", which isn't a host name Tenzo can use. Check \`tailscale status\`.`,
     );
   }
   const certs = Array.isArray(status?.CertDomains) && status.CertDomains.length > 0;
@@ -131,26 +140,58 @@ export interface ServeRoute {
   foreground: boolean;
 }
 
-interface ServeConfigJson {
-  TCP?: Record<string, { HTTPS?: boolean; HTTP?: boolean; TCPForward?: string; TerminateTLS?: string } | null> | null;
-  Web?: Record<string, { Handlers?: Record<string, Record<string, unknown> | null> | null } | null> | null;
-  AllowFunnel?: Record<string, boolean> | null;
-  Foreground?: Record<string, ServeConfigJson | null> | null;
+/**
+ * `tailscale serve status --json` in a shape this code doesn't know. Tenzo plans routes only when
+ * it can see every route there is: misreading the config as empty could put Tenzo's routes over
+ * someone else's, so anything unexpected stops the setup instead.
+ */
+export class UnreadableServeStatus extends TenzoError {
+  constructor(why: string) {
+    super(
+      `Can't read \`tailscale serve status --json\` (${why}). Tenzo changes Serve only when it can see every route; check \`tailscale serve status\`, or set the routes up by hand (docs/REMOTE.md).`,
+    );
+  }
 }
+
+/** The keys of ipn.ServeConfig this reads; an object with none of them is something else. */
+const SERVE_KEYS = ["TCP", "Web", "AllowFunnel", "Foreground", "Services"];
 
 /**
  * Parses `tailscale serve status --json` (ipn.ServeConfig) into routes by port. Empty output,
- * `null` and `{}` all mean nothing is served. Tailscale Services (`Services`, a VIP of their own)
+ * `null` and `{}` mean nothing is served; any other shape it doesn't know is an error
+ * (`UnreadableServeStatus`), never "nothing". Tailscale Services (`Services`, a VIP of their own)
  * share no ports with the node, so they are left out; foreground serves are in.
  */
 export function parseServeStatus(json: string): ServeRoute[] {
-  const config = json.trim() === "" ? null : (parseJson(json, "tailscale serve status --json") as ServeConfigJson | null);
+  let raw: unknown;
+  try {
+    raw = json.trim() === "" ? null : JSON.parse(json);
+  } catch {
+    throw new UnreadableServeStatus("not JSON");
+  }
   const routes = new Map<number, ServeRoute>();
-  const add = (cfg: ServeConfigJson | null | undefined, foreground: boolean) => {
-    if (!cfg || typeof cfg !== "object") return;
-    for (const [key, tcp] of Object.entries(cfg.TCP ?? {})) {
-      const port = Number(key);
-      if (!Number.isInteger(port) || !tcp) continue;
+  const add = (config: unknown, where: string, foreground: boolean) => {
+    const cfg = object(config, where);
+    const keys = Object.keys(cfg);
+    if (keys.length > 0 && !keys.some((k) => SERVE_KEYS.includes(k))) {
+      throw new UnreadableServeStatus(`${where} has none of ${SERVE_KEYS.join(", ")}`);
+    }
+    for (const key of SERVE_KEYS) {
+      if (cfg[key] !== undefined && cfg[key] !== null) object(cfg[key], `${where}.${key}`);
+    }
+    for (const [key, value] of Object.entries(maybe(cfg.TCP))) {
+      const port = validPort(key, `${where}.TCP`);
+      const tcp = object(value, `${where}.TCP["${key}"]`);
+      for (const flag of ["HTTPS", "HTTP"]) {
+        if (tcp[flag] !== undefined && typeof tcp[flag] !== "boolean") {
+          throw new UnreadableServeStatus(`${where}.TCP["${key}"].${flag} isn't true or false`);
+        }
+      }
+      for (const field of ["TCPForward", "TerminateTLS"]) {
+        if (tcp[field] !== undefined && typeof tcp[field] !== "string") {
+          throw new UnreadableServeStatus(`${where}.TCP["${key}"].${field} isn't text`);
+        }
+      }
       const kind: RouteKind = tcp.HTTPS
         ? "https"
         : tcp.HTTP
@@ -162,46 +203,68 @@ export function parseServeStatus(json: string): ServeRoute[] {
         port,
         kind,
         handlers: {},
-        tcpForward: kind === "tcp" || kind === "tls-terminated-tcp" ? (tcp.TCPForward ?? null) : null,
+        tcpForward: kind === "tcp" || kind === "tls-terminated-tcp" ? ((tcp.TCPForward as string | undefined) ?? null) : null,
         funnel: false,
         foreground,
       });
     }
-    for (const [hostPort, web] of Object.entries(cfg.Web ?? {})) {
-      const port = portOf(hostPort);
-      if (port === null) continue;
+    for (const [hostPort, value] of Object.entries(maybe(cfg.Web))) {
+      const port = validPort(hostPort.slice(hostPort.lastIndexOf(":") + 1), `${where}.Web["${hostPort}"]`);
+      const web = object(value, `${where}.Web["${hostPort}"]`);
       const route =
         routes.get(port) ??
         // A Web entry without its TCP entry: unusual, but its port is taken all the same.
         { port, kind: "https" as const, handlers: {}, tcpForward: null, funnel: false, foreground };
       routes.set(port, route);
-      for (const [path, handler] of Object.entries(web?.Handlers ?? {})) {
-        route.handlers[path] = describeHandler(handler);
+      const handlers = web.Handlers === undefined || web.Handlers === null ? {} : object(web.Handlers, `${where}.Web["${hostPort}"].Handlers`);
+      for (const [path, handler] of Object.entries(handlers)) {
+        route.handlers[path] = describeHandler(object(handler, `${where}.Web["${hostPort}"].Handlers["${path}"]`));
       }
     }
-    for (const [hostPort, on] of Object.entries(cfg.AllowFunnel ?? {})) {
-      const port = portOf(hostPort);
-      const route = port === null ? undefined : routes.get(port);
+    for (const [hostPort, on] of Object.entries(maybe(cfg.AllowFunnel))) {
+      const port = validPort(hostPort.slice(hostPort.lastIndexOf(":") + 1), `${where}.AllowFunnel["${hostPort}"]`);
+      if (typeof on !== "boolean") throw new UnreadableServeStatus(`${where}.AllowFunnel["${hostPort}"] isn't true or false`);
+      const route = routes.get(port);
       if (route && on) route.funnel = true;
     }
+    for (const [session, value] of Object.entries(maybe(cfg.Foreground))) {
+      add(value, `Foreground["${session}"]`, true);
+    }
   };
-  add(config, false);
-  for (const session of Object.values(config?.Foreground ?? {})) add(session, true);
+  if (raw !== null) add(raw, "the top level", false);
   return [...routes.values()].sort((a, b) => a.port - b.port);
 }
 
-function describeHandler(handler: Record<string, unknown> | null): string {
-  if (!handler) return "nothing";
+/** A plain object (not an array, not null), or the error saying where it isn't. */
+function object(value: unknown, where: string): Record<string, unknown> {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new UnreadableServeStatus(`${where} isn't an object`);
+  }
+  return value as Record<string, unknown>;
+}
+
+/** An optional map, already checked by `object`. */
+function maybe(value: unknown): Record<string, unknown> {
+  return (value ?? {}) as Record<string, unknown>;
+}
+
+function validPort(text: string, where: string): number {
+  const port = /^\d{1,5}$/.test(text) ? Number(text) : Number.NaN;
+  if (!isPort(port)) throw new UnreadableServeStatus(`${where}: "${text}" isn't a port`);
+  return port;
+}
+
+/** A TCP port: a whole number from 1 to 65535. */
+export function isPort(port: number): boolean {
+  return Number.isInteger(port) && port >= 1 && port <= 65_535;
+}
+
+function describeHandler(handler: Record<string, unknown>): string {
   if (typeof handler.Proxy === "string") return handler.Proxy;
   if (typeof handler.Path === "string") return `path:${handler.Path}`;
   if (typeof handler.Text === "string") return "text";
   if (typeof handler.Redirect === "string") return `redirect:${handler.Redirect}`;
   return "something else";
-}
-
-function portOf(hostPort: string): number | null {
-  const port = Number(hostPort.slice(hostPort.lastIndexOf(":") + 1));
-  return Number.isInteger(port) && port > 0 ? port : null;
 }
 
 function parseJson(json: string, what: string): unknown {
@@ -227,7 +290,7 @@ export function loopbackPort(target: string): number | null {
   if (!["127.0.0.1", "localhost", "[::1]"].includes(url.hostname)) return null;
   if (url.pathname !== "/" || url.search !== "") return null;
   const port = Number(url.port);
-  return Number.isInteger(port) && port > 0 ? port : null;
+  return isPort(port) ? port : null;
 }
 
 /** A route Tenzo can use as it is: HTTPS, with `/` proxied to that loopback port. */
@@ -317,6 +380,7 @@ export function planServe(routes: readonly ServeRoute[], input: PlanInput): Serv
     let httpsPort: number;
     let action: PlannedRoute["action"];
     if (asked !== undefined) {
+      if (!isPort(asked)) throw new TenzoError(`${asked} isn't a port (1 to 65535).`);
       const route = at(asked);
       if (route && !servesPort(route, localPort)) {
         throw new TenzoError(
@@ -334,6 +398,7 @@ export function planServe(routes: readonly ServeRoute[], input: PlanInput): Serv
       } else {
         httpsPort = fallback;
         while (at(httpsPort) || reserved.has(httpsPort) || httpsPort === avoid) httpsPort++;
+        if (!isPort(httpsPort)) throw new TenzoError("No free HTTPS port left on this node for Tenzo.");
         action = "add";
       }
     }
@@ -392,10 +457,12 @@ export function serveCommand(route: PlannedRoute): string[] {
 /** Refuses any tailscale command that isn't an HTTPS `serve --bg` of one loopback target. */
 export function assertSafeServe(args: readonly string[]): string[] {
   const [sub, bg, https, target, ...rest] = args;
+  const port = /^--https=(\d{1,5})$/.exec(https ?? "")?.[1];
   const ok =
     sub === "serve" &&
     bg === "--bg" &&
-    /^--https=\d{1,5}$/.test(https ?? "") &&
+    port !== undefined &&
+    isPort(Number(port)) &&
     target !== undefined &&
     loopbackPort(target) !== null &&
     rest.length === 0;

@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { chmodSync, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 import { renderUnicodeCompact } from "uqr";
@@ -30,10 +30,11 @@ import {
   plistPath,
   serviceStatus,
   uninstallService,
+  writePlist,
 } from "./service.ts";
 import { openStore, type Store } from "./store.ts";
 import { systemTailscale } from "./tailscale.ts";
-import { setUpTailscale } from "./tailscale-setup.ts";
+import { servicePorts, setUpTailscale } from "./tailscale-setup.ts";
 
 const USAGE = `tenzo ${VERSION}
 
@@ -418,32 +419,34 @@ async function pairTailscale(
   name: string | undefined,
   options: { yes: boolean; httpsPort: number | undefined; liveHttpsPort: number | undefined },
 ): Promise<void> {
-  const cfg = config();
-  const health = `http://${cfg.host}:${cfg.port}/health`;
-  const answers = () =>
-    fetch(health, { signal: AbortSignal.timeout(1_000) }).then(
-      (r) => r.ok,
-      () => false,
-    );
   const path = plistPath();
   const service =
     process.platform === "darwin" && existsSync(path)
       ? {
           path,
           read: () => readFileSync(path, "utf8"),
-          write: (plist: string) => {
-            writeFileSync(path, plist, { mode: 0o600 });
-            chmodSync(path, 0o600);
-          },
+          write: (plist: string) => writePlist(path, plist),
           reload: () => loadService(path),
         }
       : null;
+  // The service's daemon listens where its plist says, whatever this shell's TENZO_PORT is.
+  const cfg = config();
+  const { port, livePort } = service
+    ? servicePorts(service.read())
+    : { port: cfg.port, livePort: cfg.livePort ?? cfg.port + 1 };
+  const daemon = { host: cfg.host, port };
+  const answers = () =>
+    fetch(`http://${daemon.host}:${daemon.port}/health`, { signal: AbortSignal.timeout(1_000) }).then(
+      (r) => r.ok,
+      () => false,
+    );
   const done = await setUpTailscale(
     {
       tailscale: systemTailscale(),
-      daemonPort: cfg.port,
-      livePort: cfg.livePort ?? cfg.port + 1,
-      pair: async () => ((await answers()) ? call({ type: "device.pair", ...(name ? { name } : {}) }) : null),
+      daemonPort: port,
+      livePort,
+      settings: async () => ((await answers()) ? callDaemon(daemon, { type: "daemon.settings" }) : null),
+      pair: () => callDaemon(daemon, { type: "device.pair", ...(name ? { name } : {}) }),
       waitForDaemon: async () => {
         for (let i = 0; i < 60; i++) {
           if (await answers()) return true;

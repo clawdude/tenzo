@@ -136,6 +136,11 @@ export const Command = z.discriminatedUnion("type", [
   z.object({ type: z.literal("device.rename"), deviceId: z.string().min(1), name: DeviceName }),
   /** Unpairs a device: its token stops working and its connections close at once. */
   z.object({ type: z.literal("device.revoke"), deviceId: z.string().min(1) }),
+  /**
+   * The daemon's remote-access settings, read only, so `tenzo pair --tailscale` can tell whether
+   * the running daemon is set up for the tailnet. Only from the Mac itself.
+   */
+  z.object({ type: z.literal("daemon.settings") }),
 ]);
 export type Command = z.infer<typeof Command>;
 export type CommandType = Command["type"];
@@ -221,11 +226,13 @@ export const CommandResults = {
     expiresAt: z.string(),
     /** Where devices reach this daemon (`TENZO_PUBLIC_URL`), for the link; null: it wasn't told. */
     origin: z.string().nullable(),
-    /**
-     * Its other remote settings (`TENZO_ALLOWED_HOSTS`, `TENZO_LIVE_ORIGIN`), so
-     * `tenzo pair --tailscale` can tell whether the running daemon is set up for the tailnet.
-     */
+  }),
+  "daemon.settings": z.object({
+    /** `TENZO_PUBLIC_URL`; null: unset. */
+    publicUrl: z.string().nullable(),
+    /** `TENZO_ALLOWED_HOSTS`. */
     allowedHosts: z.array(z.string()),
+    /** `TENZO_LIVE_ORIGIN`. */
     liveOrigins: z.array(z.string()),
   }),
   "device.list": z.object({

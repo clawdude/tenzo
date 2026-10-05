@@ -1,3 +1,4 @@
+import { readConfig } from "./config.ts";
 import { TenzoError } from "./errors.ts";
 import { plistEnv, withPlistEnv } from "./service.ts";
 import {
@@ -8,7 +9,9 @@ import {
   planServe,
   serveCommand,
   type ServePlan,
+  type ServeRoute,
   type TailscaleRunner,
+  UnreadableServeStatus,
 } from "./tailscale.ts";
 
 /**
@@ -24,8 +27,6 @@ export interface Paired {
   code: string;
   expiresAt: string;
   origin: string | null;
-  allowedHosts: string[];
-  liveOrigins: string[];
 }
 
 /** The daemon's remote settings: `TENZO_ALLOWED_HOSTS`, `TENZO_LIVE_ORIGIN`, `TENZO_PUBLIC_URL`. */
@@ -46,11 +47,16 @@ export interface LaunchService {
 
 export interface SetupDeps {
   tailscale: TailscaleRunner;
-  /** The daemon's loopback ports: TENZO_PORT and TENZO_LIVE_PORT. */
+  /**
+   * The daemon's loopback ports: TENZO_PORT and TENZO_LIVE_PORT (the service's, when it is
+   * installed: `servicePorts`).
+   */
   daemonPort: number;
   livePort: number;
-  /** Asks the running daemon for a pairing code; null when no daemon answers. */
-  pair(): Promise<Paired | null>;
+  /** The running daemon's settings (`daemon.settings`, read only); null when no daemon answers. */
+  settings(): Promise<RemoteSettings | null>;
+  /** A pairing code from the running daemon. */
+  pair(): Promise<Paired>;
   /** After a restart: true once the daemon answers again, false if it doesn't in time. */
   waitForDaemon(): Promise<boolean>;
   /** The launchd service (`tenzo service install`), when it is installed. */
@@ -84,7 +90,7 @@ export async function setUpTailscale(
     httpsPort: options.httpsPort,
     liveHttpsPort: options.liveHttpsPort,
   };
-  const plan = planServe(parseServeStatus(await read(deps.tailscale, ["serve", "status", "--json"])), planInput);
+  const plan = planServe(await serveRoutes(deps.tailscale, "Nothing changed."), planInput);
   for (const line of describePlan(plan)) say(line);
 
   const adds = [plan.daemon, plan.live].filter((r) => r.action === "add");
@@ -107,7 +113,7 @@ export async function setUpTailscale(
         );
       }
     }
-    const after = planServe(parseServeStatus(await read(deps.tailscale, ["serve", "status", "--json"])), {
+    const after = planServe(await serveRoutes(deps.tailscale, "The routes were added; check them with `tailscale serve status`."), {
       ...planInput,
       httpsPort: plan.daemon.httpsPort,
       liveHttpsPort: plan.live.httpsPort,
@@ -123,14 +129,13 @@ export async function setUpTailscale(
 
   // The daemon must know its tailnet name (or it refuses the phone's requests), its live origin
   // (or Open live points nowhere) and its public URL (the link).
-  let paired = await deps.pair();
-  if (paired && isSetUp(fromPaired(paired), plan)) return { origin: plan.daemon.origin, paired };
+  const running = await deps.settings();
+  if (running && isSetUp(running, plan)) return { origin: plan.daemon.origin, paired: await deps.pair() };
 
   if (!deps.service) {
-    const base = paired ? fromPaired(paired) : settingsFromEnv(deps.env);
-    const wanted = wantedSettings(base, plan);
+    const wanted = wantedSettings(running ?? settingsFromEnv(deps.env), plan);
     say(
-      paired
+      running
         ? "\nThe running daemon doesn't have the settings that go with these routes. Stop it and start it again with them:"
         : "\nNo daemon is running. Start it with the settings that go with these routes:",
     );
@@ -157,7 +162,7 @@ export async function setUpTailscale(
     say(`\nThe service (${service.path}) runs without the settings that go with these routes:`);
     for (const line of changes) say(`  ${line}`);
   } else {
-    say(`\nThe service's plist has the settings, but the daemon running now doesn't${paired ? "" : " (or isn't running)"}.`);
+    say(`\nThe service's plist has the settings, but the daemon running now doesn't${running ? "" : " (or isn't running)"}.`);
   }
   say("Restarting the daemon stops the agents running now; their threads resume on their next prompt.");
   const ok =
@@ -175,13 +180,34 @@ export async function setUpTailscale(
   if (!(await deps.waitForDaemon())) {
     throw new TenzoError("The service didn't answer within 30 s after its restart. `tenzo service status` shows its state and log.");
   }
-  paired = await deps.pair();
-  if (!paired || !isSetUp(fromPaired(paired), plan)) {
+  const restarted = await deps.settings();
+  if (!restarted || !isSetUp(restarted, plan)) {
     throw new TenzoError(
       `The daemon on 127.0.0.1:${deps.daemonPort} still runs without those settings: probably a \`tenzo serve\` started by hand, which the service can't replace. Stop it (the service takes over within 10 s), then run \`tenzo pair --tailscale\` again.`,
     );
   }
-  return { origin: plan.daemon.origin, paired };
+  return { origin: plan.daemon.origin, paired: await deps.pair() };
+}
+
+/**
+ * The ports the service's daemon listens on, from its plist's environment (not this shell's):
+ * TENZO_PORT, and TENZO_LIVE_PORT or the next port.
+ */
+export function servicePorts(plist: string): { port: number; livePort: number } {
+  const env = plistEnv(plist) ?? {};
+  const config = readConfig({ TENZO_PORT: env.TENZO_PORT, TENZO_LIVE_PORT: env.TENZO_LIVE_PORT });
+  return { port: config.port, livePort: config.livePort ?? config.port + 1 };
+}
+
+/** The node's Serve routes; output it can't read stops here, saying what happened so far. */
+async function serveRoutes(tailscale: TailscaleRunner, sofar: string): Promise<ServeRoute[]> {
+  const out = await read(tailscale, ["serve", "status", "--json"]);
+  try {
+    return parseServeStatus(out);
+  } catch (error) {
+    if (error instanceof UnreadableServeStatus) throw new TenzoError(`${error.message} ${sofar}`);
+    throw error;
+  }
 }
 
 /** The plan for the person: both routes, what happens to each, and what's left alone. */
@@ -254,10 +280,6 @@ export function settingsChanges(from: RemoteSettings, to: RemoteSettings): strin
   return ["TENZO_ALLOWED_HOSTS", "TENZO_LIVE_ORIGIN", "TENZO_PUBLIC_URL"]
     .filter((key) => !same(before[key], after[key]))
     .map((key) => `${key}: ${before[key] ?? "(unset)"} → ${after[key] ?? "(unset)"}`);
-}
-
-function fromPaired(paired: Paired): RemoteSettings {
-  return { allowedHosts: paired.allowedHosts, liveOrigins: paired.liveOrigins, publicUrl: paired.origin };
 }
 
 function hostOf(origin: string): string | null {

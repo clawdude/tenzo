@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, existsSync, mkdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { delimiter, dirname, join, resolve, sep } from "node:path";
 import { claudeEnv } from "./agent/claude.ts";
@@ -262,9 +262,7 @@ export function installService(config: DaemonConfig, env: NodeJS.ProcessEnv): st
   const path = plistPath();
   ensureHome(config.home); // launchd opens the log there before the daemon runs
   mkdirSync(dirname(path), { recursive: true });
-  // Private: the environment may hold credentials (ANTHROPIC_API_KEY, say).
-  writeFileSync(path, launchAgentPlist(agent), { mode: 0o600 });
-  chmodSync(path, 0o600);
+  writePlist(path, launchAgentPlist(agent));
   loadService(path);
   return [
     `Installed ${SERVICE_LABEL}: tenzo serve on 127.0.0.1:${config.port}, at login and after a crash.`,
@@ -274,6 +272,23 @@ export function installService(config: DaemonConfig, env: NodeJS.ProcessEnv): st
     "If another tenzo daemon holds this TENZO_HOME, the service retries every 10 s until it stops.",
     ...installWarnings(env, isLinkedWorktree(agent.cwd)),
   ];
+}
+
+/**
+ * Writes a plist all at once: a private temp file next to it, renamed over it, so launchd (or a
+ * crash halfway) never sees half a file. Readable only by you: the environment may hold
+ * credentials (ANTHROPIC_API_KEY, say).
+ */
+export function writePlist(path: string, plist: string): void {
+  const temp = `${path}.${process.pid}.tmp`;
+  try {
+    writeFileSync(temp, plist, { mode: 0o600 });
+    chmodSync(temp, 0o600);
+    renameSync(temp, path);
+  } catch (error) {
+    rmSync(temp, { force: true });
+    throw error;
+  }
 }
 
 /** (Re)loads the agent from its plist: stops the running daemon, if any, and starts it again. */

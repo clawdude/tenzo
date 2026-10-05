@@ -1,7 +1,7 @@
-import { readFileSync, writeFileSync } from "node:fs";
+import { readdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { launchAgentPlist, plistEnv, SERVICE_LABEL, withPlistEnv } from "./service.ts";
+import { launchAgentPlist, plistEnv, SERVICE_LABEL, withPlistEnv, writePlist } from "./service.ts";
 import type { TailscaleRunner } from "./tailscale.ts";
 import { NAME, SERVE_SET_UP, SERVE_UNRELATED, STATUS_1_102 } from "./tailscale-fixtures.ts";
 import {
@@ -9,6 +9,7 @@ import {
   type Paired,
   type RemoteSettings,
   type SetupDeps,
+  servicePorts,
   setUpTailscale,
   settingsFromEnv,
 } from "./tailscale-setup.ts";
@@ -48,18 +49,16 @@ function fakeTailscale(serve: ServeJson, status: object = STATUS_1_102) {
 /** A daemon whose settings can change on restart; null settings: not running. */
 function fakeDaemon(settings: RemoteSettings | null) {
   const daemon = {
-    settings,
+    current: settings,
+    /** Codes made: only ever for the link at the end, never to look at the settings. */
     pairs: 0,
-    pair: async (): Promise<Paired | null> => {
-      if (!daemon.settings) return null;
-      daemon.pairs++;
-      return {
-        code: `code${daemon.pairs}`,
-        expiresAt: "2026-10-05T12:10:00.000Z",
-        origin: daemon.settings.publicUrl,
-        allowedHosts: daemon.settings.allowedHosts,
-        liveOrigins: daemon.settings.liveOrigins,
-      };
+    api: {
+      settings: async (): Promise<RemoteSettings | null> => structuredClone(daemon.current),
+      pair: async (): Promise<Paired> => {
+        if (!daemon.current) throw new Error("no daemon to pair with");
+        daemon.pairs++;
+        return { code: `code${daemon.pairs}`, expiresAt: "2026-10-05T12:10:00.000Z", origin: daemon.current.publicUrl };
+      },
     },
   };
   return daemon;
@@ -80,14 +79,14 @@ function fakeService(env: Record<string, string>, daemon: ReturnType<typeof fake
     reload: () => {
       service.reloads++;
       // A daemon started by hand keeps the port: the service can't replace it.
-      if (!handRun) daemon.settings = settingsFromEnv(plistEnv(readFileSync(path, "utf8")) ?? {});
+      if (!handRun) daemon.current = settingsFromEnv(plistEnv(readFileSync(path, "utf8")) ?? {});
     },
   } satisfies LaunchService & { reloads: number };
   return service;
 }
 
 function deps(
-  over: Partial<SetupDeps> & Pick<SetupDeps, "tailscale" | "pair">,
+  over: Partial<SetupDeps> & Pick<SetupDeps, "tailscale" | "settings" | "pair">,
   answers: boolean[] = [],
 ): SetupDeps & { said: string[]; asked: string[] } {
   const said: string[] = [];
@@ -113,13 +112,32 @@ describe("tenzo pair --tailscale", () => {
   it("with everything set up, changes nothing and just pairs", async () => {
     const ts = fakeTailscale(SERVE_SET_UP);
     const daemon = fakeDaemon(SET_UP);
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair });
+    const d = deps({ tailscale: ts.runner, ...daemon.api });
     const done = await setUpTailscale(d);
     expect(done).toEqual({ origin: PASS, paired: expect.objectContaining({ code: "code1" }) });
     expect(ts.changes).toEqual([]);
     expect(d.asked).toEqual([]);
     expect(d.said.join("\n")).toContain("set up already");
     expect(d.said.join("\n")).toContain(":443 → http://127.0.0.1:18789");
+    // Looking at the daemon's settings made no code: the only one is the link's.
+    expect(daemon.pairs).toBe(1);
+  });
+
+  it("stops, changing nothing, when it can't read the serve status", async () => {
+    for (const out of ["[]", '"x"', "42", '{"Tcp":{"8443":{"HTTPS":true}}}', '{"TCP":[{"HTTPS":true}]}', '{"TCP":{"0":{}}}']) {
+      const ts = fakeTailscale({});
+      ts.runner.read = async (args) => ({
+        code: 0,
+        stdout: args[0] === "status" ? JSON.stringify(STATUS_1_102) : out,
+        stderr: "",
+      });
+      const daemon = fakeDaemon(SET_UP);
+      const d = deps({ tailscale: ts.runner, ...daemon.api }, [true]);
+      await expect(setUpTailscale(d), out).rejects.toThrow(/Can't read `tailscale serve status --json`.*Nothing changed\./);
+      expect(ts.changes).toEqual([]);
+      expect(d.asked).toEqual([]);
+      expect(daemon.pairs).toBe(0);
+    }
   });
 
   it("from zero with the service: adds both routes after asking, leaves the unrelated one, updates the plist and pairs", async () => {
@@ -130,7 +148,7 @@ describe("tenzo pair --tailscale", () => {
       daemon,
     );
     const before = service.read();
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service }, [true, true]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service }, [true, true]);
     const done = await setUpTailscale(d);
 
     expect(ts.changes).toEqual([
@@ -156,14 +174,14 @@ describe("tenzo pair --tailscale", () => {
     expect(service.read()).toBe(withPlistEnv(before, plistEnv(service.read()) ?? {}));
     expect(service.reloads).toBe(1);
     expect(done?.origin).toBe(PASS);
-    expect(done?.paired.allowedHosts).toEqual(["other.example", NAME]);
+    expect(daemon.current?.allowedHosts).toEqual(["other.example", NAME]);
   });
 
   it("with --yes, asks nothing", async () => {
     const ts = fakeTailscale({});
     const daemon = fakeDaemon({ allowedHosts: [], liveOrigins: [], publicUrl: null });
     const service = fakeService({ PATH: "/usr/bin" }, daemon);
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service });
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service });
     const done = await setUpTailscale(d, { yes: true });
     expect(d.asked).toEqual([]);
     expect(ts.changes).toHaveLength(2);
@@ -173,7 +191,7 @@ describe("tenzo pair --tailscale", () => {
   it("changes nothing when you say no to the routes", async () => {
     const ts = fakeTailscale(SERVE_UNRELATED);
     const daemon = fakeDaemon({ allowedHosts: [], liveOrigins: [], publicUrl: null });
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair }, [false]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api }, [false]);
     expect(await setUpTailscale(d)).toBeNull();
     expect(ts.changes).toEqual([]);
     expect(daemon.pairs).toBe(0);
@@ -185,7 +203,7 @@ describe("tenzo pair --tailscale", () => {
     const daemon = fakeDaemon({ allowedHosts: [], liveOrigins: [], publicUrl: null });
     const service = fakeService({ PATH: "/usr/bin" }, daemon);
     const before = service.read();
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service }, [false]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service }, [false]);
     expect(await setUpTailscale(d)).toBeNull();
     expect(service.read()).toBe(before);
     expect(service.reloads).toBe(0);
@@ -202,7 +220,7 @@ describe("tenzo pair --tailscale", () => {
       liveOrigins: [`https://${NAME}:9444`, "https://lan-box.local:4781"],
       publicUrl: null,
     });
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair });
+    const d = deps({ tailscale: ts.runner, ...daemon.api });
     expect(await setUpTailscale(d)).toBeNull();
     expect(ts.changes).toEqual([]);
     expect(d.said.join("\n")).toContain(
@@ -213,7 +231,7 @@ describe("tenzo pair --tailscale", () => {
 
   it("without a daemon or the service, starts from this shell's settings", async () => {
     const ts = fakeTailscale(SERVE_SET_UP);
-    const d = deps({ tailscale: ts.runner, pair: fakeDaemon(null).pair, env: { TENZO_ALLOWED_HOSTS: "x.example" } });
+    const d = deps({ tailscale: ts.runner, ...fakeDaemon(null).api, env: { TENZO_ALLOWED_HOSTS: "x.example" } });
     expect(await setUpTailscale(d)).toBeNull();
     expect(d.said.join("\n")).toContain("No daemon is running");
     expect(d.said.join("\n")).toContain(`TENZO_ALLOWED_HOSTS=x.example,${NAME} `);
@@ -225,7 +243,7 @@ describe("tenzo pair --tailscale", () => {
     const env = { PATH: "/usr/bin", TENZO_ALLOWED_HOSTS: NAME, TENZO_LIVE_ORIGIN: LIVE, TENZO_PUBLIC_URL: PASS };
     const service = fakeService(env, daemon);
     const before = service.read();
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service }, [true]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service }, [true]);
     const done = await setUpTailscale(d);
     expect(d.asked).toEqual(["Restart the service?"]);
     expect(service.read()).toBe(before);
@@ -237,7 +255,7 @@ describe("tenzo pair --tailscale", () => {
     const ts = fakeTailscale(SERVE_SET_UP);
     const daemon = fakeDaemon({ allowedHosts: [], liveOrigins: [], publicUrl: null });
     const service = fakeService({ PATH: "/usr/bin" }, daemon, { handRun: true });
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service }, [true]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service }, [true]);
     await expect(setUpTailscale(d)).rejects.toThrow(/started by hand/);
   });
 
@@ -245,27 +263,27 @@ describe("tenzo pair --tailscale", () => {
     const ts = fakeTailscale(SERVE_SET_UP);
     const daemon = fakeDaemon(null);
     const service = fakeService({ PATH: "/usr/bin" }, daemon);
-    const d = deps({ tailscale: ts.runner, pair: daemon.pair, service, waitForDaemon: async () => false }, [true]);
+    const d = deps({ tailscale: ts.runner, ...daemon.api, service, waitForDaemon: async () => false }, [true]);
     await expect(setUpTailscale(d)).rejects.toThrow(/didn't answer within 30 s/);
   });
 
   it("refuses a raw TCP route to Tenzo before changing anything", async () => {
     const ts = fakeTailscale({ TCP: { "8443": { TCPForward: "127.0.0.1:4780" } } });
-    const d = deps({ tailscale: ts.runner, pair: fakeDaemon(SET_UP).pair }, [true]);
+    const d = deps({ tailscale: ts.runner, ...fakeDaemon(SET_UP).api }, [true]);
     await expect(setUpTailscale(d)).rejects.toThrow(/raw TCP/);
     expect(ts.changes).toEqual([]);
   });
 
   it("stops at a node that isn't signed in, or a tailscale that fails", async () => {
     const out = fakeTailscale({}, { BackendState: "NeedsLogin", Self: { DNSName: "" } });
-    await expect(setUpTailscale(deps({ tailscale: out.runner, pair: fakeDaemon(SET_UP).pair }))).rejects.toThrow(
+    await expect(setUpTailscale(deps({ tailscale: out.runner, ...fakeDaemon(SET_UP).api }))).rejects.toThrow(
       /tailscale up/,
     );
     const broken: TailscaleRunner = {
       read: async () => ({ code: 1, stdout: "", stderr: "failed to connect to local tailscaled; it doesn't appear to be running\n" }),
       change: async () => 0,
     };
-    await expect(setUpTailscale(deps({ tailscale: broken, pair: fakeDaemon(SET_UP).pair }))).rejects.toThrow(
+    await expect(setUpTailscale(deps({ tailscale: broken, ...fakeDaemon(SET_UP).api }))).rejects.toThrow(
       /`tailscale status --json` failed: failed to connect to local tailscaled/,
     );
   });
@@ -274,13 +292,37 @@ describe("tenzo pair --tailscale", () => {
     const failing = fakeTailscale({});
     failing.runner.change = async () => 1;
     await expect(
-      setUpTailscale(deps({ tailscale: failing.runner, pair: fakeDaemon(SET_UP).pair }, [true])),
+      setUpTailscale(deps({ tailscale: failing.runner, ...fakeDaemon(SET_UP).api }, [true])),
     ).rejects.toThrow(/--https=8443 http:\/\/127.0.0.1:4780` failed \(exit 1\)/);
     const ignoring = fakeTailscale({});
     ignoring.runner.change = async () => 0;
     await expect(
-      setUpTailscale(deps({ tailscale: ignoring.runner, pair: fakeDaemon(SET_UP).pair }, [true])),
+      setUpTailscale(deps({ tailscale: ignoring.runner, ...fakeDaemon(SET_UP).api }, [true])),
     ).rejects.toThrow(/isn't served yet/);
+  });
+});
+
+describe("servicePorts", () => {
+  const plist = (env: Record<string, string>) =>
+    launchAgentPlist({ node: "/n", cli: "/c", cwd: "/w", env, log: "/l" });
+
+  it("reads the service's ports from its plist, not from this shell", () => {
+    expect(servicePorts(plist({ PATH: "/usr/bin" }))).toEqual({ port: 4780, livePort: 4781 });
+    expect(servicePorts(plist({ TENZO_PORT: "5000" }))).toEqual({ port: 5000, livePort: 5001 });
+    expect(servicePorts(plist({ TENZO_PORT: "5000", TENZO_LIVE_PORT: "6000" }))).toEqual({ port: 5000, livePort: 6000 });
+    expect(() => servicePorts(plist({ TENZO_PORT: "70000" }))).toThrow(/TENZO_PORT/);
+  });
+});
+
+describe("writePlist", () => {
+  it("replaces the file whole, readable only by you, leaving no temp file", () => {
+    const dir = tempDir("plist-write");
+    const path = join(dir, `${SERVICE_LABEL}.plist`);
+    writeFileSync(path, "old", { mode: 0o644 });
+    writePlist(path, "new");
+    expect(readFileSync(path, "utf8")).toBe("new");
+    expect(statSync(path).mode & 0o777).toBe(0o600);
+    expect(readdirSync(dir)).toEqual([`${SERVICE_LABEL}.plist`]);
   });
 });
 

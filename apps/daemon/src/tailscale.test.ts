@@ -6,6 +6,7 @@ import {
   parseStatus,
   planServe,
   serveCommand,
+  UnreadableServeStatus,
   type ServeRoute,
 } from "./tailscale.ts";
 import { NAME, SERVE_SET_UP, SERVE_UNRELATED, STATUS_1_102, STATUS_OLD } from "./tailscale-fixtures.ts";
@@ -33,6 +34,23 @@ describe("parseStatus", () => {
     const off = { ...STATUS_1_102, CurrentTailnet: { MagicDNSEnabled: false } };
     expect(() => parseStatus(JSON.stringify(off))).toThrow(/MagicDNS/);
     expect(() => parseStatus("tailscaled is not running")).toThrow(/not JSON/);
+  });
+
+  it("refuses a name that isn't a plain host name: it goes into commands, settings and a plist", () => {
+    for (const odd of [
+      "my mac.tail1234.ts.net",
+      "my-mac.tail1234.ts.net;rm -rf ~",
+      "my-mac.tail1234.ts.net:8443",
+      "my_mac.tail1234.ts.net",
+      "<x>.ts.net",
+      "-mac.tail1234.ts.net",
+      "mac..ts.net",
+      "localhost",
+      "mäc.ts.net",
+    ]) {
+      const status = { ...STATUS_1_102, Self: { ...STATUS_1_102.Self, DNSName: `${odd}.` } };
+      expect(() => parseStatus(JSON.stringify(status)), odd).toThrow(/isn't a host name Tenzo can use/);
+    }
   });
 });
 
@@ -86,7 +104,68 @@ describe("parseServeStatus", () => {
   });
 
   it("fails clearly on output that isn't JSON", () => {
+    expect(() => parseServeStatus("No serve config")).toThrow(UnreadableServeStatus);
     expect(() => parseServeStatus("No serve config")).toThrow(/not JSON/);
+  });
+
+  // Read as "nothing served", any of these would let the plan put Tenzo over someone's route.
+  it("refuses a top level that isn't null or an object", () => {
+    for (const json of ["[]", '"x"', "42", "true", '[{"TCP":{}}]']) {
+      expect(() => parseServeStatus(json), json).toThrow(/the top level isn't an object/);
+    }
+  });
+
+  it("refuses an object with none of the keys it knows, but takes unknown keys beside them", () => {
+    expect(() => parseServeStatus(JSON.stringify({ Tcp: { "8443": { HTTPS: true } } }))).toThrow(
+      /the top level has none of TCP, Web/,
+    );
+    expect(() => parseServeStatus(JSON.stringify({ Ports: [8443] }))).toThrow(UnreadableServeStatus);
+    expect(serve({ ...SERVE_UNRELATED, Version: 2 }).map((r) => r.port)).toEqual([443]);
+    // Services alone is a known shape: nothing on the node's own ports.
+    expect(serve({ Services: { "svc:web": { TCP: { "443": { HTTPS: true } } } } })).toEqual([]);
+  });
+
+  it("refuses maps that aren't objects", () => {
+    for (const config of [
+      { TCP: [{ HTTPS: true }] },
+      { TCP: "8443" },
+      { Web: [] },
+      { Web: 1 },
+      { AllowFunnel: [] },
+      { Foreground: [] },
+      { Services: "x" },
+    ]) {
+      expect(() => serve(config), JSON.stringify(config)).toThrow(/isn't an object/);
+    }
+  });
+
+  it("refuses entries that aren't objects, or fields of the wrong kind", () => {
+    for (const config of [
+      { TCP: { "8443": null } },
+      { TCP: { "8443": true } },
+      { TCP: { "8443": [] } },
+      { Web: { [`${NAME}:8443`]: null } },
+      { Web: { [`${NAME}:8443`]: { Handlers: [] } } },
+      { Web: { [`${NAME}:8443`]: { Handlers: { "/": "http://127.0.0.1:1" } } } },
+      { Foreground: { s1: null } },
+      { Foreground: { s1: { Nope: 1 } } },
+    ]) {
+      expect(() => serve(config), JSON.stringify(config)).toThrow(/isn't an object|has none of/);
+    }
+    expect(() => serve({ TCP: { "8443": { HTTPS: "yes" } } })).toThrow(/HTTPS isn't true or false/);
+    expect(() => serve({ TCP: { "22": { TCPForward: 22 } } })).toThrow(/TCPForward isn't text/);
+    expect(() => serve({ TCP: { "443": { HTTPS: true } }, AllowFunnel: { [`${NAME}:443`]: "on" } })).toThrow(
+      /isn't true or false/,
+    );
+  });
+
+  it("refuses ports outside 1 to 65535, in TCP, Web and AllowFunnel keys", () => {
+    for (const key of ["0", "65536", "99999", "-1", "abc", "8443.5", "", " 8443"]) {
+      expect(() => serve({ TCP: { [key]: { HTTPS: true } } }), key).toThrow(/isn't a port/);
+      expect(() => serve({ Web: { [`${NAME}:${key}`]: { Handlers: {} } } }), key).toThrow(/isn't a port/);
+      expect(() => serve({ AllowFunnel: { [`${NAME}:${key}`]: true } }), key).toThrow(/isn't a port/);
+    }
+    expect(serve({ TCP: { "1": {}, "65535": { HTTPS: true } } }).map((r) => r.port)).toEqual([1, 65535]);
   });
 });
 
@@ -175,6 +254,10 @@ describe("planServe", () => {
       /already serves port 443 \(http:\/\/127\.0\.0\.1:18789\)/,
     );
     expect(() => plan([], { httpsPort: 9000, liveHttpsPort: 9000 })).toThrow(/two different/);
+    for (const bad of [0, 65_536, 8443.5]) {
+      expect(() => plan([], { httpsPort: bad }), String(bad)).toThrow(/isn't a port/);
+      expect(() => plan([], { liveHttpsPort: bad }), String(bad)).toThrow(/isn't a port/);
+    }
   });
 
   it("refuses raw TCP to Tenzo, which would let everyone in as local", () => {
@@ -219,6 +302,9 @@ describe("serveCommand", () => {
       ["funnel", "--bg", "--https=443", "http://127.0.0.1:4780"],
       ["serve", "--bg", "--https=8443", "http://example.com:80"],
       ["serve", "--bg", "--https=8443", "http://127.0.0.1:4780", "--set-path=/x"],
+      ["serve", "--bg", "--https=0", "http://127.0.0.1:4780"],
+      ["serve", "--bg", "--https=65536", "http://127.0.0.1:4780"],
+      ["serve", "--bg", "--https=8443", "http://127.0.0.1:70000"],
     ]) {
       expect(() => assertSafeServe(bad)).toThrow(/Refusing/);
     }

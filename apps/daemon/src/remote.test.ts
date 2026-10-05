@@ -311,13 +311,25 @@ describe("pairing", () => {
 
   it("makes links on the Mac only", async () => {
     const local = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "device.pair", name: "tablet" });
-    // With the remote settings it runs with, for `tenzo pair --tailscale` to check.
-    expect(JSON.parse(local.body)).toMatchObject({
-      ok: true,
-      result: { code: expect.any(String), origin: null, allowedHosts: [TS], liveOrigins: [LIVE] },
-    });
+    expect(JSON.parse(local.body)).toMatchObject({ ok: true, result: { code: expect.any(String) } });
     const { cookie } = pairDevice(daemon.devices);
     const fromPhone = await command(remote({ cookie }), { type: "device.pair" });
+    expect(fromPhone.status).toBe(400);
+    expect(JSON.parse(fromPhone.body).error).toMatch(/on the Mac itself/);
+  });
+
+  it("tells the Mac its remote settings, read only: no code made, the pairing limit left as it is", async () => {
+    const pair = (code: string) =>
+      call("/api/pair", { method: "POST", headers: { ...json, ...remote() }, body: { code } });
+    for (let i = 0; i < PAIR_ATTEMPTS.limit; i++) await pair("e".repeat(26));
+    const local = await command({ host: `127.0.0.1:${daemon.port}` }, { type: "daemon.settings" });
+    expect(JSON.parse(local.body)).toEqual({
+      ok: true,
+      result: { publicUrl: null, allowedHosts: [TS], liveOrigins: [LIVE] },
+    });
+    expect((await pair("e".repeat(26))).status).toBe(429);
+    const { cookie } = pairDevice(daemon.devices);
+    const fromPhone = await command(remote({ cookie }), { type: "daemon.settings" });
     expect(fromPhone.status).toBe(400);
     expect(JSON.parse(fromPhone.body).error).toMatch(/on the Mac itself/);
   });

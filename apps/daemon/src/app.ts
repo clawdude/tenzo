@@ -24,7 +24,7 @@ import {
   readCookies,
   requestMode,
 } from "./auth.ts";
-import { type Caller, executeCommand } from "./commands.ts";
+import { type Caller, executeCommand, isDeviceCommand } from "./commands.ts";
 import { type Devices, nameFromUserAgent } from "./devices.ts";
 import type { Engine } from "./engine.ts";
 import { markDaemon } from "./live.ts";
@@ -132,7 +132,7 @@ export function createApp({
       const issues = parsed.error.issues.map((i) => `${i.path.join(".") || "body"}: ${i.message}`);
       return fail(`Not a command: ${issues.join("; ")}`, 400);
     }
-    if (!engine && !parsed.data.type.startsWith("device.")) {
+    if (!engine && !isDeviceCommand(parsed.data)) {
       return fail("This daemon runs no threads.", 503);
     }
     const outcome = await executeCommand(engine, parsed.data, { devices, caller: c.var.caller });
