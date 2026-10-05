@@ -31,7 +31,10 @@
 	let front = $state<string | null>(null);
 	/** A card being brought back to the front: by Undo, a tap under Meanwhile, a refusal. */
 	let bringing = $state<string | null>(null);
-	/** How each card leaving goes (lifted, or flung aside), and which side a returning one comes from. */
+	/**
+	 * How each card leaving goes (lifted, or flung aside), and which side a returning one comes from.
+	 * The transitions get them as objects: Svelte turns a null parameter into `{}` (motion.ts).
+	 */
 	const departures = new Map<string, Departure>();
 	const arrivals = new Map<string, -1 | 1>();
 	/** The top card's offset while a finger drags it aside. */
@@ -283,8 +286,8 @@
 							'transition-transform duration-[380ms] ease-[cubic-bezier(.2,.8,.2,1)] motion-reduce:transition-none'
 					]}
 					style:transform={drag !== 0 ? `translateX(${drag}px) rotate(${drag / 22}deg)` : null}
-					in:arrive={arrivals.get(item.id) ?? null}
-					out:leave={departures.get(item.id) ?? null}
+					in:arrive={{ side: arrivals.get(item.id) ?? null }}
+					out:leave={departures.get(item.id) ?? { kind: 'lift' }}
 					use:swipeable={{
 						enabled: !leaving.has(item.id),
 						ondrag: (dx) => {

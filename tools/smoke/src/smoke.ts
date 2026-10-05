@@ -126,9 +126,15 @@ interface Watch {
   documents: number;
 }
 
+/** What the browser says when an animation is handed a bad keyframe (a NaN offset, say). */
+const BAD_KEYFRAME = /invalid keyframe|NaN(px|deg)/i;
+
 function watch(page: Page): Watch {
   const seen: Watch = { errors: [], sockets: 0, documents: 0 };
   page.on("pageerror", (error) => seen.errors.push(error.message));
+  page.on("console", (message) => {
+    if (BAD_KEYFRAME.test(message.text())) seen.errors.push(`console: ${message.text()}`);
+  });
   page.on("websocket", () => seen.sockets++);
   page.on("request", (request) => {
     if (request.resourceType() === "document") seen.documents++;
@@ -416,6 +422,167 @@ async function heldPlace(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/**
+ * The Pass's motion (PRODUCT.md §5): the first card arrives, an answer lifts it away, a swipe
+ * flings the next one aside to snooze it, and Undo brings it back in from that side; with motion,
+ * or with reduced motion (cards change in place). No animation may be handed a bad keyframe
+ * (a NaN offset logs "Invalid keyframe"; see `watch`). The daemon is played by a routed
+ * WebSocket, so there are items to answer without an agent.
+ */
+async function passMotion(browser: Browser, base: string, reduced: boolean): Promise<string[]> {
+  const context = await browser.newContext({
+    ...devices["iPhone 15"],
+    reducedMotion: reduced ? "reduce" : "no-preference",
+  });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const environmentId = "env_smoke000000000000000";
+  const threadId = "thr_smokepass00000000000";
+  const at = new Date().toISOString();
+  const thread = {
+    id: threadId,
+    environmentId,
+    projectId: "prj_smoke000000000000000",
+    projectName: "app",
+    title: "Pass thread",
+    branch: "tenzo/pass",
+    worktreePath: "/tmp/pass",
+    status: "active",
+    agent: "claude",
+    model: null,
+    createdAt: at,
+    updatedAt: at,
+    archivedAt: null,
+    phase: "discussing",
+    activity: "needs-you",
+    working: false,
+    queued: 0,
+    openItems: 2,
+    lastSeq: 0,
+    activeAt: at,
+  };
+  const options = [
+    { label: "Yes", value: "Yes", description: "Go on", recommended: true },
+    { label: "No", value: "No", description: "Stop", recommended: false },
+  ];
+  const item = (tag: string, ask: string) => ({
+    id: `itm_${tag.repeat(20)}`,
+    environmentId,
+    threadId,
+    lane: "quick",
+    kind: "question",
+    requestId: `req_${tag.repeat(20)}`,
+    context: "",
+    ask,
+    options,
+    suggested: "Yes",
+    questions: [{ id: ask, header: "", question: ask, options, multiSelect: false }],
+    createdAt: at,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  });
+  const first = item("a", "First question?");
+  const second = item("b", "Second question?");
+  let send: (frame: unknown) => void = () => {};
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    send = (frame) => ws.send(JSON.stringify(frame));
+    send({ type: "hello", environmentId, version: "smoke", serverTime: at });
+    send({
+      type: "snapshot",
+      snapshot: { environmentId, threads: [thread], items: [], projects: [], live: null },
+    });
+    ws.onMessage((data) => {
+      const frame = JSON.parse(String(data)) as {
+        type: string;
+        id?: string;
+        command?: { type: string; itemId?: string };
+      };
+      if (frame.type === "ping") send({ type: "pong", at });
+      if (frame.type !== "command" || !frame.command) return;
+      const which = frame.command.itemId === first.id ? first : second;
+      // As the daemon does: the item's frame, then the command's answer.
+      const answer = (change: string, changed: object, result: object) => {
+        send({ type: "item", change, item: changed });
+        send({ type: "ok", id: frame.id, result: { item: changed, thread, ...result } });
+      };
+      switch (frame.command.type) {
+        case "item.answer":
+          return answer(
+            "resolved",
+            {
+              ...which,
+              status: "resolved",
+              resolvedAt: new Date().toISOString(),
+              resolution: { kind: "answered", answers: { [which.ask]: "Yes" } },
+            },
+            { delivery: "live" },
+          );
+        case "item.snooze":
+          return answer(
+            "snoozed",
+            { ...which, snoozedUntil: new Date(Date.now() + 15 * 60_000).toISOString() },
+            {},
+          );
+        case "item.unsnooze":
+          return answer("unsnoozed", which, {});
+        default:
+          send({ type: "error", id: frame.id ?? null, error: `no ${frame.command.type} here` });
+      }
+    });
+  });
+  const top = (ask: string) => page.getByTestId("top").filter({ hasText: ask });
+  /** Long enough for any arrive or leave animation to have run its course. */
+  const settle = () => sleep(600);
+  try {
+    await page.goto(`${base}/`);
+    await page.locator('[data-testid="connection"][data-synced="true"]').waitFor({ state: "attached" });
+    // The first card arrives on an empty Pass; the second goes behind it.
+    send({ type: "item", change: "opened", item: first });
+    send({ type: "item", change: "opened", item: second });
+    await top("First question?").waitFor();
+    const moving = await page.evaluate(
+      () =>
+        (globalThis as unknown as { document: { getAnimations(): unknown[] } }).document.getAnimations()
+          .length,
+    );
+    if (!reduced && moving === 0) problems.push("the first card arrived without moving");
+    await settle();
+    // Answer: it lifts away, and the second card is there.
+    await top("First question?").getByTestId("suggested").tap();
+    await top("Second question?").waitFor();
+    await settle();
+    // Swipe it aside: it flies off, and the toast offers Undo.
+    const box = await page.getByTestId("top").boundingBox();
+    if (!box) throw new Error("the top card has no box");
+    const x = box.x + box.width / 2;
+    const y = box.y + box.height * 0.3;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    for (let step = 1; step <= 10; step++) await page.mouse.move(x + step * 20, y);
+    await page.mouse.up();
+    await page.getByTestId("undo").waitFor();
+    await settle();
+    if ((await page.getByTestId("top").count()) !== 0) problems.push("the swiped card stayed");
+    // Undo: it comes back in from the side it went.
+    await page.getByTestId("undo").tap();
+    await top("Second question?").waitFor();
+    await settle();
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  // A bad keyframe is logged once per frame: say each once, with how often.
+  const counts = new Map<string, number>();
+  for (const error of seen.errors) counts.set(error, (counts.get(error) ?? 0) + 1);
+  for (const [error, count] of counts) problems.push(count > 1 ? `${error} (×${count})` : error);
+  return problems;
+}
+
 /** A command to the daemon from this Mac (no login), its result. */
 async function local<T>(base: string, command: unknown): Promise<T> {
   const answer = (await (
@@ -551,6 +718,8 @@ async function main(): Promise<number> {
       ["a Threads row opens its timeline, and back", () => thread(launched, base, threadId, false)],
       ["start at a thread's timeline, back to the Pass", () => thread(launched, base, threadId, true)],
       ["a long timeline holds your place as the full feed moves on", () => heldPlace(launched, base)],
+      ["the Pass moves: a card arrives, lifts, is swiped aside and comes back", () => passMotion(launched, base, false)],
+      ["the Pass with reduced motion: the same, in place", () => passMotion(launched, base, true)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
       ["a page on another port (a live page) can't frame the Pass", () => framed(launched, base)],
