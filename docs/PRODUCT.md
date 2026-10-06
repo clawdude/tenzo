@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo never sets the permission mode, in any phase: your own `defaultMode` (user, project or local settings) applies, as in your terminal; discussing is held by the prompt and `propose`, not by a mode. A system prompt is fixed for a session's life, so *Build it* reaches a running session as `propose`'s result (the approval plus the build prompt); every later session of the thread starts with the build prompt.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo doesn't choose a permission mode, in any phase: your own `defaultMode` (user, project or local settings) applies, as in your terminal, unless the project's `.tenzo` config sets `permissions` (§8); discussing is held by the prompt and `propose`, not by a mode. A system prompt is fixed for a session's life, so *Build it* reaches a running session as `propose`'s result (the approval plus the build prompt); every later session of the thread starts with the build prompt.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
@@ -130,7 +130,7 @@ MVP triggers: schedule and "run now." Event triggers (webhooks) later; they need
 }
 ```
 
-Anything missing falls back to the agent's own defaults. A `permissions` key (M3) is an optional override of the permission mode; absent, your own `defaultMode` applies in every phase. Discuss model runs until *Build it*; build model after; agents model is passed to subagents. A thread can override model from its "⋯".
+Anything missing falls back to the agent's own defaults. A `permissions` key (M3) is an optional override of the permission mode, limited to `default`, `acceptEdits` or `dontAsk` because the file lives in the repo (`auto` and `bypassPermissions` belong in your own `~/.claude/settings.json`); absent, your own `defaultMode` applies in every phase. `agent` accepts only `claude` until the Codex adapter exists (M5, deferred). Discuss model runs until *Build it*; build model after; agents model is passed to subagents. A thread can override model from its "⋯".
 
 ## 9. Remote access and auth
 
@@ -142,7 +142,7 @@ Anything missing falls back to the agent's own defaults. A `permissions` key (M3
 ## 10. Stack
 
 - **Daemon:** Node 22+, TypeScript, `node:sqlite`, Hono + `ws`, zod contracts. Claude via `@anthropic-ai/claude-agent-sdk` wrapping your `claude` binary with `settingSources: user, project, local`; Codex via `codex app-server` JSON-RPC.
-- **Web UI:** Svelte 5, SvelteKit (static adapter), Tailwind v4, shadcn-svelte. Installed to the iPhone home screen; a browser tab on the PC.
+- **Web UI:** Svelte 5, SvelteKit (static adapter), Tailwind v4. Installed to the iPhone home screen; a browser tab on the PC.
 - **Repo:** pnpm monorepo: `apps/daemon`, `apps/web`, `packages/contracts`, `packages/client-runtime` (framework-free, so native or desktop shells are additive later).
 - **Not:** Effect, Electron, Bun, Rust, React Native (for now).
 - **Storage:** Tenzo keeps only its own state in SQLite (threads, items, automations, device tokens, an event cache for the UI). Transcripts stay Claude's; threads resume by session ID.
@@ -157,7 +157,7 @@ In:
 4. `.tenzo/config.json` with agent, models per phase, permissions, landing rule.
 5. Automations with schedule + run now (no UI beyond a list and "run now" at first).
 6. Local mode + remote mode with pairing; Web Push.
-7. Codex adapter immediately after the Pass works end to end.
+7. Codex adapter (M5): deferred for now.
 
 Out (for now): Automations screen, video capture, daemon-verified checks, multi-machine client, native apps, desktop shell, watchdog, event triggers, multiple accounts UI.
 
