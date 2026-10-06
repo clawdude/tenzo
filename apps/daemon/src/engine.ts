@@ -407,13 +407,17 @@ export class Engine {
     const run = input.run;
     // An automation's run takes its model and thinking as the thread's own choice.
     const own = run ? runThreadOptions(run.automation) : input.model ? { model: input.model } : {};
+    let baseNote = null as string | null; // set by createThread's callback
     const thread = await createThread(this.store, input.project, title, {
       ...own,
       ...(prompt && !given ? { naming: prompt } : {}),
       ...(client ? { client } : {}),
       ...(input.parent ? { parent: input.parent } : {}),
       ...(run ? { automation: run.name } : {}),
+      onBaseNote: (note) => (baseNote = note),
     });
+    // Where it started, when that needs saying (a default branch diverged from origin's).
+    if (baseNote) this.#append(draft(thread, { type: "thread.noted", payload: { message: baseNote } }));
     // The run is on record before its session starts, so the session starts with its budget.
     transaction(this.store, () => {
       if (run) {

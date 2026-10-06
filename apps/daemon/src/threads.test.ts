@@ -118,6 +118,31 @@ describe("createThread", () => {
     expect((await createThread(store, "app", "Add search")).slug).toBe("add-search-3");
   });
 
+  it("starts from what landed on origin when your default branch is behind, which it leaves alone", async () => {
+    const origin = join(tempDir("origin"), "origin.git");
+    sh(tempDir(), "init", "--quiet", "--bare", "--initial-branch", "main", origin);
+    sh(repo, "remote", "add", "origin", origin);
+    sh(repo, "push", "--quiet", "origin", "main");
+    const yours = sh(repo, "rev-parse", "main");
+    const other = join(tempDir("other"), "other");
+    sh(tempDir(), "clone", "--quiet", origin, other);
+    const landed = commitFile(other, "MERGED.md", "Merged work.\n");
+    sh(other, "push", "--quiet", "origin", "main");
+    const notes: string[] = [];
+
+    const thread = await createThread(store, "app", "next", { onBaseNote: (n) => notes.push(n) });
+
+    expect(sh(thread.worktreePath, "rev-parse", "HEAD")).toBe(landed);
+    expect(sh(repo, "rev-parse", "main")).toBe(yours);
+    expect(notes).toEqual([]);
+
+    // Yours and origin's diverge: yours, and a note saying so.
+    const local = commitFile(repo, "LOCAL.md", "Local work.\n");
+    const diverged = await createThread(store, "app", "again", { onBaseNote: (n) => notes.push(n) });
+    expect(sh(diverged.worktreePath, "rev-parse", "HEAD")).toBe(local);
+    expect(notes).toEqual([expect.stringMatching(/^Started from your local main, which has diverged/)]);
+  });
+
   it("refuses an unknown project or a repo with no commits", async () => {
     await expect(createThread(store, "nope", "x")).rejects.toThrow(/No project "nope"/);
     const empty = join(tempDir("empty"), "empty");

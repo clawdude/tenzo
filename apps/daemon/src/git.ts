@@ -212,12 +212,74 @@ export function branchExists(root: string, branch: string): Promise<boolean> {
   return succeeds(root, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`]);
 }
 
-/** The commit-ish to branch from: the local default branch, else its `origin/` copy. */
-export async function resolveBase(root: string, branch: string): Promise<string> {
-  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
-    if (await succeeds(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`])) return ref;
+/** Where a thread starts: a ref to branch from, and what to tell you about it, if anything. */
+export interface Base {
+  ref: string;
+  /** Set when the choice needs saying: the local branch and origin's have diverged. */
+  note: string | null;
+}
+
+/**
+ * The commit-ish to branch from, by what is here now (no fetch): of the local default branch and
+ * its `origin/` copy, the one that contains the other, so work merged on origin since you last
+ * pulled is in it. When they have diverged, the local one, with a note saying so. When only one
+ * exists, that one.
+ */
+export async function pickBase(root: string, branch: string): Promise<Base> {
+  const local = `refs/heads/${branch}`;
+  const remote = `refs/remotes/origin/${branch}`;
+  const has = (ref: string) => succeeds(root, ["rev-parse", "--verify", "--quiet", `${ref}^{commit}`]);
+  const hasLocal = await has(local);
+  const hasRemote = await has(remote);
+  if (!hasLocal && !hasRemote) {
+    throw new TenzoError(`The default branch "${branch}" has no commits to start a thread from`);
   }
-  throw new TenzoError(`The default branch "${branch}" has no commits to start a thread from`);
+  if (!hasRemote) return { ref: local, note: null };
+  if (!hasLocal) return { ref: remote, note: null };
+  const contains = (ref: string, other: string) =>
+    succeeds(root, ["merge-base", "--is-ancestor", other, ref]);
+  if (await contains(local, remote)) return { ref: local, note: null };
+  if (await contains(remote, local)) return { ref: remote, note: null };
+  const counts = await git(root, ["rev-list", "--left-right", "--count", `${local}...${remote}`]);
+  const [mine = "?", theirs = "?"] = counts.split(/\s+/);
+  return {
+    ref: local,
+    note:
+      `Started from your local ${branch}, which has diverged from origin/${branch} ` +
+      `(${mine} ${mine === "1" ? "commit" : "commits"} only in ${branch}, ${theirs} only in origin/${branch}). ` +
+      "Tenzo never changes your branches; reconcile them if threads should start from origin's.",
+  };
+}
+
+/** `pickBase`'s ref: what a thread's changes are measured against. */
+export async function resolveBase(root: string, branch: string): Promise<string> {
+  return (await pickBase(root, branch)).ref;
+}
+
+/** How long a new thread waits for origin before starting from what is here. */
+export const BASE_FETCH_TIMEOUT_MS = 10_000;
+
+/**
+ * `pickBase` after fetching the default branch from origin, so a new thread starts from what has
+ * landed there even when your local branch is behind. Only `origin/<branch>` moves; your branches
+ * are never touched. Without an origin there is nothing to fetch. A fetch that fails, or gives no
+ * answer in `fetchTimeoutMs` (git never prompts here), is let go: the thread starts from what is
+ * here.
+ */
+export async function freshBase(
+  root: string,
+  branch: string,
+  fetchTimeoutMs: number = BASE_FETCH_TIMEOUT_MS,
+): Promise<Base> {
+  if (await succeeds(root, ["remote", "get-url", "origin"])) {
+    const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
+    await runGit(root, ["fetch", "--quiet", "--no-tags", "origin", refspec], {
+      timeoutMs: fetchTimeoutMs,
+      env: NO_PROMPT_ENV,
+      config: NO_PROMPT_CONFIG,
+    }).catch(() => {});
+  }
+  return pickBase(root, branch);
 }
 
 /** Checks out a new branch `branch` from `base` into a new worktree at `path`. */

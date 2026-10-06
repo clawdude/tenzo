@@ -12,9 +12,9 @@ import {
   addWorktree,
   branchExists,
   deleteBranch,
+  freshBase,
   hasChanges,
   removeWorktree,
-  resolveBase,
 } from "./git.ts";
 import { randomId } from "./ids.ts";
 import { findProject, type Project, toProject } from "./projects.ts";
@@ -57,8 +57,10 @@ const BRANCH_PREFIX = "tenzo/";
 
 /**
  * Starts a thread's workspace: a new worktree at `<home>/worktrees/<project>/<thread id>` on a new
- * branch `tenzo/<slug>` cut from the project's default branch. The main checkout is untouched.
- * The slug comes from `title`; if the project already has it (as a thread or a branch), `-2`, `-3`, …
+ * branch `tenzo/<slug>` cut from the project's default branch: fetched from origin first, and
+ * the newer of yours and origin's (`freshBase`). The main checkout and your branches are
+ * untouched. The slug comes from `title`; if the project already has it (as a thread or a
+ * branch), `-2`, `-3`, …
  */
 export async function createThread(
   store: Store,
@@ -76,10 +78,14 @@ export async function createThread(
     automation?: string;
     /** The thread's own thinking level from the start. */
     thinking?: ThinkingLevel;
+    /** Told what to say about where the thread started, when there is something (`Base.note`). */
+    onBaseNote?: (note: string) => void;
+    /** How long to wait for origin before starting from what is here. */
+    fetchTimeoutMs?: number;
   } = {},
 ): Promise<Thread> {
   const project = findProject(store, projectRef);
-  const base = await resolveBase(project.path, project.defaultBranch);
+  const { ref: base, note } = await freshBase(project.path, project.defaultBranch, options.fetchTimeoutMs);
   const slug = await firstFree(
     slugify(title, "thread"),
     async (candidate) =>
@@ -149,6 +155,7 @@ export async function createThread(
     await deleteBranch(project.path, thread.branch).catch(() => {});
     throw error;
   }
+  if (note) options.onBaseNote?.(note);
   return thread;
 }
 

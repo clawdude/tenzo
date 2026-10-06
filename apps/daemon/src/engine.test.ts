@@ -16,7 +16,7 @@ import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, sente
 import { STALLED_PROMPT } from "./prompts.ts";
 import { addProject, findProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
-import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
+import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 import { getThread, projectOf } from "./threads.ts";
 
 afterAll(removeTempDirs);
@@ -2481,5 +2481,34 @@ describe("Engine: a thread's own model (thread.setModel)", () => {
     expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: "x", thinking: "max" }).success).toBe(false);
     await d.engine.archive(thread.id);
     expect(() => d.engine.setModel(thread.id, { model: "opus" })).toThrow(/archived/);
+  });
+});
+
+describe("Engine: where a thread starts, and what its turns took", () => {
+  it("says so in the thread when it starts from a default branch diverged from origin's", async () => {
+    const d = daemon();
+    const repo = findProject(d.store, "app").path;
+    const origin = join(tempDir("origin"), "origin.git");
+    sh(tempDir(), "init", "--quiet", "--bare", "--initial-branch", "main", origin);
+    sh(repo, "remote", "add", "origin", origin);
+    sh(repo, "push", "--quiet", "origin", "main");
+    const same = await d.engine.createThread({ project: "app", title: "In step" });
+    expect(d.engine.events(same.id).events).toEqual([]);
+
+    const other = join(tempDir("other"), "other");
+    sh(tempDir(), "clone", "--quiet", origin, other);
+    commitFile(other, "MERGED.md", "Merged work.\n");
+    sh(other, "push", "--quiet", "origin", "main");
+    const local = commitFile(repo, "LOCAL.md", "Local work.\n");
+
+    const thread = await d.engine.createThread({ project: "app", title: "Diverged" });
+
+    expect(sh(thread.worktreePath, "rev-parse", "HEAD")).toBe(local);
+    expect(d.engine.events(thread.id).events.map((e) => e.event)).toEqual([
+      expect.objectContaining({
+        type: "thread.noted",
+        payload: { message: expect.stringMatching(/^Started from your local main, which has diverged from origin\/main/) },
+      }),
+    ]);
   });
 });

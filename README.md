@@ -113,7 +113,7 @@ pnpm tenzo project remove app                  # refuses while the project has a
 
 Project commands work on the database directly; thread commands need the daemon running (`pnpm tenzo serve`, see below).
 
-The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` makes the worktree without starting an agent; `thread start` (below) does both.
+The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A new thread starts from the newest of your local default branch and origin's: the daemon first fetches the default branch from `origin` (only `origin/<default>` moves; your branches are never touched; non-interactive, at most 10 s, and on failure it carries on with what it has), then cuts the thread from whichever of `<default>` and `origin/<default>` contains the other, so work merged on GitHub is in the next thread even if you haven't pulled. If the two have diverged it starts from your local one and says so in the thread's timeline (a `thread.noted` event). Without an `origin`, it starts from the local branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` makes the worktree without starting an agent; `thread start` (below) does both.
 
 To try it without touching your real state, use a scratch `TENZO_HOME` and a scratch repo:
 

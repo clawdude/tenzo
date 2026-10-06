@@ -157,6 +157,12 @@ describe('timelineOf', () => {
 		expect(rows[7]).toMatchObject({ summary: 'Merged.' });
 	});
 
+	it("shows the daemon's notes about the thread, quietly", () => {
+		const message = 'Started from your local main, which has diverged from origin/main';
+		const rows = timelineOf([stored(1, { type: 'thread.noted', payload: { message } })]);
+		expect(rows).toEqual([{ kind: 'note', key: 'note:1', at: expect.any(String), text: message, tone: 'quiet' }]);
+	});
+
 	it('links a thread it started, by the id start_thread answered with', () => {
 		const call = { toolKind: 'mcp', toolName: 'mcp__tenzo__start_thread' };
 		const rows = timelineOf([

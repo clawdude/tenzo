@@ -170,6 +170,7 @@ function describe(event: RuntimeEvent): string {
     case "budget.exceeded":
       return event.payload.message;
     case "runtime.error":
+    case "thread.noted":
       return event.payload.message;
     case "config.checked":
       return event.payload.problem ?? "fine again";

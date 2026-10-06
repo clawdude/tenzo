@@ -392,6 +392,16 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     type: z.literal("thread.archived"),
     payload: z.object({}),
   }),
+  /**
+   * Recorded by the daemon: something about the thread worth knowing that needs no answer, shown
+   * in its timeline. E.g. it started from your local default branch, which has diverged from
+   * origin's.
+   */
+  z.object({
+    ...base,
+    type: z.literal("thread.noted"),
+    payload: z.object({ message: z.string() }),
+  }),
   z.object({
     ...base,
     type: z.literal("runtime.error"),

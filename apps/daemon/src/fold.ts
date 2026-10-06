@@ -527,6 +527,7 @@ export function foldEvent(
     }
     case "session.configured":
     case "item.started":
+    case "thread.noted":
     // The engine archives the thread once the turn that landed it ends; the log says so then.
     case "thread.landed":
       return same(state);

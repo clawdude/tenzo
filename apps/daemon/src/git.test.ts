@@ -4,7 +4,7 @@ import { createServer, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { join } from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { landedOn, runGit, stopDetachedGit } from "./git.ts";
+import { freshBase, landedOn, runGit, stopDetachedGit } from "./git.ts";
 import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 
 afterAll(removeTempDirs);
@@ -150,6 +150,90 @@ describe("landedOn's fetch, with nobody watching", () => {
       stopDetachedGit();
       await expect(checking).rejects.toThrow(/git fetch was stopped: Tenzo is stopping/);
       expect(Date.now() - started).toBeLessThan(2000);
+    } finally {
+      remote.close();
+    }
+  });
+});
+
+/**
+ * A bare origin with `main`; `mine`, your clone of it (where threads are cut); and `other`, a
+ * second clone that lands work on origin, as a merged PR does.
+ */
+function setUpClones() {
+  const origin = join(tempDir("origin"), "origin.git");
+  execFileSync("git", ["init", "--quiet", "--bare", "--initial-branch", "main", origin]);
+  sh(initRepo("seed"), "push", "--quiet", origin, "main");
+  const mine = join(tempDir("mine"), "mine");
+  sh(tempDir(), "clone", "--quiet", origin, mine);
+  const other = join(tempDir("other"), "other");
+  sh(tempDir(), "clone", "--quiet", origin, other);
+  return { mine, other };
+}
+
+describe("freshBase", () => {
+  it("starts from origin's default branch when yours is behind it, and leaves yours alone", async () => {
+    const { mine, other } = setUpClones();
+    const yours = sh(mine, "rev-parse", "main");
+    const landed = commitFile(other, "MERGED.md", "Merged work.\n");
+    sh(other, "push", "--quiet", "origin", "main");
+
+    const base = await freshBase(mine, "main");
+
+    expect(base).toEqual({ ref: "refs/remotes/origin/main", note: null });
+    expect(sh(mine, "rev-parse", base.ref)).toBe(landed);
+    expect(sh(mine, "rev-parse", "main")).toBe(yours);
+    expect(sh(mine, "status", "--porcelain")).toBe("");
+  });
+
+  it("starts from yours when it is ahead of origin's", async () => {
+    const { mine } = setUpClones();
+    commitFile(mine, "LOCAL.md", "Not pushed yet.\n");
+    expect(await freshBase(mine, "main")).toEqual({ ref: "refs/heads/main", note: null });
+  });
+
+  it("starts from yours when they have diverged, and says so", async () => {
+    const { mine, other } = setUpClones();
+    const yours = commitFile(mine, "LOCAL.md", "Not pushed yet.\n");
+    commitFile(other, "A.md", "a\n");
+    commitFile(other, "B.md", "b\n");
+    sh(other, "push", "--quiet", "origin", "main");
+
+    const base = await freshBase(mine, "main");
+
+    expect(base.ref).toBe("refs/heads/main");
+    expect(base.note).toMatch(
+      /^Started from your local main, which has diverged from origin\/main \(1 commit only in main, 2 only in origin\/main\)\./,
+    );
+    expect(sh(mine, "rev-parse", "main")).toBe(yours);
+  });
+
+  it("starts from yours without an origin, fetching nothing", async () => {
+    const repo = initRepo("alone");
+    expect(await freshBase(repo, "main")).toEqual({ ref: "refs/heads/main", note: null });
+  });
+
+  it("starts from origin's when there is no local branch", async () => {
+    const { mine } = setUpClones();
+    sh(mine, "switch", "--quiet", "--detach");
+    sh(mine, "branch", "--quiet", "-D", "main");
+    expect(await freshBase(mine, "main")).toEqual({ ref: "refs/remotes/origin/main", note: null });
+  });
+
+  it("starts from what is here when origin can't be reached", async () => {
+    const { mine } = setUpClones();
+    sh(mine, "remote", "set-url", "origin", join(tempDir("gone"), "nowhere.git"));
+    expect(await freshBase(mine, "main")).toEqual({ ref: "refs/heads/main", note: null });
+  });
+
+  it("gives up quickly on an origin that never answers", async () => {
+    const remote = await fakeRemote();
+    try {
+      const repo = initRepo("stalled");
+      sh(repo, "remote", "add", "origin", remote.url);
+      const started = Date.now();
+      expect(await freshBase(repo, "main", 500)).toEqual({ ref: "refs/heads/main", note: null });
+      expect(Date.now() - started).toBeLessThan(3000);
     } finally {
       remote.close();
     }
