@@ -1,6 +1,6 @@
 # Tenzo
 
-An attention queue for coding agents. Read `docs/PRODUCT.md` first: it holds the decisions, the opinions Tenzo enforces, and the MVP scope. Treat it as settled unless the user reopens something.
+An attention queue for coding agents. Read `docs/PRODUCT.md` first: it holds the decisions, the opinions Tenzo enforces, and the MVP scope. Treat it as settled unless the user reopens something. Then read `docs/ARCHITECTURE.md`: how the code works, file by file, as of `main`.
 
 ## Reference implementation
 
@@ -16,9 +16,12 @@ T3 Code is the architectural reference. A clone lives at `../reference/t3code` (
 ## How to continue
 
 1. `docs/ROADMAP.md` is the plan; GitHub issues are the tasks. Take the lowest-numbered open issue whose blockers are closed. Read its latest comment first: it holds the handoff state.
-2. A slice is done when its acceptance criteria are demonstrably met, `pnpm check` is green, `docs/ROADMAP.md` has its box ticked, and the commit message says `Closes #N`.
-3. Commit and push after every slice. Don't ask for permission to build, test, commit or push; the repo's `.claude/settings.json` allows it. Ask only before anything destructive.
-4. Work from the repo docs, not from memory of earlier sessions; a new session may run in a different worktree.
+2. One branch and one PR per slice; nothing is pushed to `main` directly. A builder opens the PR, a separate reviewer reviews it, and it lands by squash merge.
+3. A slice is done when its acceptance criteria are demonstrably met, `pnpm check` is green, `docs/ROADMAP.md` has its box ticked, `docs/ARCHITECTURE.md` matches the change, and the PR says `Closes #N`.
+4. **`docs/ARCHITECTURE.md` always describes `main`.** Any change to behaviour, structure, schema, protocol, config, env vars, CLI, security model or workflow updates it in the same PR. Reviewers check it; a PR that skips it is not done.
+5. Never force-push. To catch up with `main`, merge `origin/main` into the branch.
+6. Don't ask for permission to build, test, commit, push or open PRs; the repo's `.claude/settings.json` allows it. Ask only before anything destructive.
+7. Work from the repo docs, not from memory of earlier sessions; a new session may run in a different worktree.
 
 ## Stack (see PRODUCT.md §10)
 

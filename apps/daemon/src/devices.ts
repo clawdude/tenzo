@@ -300,7 +300,7 @@ export class Devices {
   }
 
   /**
-   * The live origin's cookie for a device: a pass that lasts 30 days, never longer than the
+   * The live origin's cookie for a device: a pass that lasts one day, never longer than the
    * device's own cookie. `expiresAt` is for the cookie's Max-Age.
    */
   livePass(deviceId: string): { pass: string; expiresAt: number } {

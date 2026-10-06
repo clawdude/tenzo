@@ -93,17 +93,21 @@ start, send and answer then show the thread's events until it needs you or goes 
 (--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
 options: tenzo thread new app -- --weird title
 
-Environment:
-  TENZO_PORT           port to listen on, and where the CLI finds the daemon
+Environment (details: docs/ARCHITECTURE.md §16):
+  TENZO_PORT           port to listen on, and where the CLI finds the daemon (default 4780)
+  TENZO_LIVE_PORT      port of the live listener for threads' live apps (default TENZO_PORT + 1)
+  TENZO_LIVE_ORIGIN    the live listener's public origins, comma-separated
   TENZO_HOME           state directory (default ~/.tenzo)
   TENZO_WEB_DIR        built web app to serve (default apps/web/build)
   TENZO_ALLOWED_HOSTS  host names besides localhost that may reach the daemon, comma-separated
                        (e.g. its Tailscale Serve name)
+  TENZO_PUBLIC_URL     where devices elsewhere reach Tenzo, port included, for tenzo pair's link
+  TENZO_DEV_ORIGIN     dev-server origins whose pages may use the API (pnpm dev sets Vite's)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
   TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
-  TENZO_PUBLIC_URL     where devices elsewhere reach Tenzo, port included, for tenzo pair's
-                       link (e.g. https://my-mac.tailnet.ts.net:8443); set it for the daemon
-  TENZO_SNOOZE_MS      how long a swipe snoozes an item, for trying it out (default 15 minutes)
+  TENZO_SNOOZE_MS      how long a swipe snoozes an item, in ms (default 15 minutes)
+  TENZO_PUSH_PREVIEW   what a notification says: short (default) or none
+  TENZO_PUSH_CONTACT   the mailto: or https: contact push services see
 `;
 
 const config = () => readConfig(process.env);
