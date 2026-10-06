@@ -74,7 +74,7 @@ import {
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { branchExists, commitsAhead, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
+import { branchExists, commitsAhead, forkPoint, hasChanges, landedOn, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
   automationsOf,
@@ -691,10 +691,12 @@ export class Engine {
   async diff(threadId: string): Promise<ThreadDiff> {
     const thread = getThread(this.store, threadId);
     const project = projectOf(this.store, thread);
-    const base = await resolveBase(project.path, project.defaultBranch);
     const options = { baseName: project.defaultBranch };
+    // From its nearest fork point off yours or origin's default branch: never counting work
+    // that was merged upstream as the thread's own.
     // An archived thread's worktree is gone; its branch is kept, so compare that.
     if (thread.status === "active" && existsSync(thread.worktreePath)) {
+      const base = await forkPoint(thread.worktreePath, project.defaultBranch);
       return diffStat(thread.worktreePath, base, options);
     }
     if (!(await branchExists(project.path, thread.branch))) {
@@ -702,7 +704,9 @@ export class Engine {
         `${thread.branch} is gone (deleted since the thread was archived), so there is no change to show.`,
       );
     }
-    return diffStat(project.path, base, { ...options, head: `refs/heads/${thread.branch}` });
+    const head = `refs/heads/${thread.branch}`;
+    const base = await forkPoint(project.path, project.defaultBranch, head);
+    return diffStat(project.path, base, { ...options, head });
   }
 
   snapshot(): Snapshot {
@@ -1307,8 +1311,9 @@ export class Engine {
     if (openItems(this.store, threadId).length > 0) return false;
     if (!existsSync(thread.worktreePath) || (await hasChanges(thread.worktreePath))) return false;
     const project = projectOf(this.store, thread);
-    const base = await resolveBase(project.path, project.defaultBranch);
-    if ((await commitsAhead(project.path, base, `refs/heads/${thread.branch}`)) > 0) return false;
+    const head = `refs/heads/${thread.branch}`;
+    const base = await forkPoint(project.path, project.defaultBranch, head);
+    if ((await commitsAhead(project.path, base, head)) > 0) return false;
     try {
       await this.archive(threadId, {
         unless: () => this.#unfinished(threadId) ?? (openItems(this.store, threadId).length > 0 ? "It has an open item." : null),

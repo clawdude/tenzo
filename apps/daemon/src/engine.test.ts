@@ -2500,7 +2500,13 @@ describe("Engine: where a thread starts, and what its turns took", () => {
     sh(tempDir(), "clone", "--quiet", origin, other);
     commitFile(other, "MERGED.md", "Merged work.\n");
     sh(other, "push", "--quiet", "origin", "main");
+    // Cut from origin's (yours is behind); its own work only, before and after yours moves on.
+    const behind = await d.engine.createThread({ project: "app", title: "Behind" });
+    commitFile(behind.worktreePath, "THREAD.md", "The thread's work.\n");
+    const paths = async () => (await d.engine.diff(behind.id)).files.map((f) => f.path);
+    expect(await paths()).toEqual(["THREAD.md"]);
     const local = commitFile(repo, "LOCAL.md", "Local work.\n");
+    expect(await paths()).toEqual(["THREAD.md"]);
 
     const thread = await d.engine.createThread({ project: "app", title: "Diverged" });
 
@@ -2544,5 +2550,32 @@ describe("Engine: where a thread starts, and what its turns took", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("counts a new session's spend from zero: the agent's running total starts again", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "One" });
+    await settle();
+    const first = d.adapter.last;
+    first.complete("completed", { costUsd: 0.3 });
+    await settle();
+    first.crash("API error");
+    await settle();
+    d.engine.send(thread.id, "Two");
+    await settle();
+    const second = d.adapter.last;
+    expect(second).not.toBe(first);
+    // More than the last session's total, yet all of it this session's: not 0.4 - 0.3.
+    second.complete("completed", { costUsd: 0.4 });
+    await settle();
+
+    const costs = d.engine
+      .events(thread.id)
+      .events.flatMap((e) => (e.event.type === "turn.completed" ? [e.event.payload] : []))
+      .map(({ costUsd, turnCostUsd }) => ({ costUsd, turnCostUsd }));
+    expect(costs).toEqual([
+      { costUsd: 0.3, turnCostUsd: 0.3 },
+      { costUsd: 0.4, turnCostUsd: 0.4 },
+    ]);
   });
 });

@@ -113,7 +113,7 @@ pnpm tenzo project remove app                  # refuses while the project has a
 
 Project commands work on the database directly; thread commands need the daemon running (`pnpm tenzo serve`, see below).
 
-The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A new thread starts from the newest of your local default branch and origin's: the daemon first fetches the default branch from `origin` (only `origin/<default>` moves; your branches are never touched; non-interactive, at most 10 s, and on failure it carries on with what it has), then cuts the thread from whichever of `<default>` and `origin/<default>` contains the other, so work merged on GitHub is in the next thread even if you haven't pulled. If the two have diverged it starts from your local one and says so in the thread's timeline (a `thread.noted` event). Without an `origin`, it starts from the local branch. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` makes the worktree without starting an agent; `thread start` (below) does both.
+The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A new thread starts from the newest of your local default branch and origin's: the daemon first fetches the default branch from `origin` (only `origin/<default>` moves; your branches are never touched; non-interactive, at most 10 s, and on failure it carries on with what it has), then cuts the thread from whichever of `<default>` and `origin/<default>` contains the other, so work merged on GitHub is in the next thread even if you haven't pulled. If the two have diverged it starts from your local one and says so in the thread's timeline (a `thread.noted` event). Without an `origin`, it starts from the local branch. A thread's diff counts only its own work: it is measured from where the thread left either branch, the nearer of the two. A slug the project already used, or one whose `tenzo/<slug>` branch already exists, gets `-2`, `-3`, … `thread new` makes the worktree without starting an agent; `thread start` (below) does both.
 
 To try it without touching your real state, use a scratch `TENZO_HOME` and a scratch repo:
 
@@ -144,7 +144,7 @@ pnpm tenzo answer <item-id> 2                                # an option's numbe
 pnpm tenzo thread log <thread-id> [--follow]                 # the thread's events
 ```
 
-`start`, `send` and `answer` print the thread's events until it needs you (then they show the item and how to answer it) or goes idle; `--detach` returns at once, `--json` prints events as JSON lines. A `turn.completed` line shows what that turn cost and the session's running total (`$0.0300 this turn ($0.2000 session total)`; Claude's estimates, and the total starts again with each new session), then how long the turn was working and how long it waited on you for a question, a permission or a proposal (`12.3s working, 30.1s waiting on you`); events recorded before the daemon measured that show `session total` and `wall clock` only. `thread list --all` shows an archived thread as `archived`, or `archived · landed` when its work landed (`ThreadView.landed`). A thread's agent stays up between turns (background tasks keep reporting) until the thread is archived or the daemon stops, or a settings change needs a new session while nothing runs in the background (see Project config); the next prompt after that resumes Claude's stored session.
+`start`, `send` and `answer` print the thread's events until it needs you (then they show the item and how to answer it) or goes idle; `--detach` returns at once, `--json` prints events as JSON lines. A `turn.completed` line shows what that turn cost and the session's running total (`$0.0300 this turn ($0.2000 session total)`; Claude's estimates, and the total starts again with each new session), then how long the turn was working and how long it waited on you for a question, a permission or a proposal (`12.3s working, 30.1s waiting on you`); events recorded before the daemon measured that show `session total` and `wall clock` only. `thread list --all` shows an archived thread as `archived`, or `archived · landed` when it was archived because its work landed (`ThreadView.landed`: `landed` held in its latest turn). A thread's agent stays up between turns (background tasks keep reporting) until the thread is archived or the daemon stops, or a settings change needs a new session while nothing runs in the background (see Project config); the next prompt after that resumes Claude's stored session.
 
 `pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, run through a scratch daemon, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
 
@@ -289,16 +289,13 @@ The finished card answers with **Merge** (the filled button), **Open PR** or **D
       "Bash(gh pr view:*)",
       "Bash(gh pr list:*)",
       "Bash(gh run view:*)",
-      "Bash(gh run list:*)",
-      "Bash(git fetch:*)",
-      "Bash(git status:*)",
-      "Bash(git log:*)"
+      "Bash(gh run list:*)"
     ]
   }
 }
 ```
 
-These only read. Leave `git push`, `gh pr create` and `gh pr merge` off the list if you want to approve those steps: they then still reach you as cards (a quick tap on the phone), and nothing merges without you choosing **Merge** first anyway.
+These only read. Don't add `git` entries to make landing smoother: prefix rules like `Bash(git fetch:*)` or `Bash(git log:*)` also match forms that run programs (`--upload-pack=`), overwrite branches (`+src:refs/heads/…`) or write files (`--output=`), and Tenzo's own `landed` check does the fetch it needs. Leave `git push`, `gh pr create` and `gh pr merge` off the list too: they then still reach you as cards (a quick tap on the phone), and nothing merges without you choosing **Merge** first anyway.
 
 `start_thread(prompt, project?, title?)` lets an agent start another thread through the ordinary create (worktree, branch, discuss first). It records origin `agent` and the parent thread (`ThreadView.origin`, `parentId`). No fan-out: a thread an agent started can't start threads, a thread starts at most 10 in its life (counted in the database, not per session), and at most 10 agent-started threads are active at once.
 

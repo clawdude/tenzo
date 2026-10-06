@@ -251,9 +251,32 @@ export async function pickBase(root: string, branch: string): Promise<Base> {
   };
 }
 
-/** `pickBase`'s ref: what a thread's changes are measured against. */
+/** `pickBase`'s ref: what a new worktree would be cut from now. */
 export async function resolveBase(root: string, branch: string): Promise<string> {
   return (await pickBase(root, branch)).ref;
+}
+
+/**
+ * Where `head` left the default branch: its nearest fork point from either `<branch>` or
+ * `origin/<branch>` (those that exist). Of the two merge bases, the one that descends from the
+ * other; when neither does, the one fewer commits behind `head`. What a thread's own changes
+ * are measured from, wherever it was cut from and however the two have moved since. Falls back
+ * to `pickBase`'s ref when `head` shares no history with either.
+ */
+export async function forkPoint(cwd: string, branch: string, head = "HEAD"): Promise<string> {
+  const points: string[] = [];
+  for (const ref of [`refs/heads/${branch}`, `refs/remotes/origin/${branch}`]) {
+    const found = await runGit(cwd, ["merge-base", ref, head]);
+    const commit = found.stdout.trim();
+    if (found.code === 0 && commit !== "" && !points.includes(commit)) points.push(commit);
+  }
+  const [first, second] = points;
+  if (first === undefined) return resolveBase(cwd, branch);
+  if (second === undefined) return first;
+  if (await succeeds(cwd, ["merge-base", "--is-ancestor", first, second])) return second;
+  if (await succeeds(cwd, ["merge-base", "--is-ancestor", second, first])) return first;
+  const behind = async (commit: string) => Number(await git(cwd, ["rev-list", "--count", `${commit}..${head}`]));
+  return (await behind(second)) < (await behind(first)) ? second : first;
 }
 
 /** How long a new thread waits for origin before starting from what is here. */
@@ -272,14 +295,29 @@ export async function freshBase(
   fetchTimeoutMs: number = BASE_FETCH_TIMEOUT_MS,
 ): Promise<Base> {
   if (await succeeds(root, ["remote", "get-url", "origin"])) {
-    const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`;
-    await runGit(root, ["fetch", "--quiet", "--no-tags", "origin", refspec], {
+    await runGit(root, fetchDefault(branch), {
       timeoutMs: fetchTimeoutMs,
       env: NO_PROMPT_ENV,
       config: NO_PROMPT_CONFIG,
     }).catch(() => {});
   }
   return pickBase(root, branch);
+}
+
+/**
+ * `git fetch` of the default branch into `origin/<branch>` and nothing else: no tags, no
+ * submodules (they would eat the time limit), and your `FETCH_HEAD` left as it was.
+ */
+function fetchDefault(branch: string): string[] {
+  return [
+    "fetch",
+    "--quiet",
+    "--no-tags",
+    "--no-recurse-submodules",
+    "--no-write-fetch-head",
+    "origin",
+    `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+  ];
 }
 
 /** Checks out a new branch `branch` from `base` into a new worktree at `path`. */
@@ -315,7 +353,7 @@ export async function landedOn(
   const remote = `refs/remotes/origin/${branch}`;
   let fetched: GitResult;
   try {
-    fetched = await runGit(path, ["fetch", "--quiet", "origin", `+refs/heads/${branch}:${remote}`], {
+    fetched = await runGit(path, fetchDefault(branch), {
       timeoutMs: fetchTimeoutMs,
       env: NO_PROMPT_ENV,
       config: NO_PROMPT_CONFIG,
