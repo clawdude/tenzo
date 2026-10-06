@@ -93,7 +93,7 @@ start, send and answer then show the thread's events until it needs you or goes 
 (--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
 options: tenzo thread new app -- --weird title
 
-Environment (details: docs/ARCHITECTURE.md §16):
+Environment (details: README.md):
   TENZO_PORT           port to listen on, and where the CLI finds the daemon (default 4780)
   TENZO_LIVE_PORT      port of the live listener for threads' live apps (default TENZO_PORT + 1)
   TENZO_LIVE_ORIGIN    the live listener's public origins, comma-separated
