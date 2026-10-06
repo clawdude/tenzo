@@ -230,6 +230,54 @@ describe("startDaemon", () => {
     expect(secondAdapter.last.prompts[0]).toContain("My answer: Blue");
   });
 
+  it("takes no new socket on either listener once shutdown has begun", async () => {
+    const setup = openStore(home);
+    await addProject(setup, initRepo("app"));
+    setup.close();
+    // A session that takes its time to stop holds shutdown open, listeners still up.
+    let stopBegun = () => {};
+    const stopping = new Promise<void>((resolve) => {
+      stopBegun = resolve;
+    });
+    let releaseStop = () => {};
+    const released = new Promise<void>((resolve) => {
+      releaseStop = resolve;
+    });
+    const adapter = new FakeAdapter();
+    adapter.onStart = (session) => {
+      const stop = session.stop.bind(session);
+      session.stop = async () => {
+        stopBegun();
+        await released;
+        return stop();
+      };
+    };
+    const daemon = await startDaemon(config(home), { adapters: { claude: adapter } });
+    running.push(daemon);
+    await daemon.engine.createThread({ project: "app", prompt: "Work" });
+    await expect.poll(() => adapter.sessions.length).toBe(1);
+
+    const closing = daemon.close();
+    await stopping;
+    /** Opens a socket; resolves with how it ended: "open", an HTTP status, or "cut". */
+    const attempt = (url: string) =>
+      new Promise<string>((resolve) => {
+        const ws = new WebSocket(url);
+        ws.once("open", () => {
+          ws.terminate();
+          resolve("open");
+        });
+        ws.once("unexpected-response", (_req, res) => resolve(String(res.statusCode)));
+        ws.once("error", () => resolve("cut"));
+      });
+    expect(await attempt(`ws://127.0.0.1:${daemon.port}/ws`)).toBe("503");
+    expect(await attempt(`ws://127.0.0.1:${daemon.livePort}/live/thr_nopenopenopenopenope/`)).toBe(
+      "cut",
+    );
+    releaseStop();
+    await closing;
+  });
+
   it("drops open sockets on close so clients notice", async () => {
     const daemon = await start();
     const { ws } = await frames(`ws://127.0.0.1:${daemon.port}/ws`, 1);

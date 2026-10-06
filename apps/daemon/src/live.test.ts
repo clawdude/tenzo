@@ -23,6 +23,8 @@ afterAll(removeTempDirs);
 const TS = "my-mac.tail0000.ts.net";
 /** The live listener behind a second Tailscale Serve route. */
 const LIVE_TS = `https://${TS}:8444`;
+/** How long the daemon gives requests in flight when it stops: short, so shutdown tests are. */
+const SHUTDOWN_GRACE_MS = 100;
 let home: string;
 let daemon: RunningDaemon;
 let upstream: Awaited<ReturnType<typeof devServer>>;
@@ -109,7 +111,7 @@ beforeEach(async () => {
       devOrigins: [],
       liveOrigins: [LIVE_TS],
     },
-    { adapters: { claude: adapter } },
+    { adapters: { claude: adapter }, shutdownGraceMs: SHUTDOWN_GRACE_MS },
   );
   thread = await daemon.engine.createThread({ project: "app", prompt: "expose" });
   other = await daemon.engine.createThread({ project: "app", prompt: "nothing" });
@@ -334,7 +336,8 @@ describe("live: shutdown", () => {
     ]);
     const started = Date.now();
     await daemon.close();
-    expect(Date.now() - started).toBeLessThan(2000);
+    // The grace for the hanging request, plus room for a slow machine: never a hang.
+    expect(Date.now() - started).toBeLessThan(SHUTDOWN_GRACE_MS + 1500);
     await allClosed;
     agent.destroy();
   });

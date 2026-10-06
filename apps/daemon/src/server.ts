@@ -52,6 +52,8 @@ export interface DaemonDeps {
   pushSend?: PushSend;
   /** How long a burst of cards on one thread waits to make one push (push.ts). Tests shorten it. */
   pushDebounceMs?: number;
+  /** How long requests in flight get to finish when the daemon stops (`SHUTDOWN_GRACE_MS`). */
+  shutdownGraceMs?: number;
 }
 
 /** Starts listening, with a plain message when the port is taken. */
@@ -237,6 +239,9 @@ export async function startDaemon(
     close: () => {
       closing ??= (async () => {
         stopping = true;
+        // No new sockets from here on: ws refuses a `/ws` handshake once closing (503, no 101),
+        // as the live listener's upgrade handler does (`stopping`).
+        wss.close();
         stopHeartbeat();
         push.close();
         await engine.close();
@@ -245,8 +250,8 @@ export async function startDaemon(
         for (const client of wss.clients) client.terminate();
         for (const end of tunnels) end.destroy();
         await Promise.all([
-          stopServer(server, connections),
-          stopServer(liveServer, liveConnections),
+          stopServer(server, connections, deps.shutdownGraceMs),
+          stopServer(liveServer, liveConnections, deps.shutdownGraceMs),
         ]);
         store.close();
         unlock();
