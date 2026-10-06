@@ -10,7 +10,7 @@ Self-hosted, open source, no cloud of ours. Your agents, your logins, your netwo
 
 See [docs/PRODUCT.md](docs/PRODUCT.md) for what it is, the decisions behind it, and the MVP scope. Mock-ups are in [docs/mockups](docs/mockups).
 
-Status: pre-MVP. Nothing useful runs yet.
+Status: milestones M1–M4 are built (Claude Code threads, the whole card set, project config and automations, remote access with pairing and Web Push); M5, the Codex adapter, is deferred. See [docs/ROADMAP.md](docs/ROADMAP.md), and [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for how it works inside.
 
 ## Develop
 
@@ -124,7 +124,7 @@ pnpm tenzo thread log <thread-id> [--follow]                 # the thread's even
 
 `pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, run through a scratch daemon, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
 
-`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: it loads `/`, `/new` and `/threads` directly, walks New → Close → New → Close → Threads → ×, and fails on any page error, a second WebSocket or page load, or a lost draft; then it reloads on New and checks that Close goes back to the Pass behind it rather than stacking another. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
+`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: each screen loaded directly, navigation and Close, a thread's timeline, the Pass's motion (with and without reduced motion), Automations, framing protection, and pairing from elsewhere; any page error, a second WebSocket or page load fails it. The full list of checks is in [docs/ARCHITECTURE.md §15](docs/ARCHITECTURE.md#15-testing-and-verification). It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
 
 ### Project config: `.tenzo/config.json`
 
