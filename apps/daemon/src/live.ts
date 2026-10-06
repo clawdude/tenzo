@@ -289,6 +289,8 @@ export function liveHandler(portOf: LivePort) {
         method: c.req.method,
         headers,
         redirect: "manual",
+        // The browser gone (or the daemon stopping): the dev server's request is dropped too.
+        signal: c.req.raw.signal,
         ...(hasBody ? { body: c.req.raw.body, duplex: "half" } : {}),
       } as RequestInit);
     } catch {
@@ -395,6 +397,13 @@ export function isLivePath(url: string | undefined): boolean {
 }
 
 /**
+ * Both ends of every open live WebSocket tunnel (`liveUpgrade`), so the daemon can cut them when
+ * it stops: Node's `closeAllConnections` doesn't reach upgraded sockets, and the listener can't
+ * finish closing while one is open.
+ */
+export type LiveTunnels = Set<Duplex>;
+
+/**
  * A WebSocket upgrade under `/live/<thread>/`: checked like any request (Host, Origin), then
  * piped to the thread's port as raw bytes, the handshake included. Anything else is refused.
  */
@@ -402,8 +411,18 @@ export function liveUpgrade(
   request: IncomingMessage,
   socket: Duplex,
   head: Buffer,
-  options: { policy: AccessPolicy; portOf: LivePort; devices?: Devices | undefined },
+  options: {
+    policy: AccessPolicy;
+    portOf: LivePort;
+    devices?: Devices | undefined;
+    tunnels?: LiveTunnels | undefined;
+  },
 ): void {
+  const hold = (end: Duplex) => {
+    options.tunnels?.add(end);
+    end.once("close", () => options.tunnels?.delete(end));
+  };
+  hold(socket);
   const refuse = (status: number, reason: string) => {
     socket.end(
       `HTTP/1.1 ${status} ${reason}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`,
@@ -424,6 +443,7 @@ export function liveUpgrade(
   if (port === null) return refuse(404, "Not Found");
 
   const upstream = connect({ host: "localhost", port, autoSelectFamily: true });
+  hold(upstream);
   const lines = [`${request.method ?? "GET"} ${request.url} HTTP/1.1`];
   const raw = request.rawHeaders;
   for (let i = 0; i + 1 < raw.length; i += 2) {

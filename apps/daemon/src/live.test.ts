@@ -1,12 +1,12 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import {
+  Agent,
   createServer,
   type IncomingMessage,
   request,
-  type Server,
   type ServerResponse,
 } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { join } from "node:path";
 import { attachmentUrl, liveBase, type ThreadView } from "@tenzo/contracts";
 import { afterAll, afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -23,17 +23,22 @@ afterAll(removeTempDirs);
 const TS = "my-mac.tail0000.ts.net";
 /** The live listener behind a second Tailscale Serve route. */
 const LIVE_TS = `https://${TS}:8444`;
+/** How long the daemon gives requests in flight when it stops: short, so shutdown tests are. */
+const SHUTDOWN_GRACE_MS = 100;
 let home: string;
 let daemon: RunningDaemon;
-let upstream: { port: number; server: Server; seen: IncomingMessage[]; close: () => Promise<void> };
+let upstream: Awaited<ReturnType<typeof devServer>>;
 let thread: ThreadView;
 let other: ThreadView;
 
 /** The dev server a thread exposed: echoes what it got as JSON, and WebSocket messages back. */
 async function devServer(host = "127.0.0.1") {
   const seen: IncomingMessage[] = [];
+  /** The dev server's end of each WebSocket it accepted. */
+  const sockets: WebSocket[] = [];
   const server = createServer((req: IncomingMessage, res: ServerResponse) => {
     seen.push(req);
+    if (req.url?.endsWith("/hang")) return; // never answers: a request in flight
     if (req.url?.endsWith("/away")) {
       res.writeHead(302, { location: `http://localhost:${port}${liveBase(thread.id)}here` });
       res.end();
@@ -61,6 +66,7 @@ async function devServer(host = "127.0.0.1") {
   });
   const wss = new WebSocketServer({ server });
   wss.on("connection", (ws, req) => {
+    sockets.push(ws);
     ws.send(`hello ${req.url} from ${req.headers.host} for ${req.headers.origin ?? "none"}`);
     ws.on("message", (data) => ws.send(`echo ${String(data)}`));
   });
@@ -70,6 +76,7 @@ async function devServer(host = "127.0.0.1") {
     port,
     server,
     seen,
+    sockets,
     close: () =>
       new Promise<void>((resolve) => {
         for (const client of wss.clients) client.terminate();
@@ -104,7 +111,7 @@ beforeEach(async () => {
       devOrigins: [],
       liveOrigins: [LIVE_TS],
     },
-    { adapters: { claude: adapter } },
+    { adapters: { claude: adapter }, shutdownGraceMs: SHUTDOWN_GRACE_MS },
   );
   thread = await daemon.engine.createThread({ project: "app", prompt: "expose" });
   other = await daemon.engine.createThread({ project: "app", prompt: "nothing" });
@@ -271,6 +278,68 @@ describe("live: WebSocket", () => {
   it("answers 502 when the dev server has stopped", async () => {
     await upstream.close();
     expect((await open(liveBase(thread.id))).status).toBe(502);
+  });
+});
+
+describe("live: shutdown", () => {
+  /** Resolves once `emitter` has closed; listen before it can happen. */
+  const closed = (emitter: { once(event: "close", listener: () => void): unknown }) =>
+    new Promise<void>((resolve) => emitter.once("close", () => resolve()));
+
+  /** A request on `agent`; resolves with its connection once the response is read. */
+  function keptAlive(port: number, path: string, agent: Agent): Promise<Socket> {
+    return new Promise((resolve, reject) => {
+      const req = request({ host: "127.0.0.1", port, path, agent }, (res) => {
+        res.resume();
+        res.on("end", () => resolve(req.socket as Socket));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  }
+
+  it("cuts live tunnels (both ends), sockets and kept-alive connections, and stops promptly", async () => {
+    // A live app's HMR socket, piped through the live listener to the dev server.
+    const hmr = new WebSocket(`ws://127.0.0.1:${daemon.livePort}${liveBase(thread.id)}`);
+    await new Promise((resolve, reject) => {
+      hmr.once("message", resolve);
+      hmr.once("error", reject);
+    });
+    const devEnd = upstream.sockets[0];
+    if (!devEnd) throw new Error("the dev server got no socket");
+    // The Pass's socket on the daemon's own listener.
+    const pass = new WebSocket(main("/ws").replace("http:", "ws:"));
+    await new Promise((resolve) => pass.once("message", resolve));
+    // Idle kept-alive connections on both listeners.
+    const agent = new Agent({ keepAlive: true });
+    const idleLive = await keptAlive(daemon.livePort, `${liveBase(thread.id)}x`, agent);
+    const idleMain = await keptAlive(daemon.port, "/health", agent);
+    // A proxied request the dev server never answers.
+    const hanging = request({
+      host: "127.0.0.1",
+      port: daemon.livePort,
+      path: `${liveBase(thread.id)}hang`,
+    });
+    hanging.on("error", () => {});
+    hanging.end();
+    await expect.poll(() => upstream.seen.some((r) => r.url?.endsWith("/hang"))).toBe(true);
+    const hangingUpstream = upstream.seen.find((r) => r.url?.endsWith("/hang"));
+
+    const allClosed = Promise.all([
+      closed(hmr),
+      closed(devEnd),
+      closed(pass),
+      closed(idleLive),
+      closed(idleMain),
+      closed(hanging),
+      closed(hangingUpstream?.socket as Socket),
+    ]);
+    const started = Date.now();
+    await daemon.close();
+    // The grace for the hanging request, plus room for a slow machine: never a hang.
+    expect(Date.now() - started).toBeLessThan(SHUTDOWN_GRACE_MS + 1500);
+    await allClosed;
+    agent.destroy();
   });
 });
 

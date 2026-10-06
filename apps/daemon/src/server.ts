@@ -1,5 +1,5 @@
 import type { IncomingMessage } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import type { Duplex } from "node:stream";
 import { serve, type WebSocketServerLike } from "@hono/node-server";
 import type { EnvironmentId } from "@tenzo/contracts";
@@ -12,7 +12,7 @@ import { Devices } from "./devices.ts";
 import { Engine } from "./engine.ts";
 import { TenzoError } from "./errors.ts";
 import { lockHome } from "./home.ts";
-import { createLiveApp, liveUpgrade } from "./live.ts";
+import { createLiveApp, type LiveTunnels, liveUpgrade } from "./live.ts";
 import { loadVapidKeys, Push, type PushSend } from "./push.ts";
 import { heartbeat, MAX_FRAME_BYTES } from "./socket.ts";
 import { openStore, type Store } from "./store.ts";
@@ -29,7 +29,10 @@ export interface RunningDaemon {
   devices: Devices;
   /** Notifications to paired devices (push.ts). */
   push: Push;
-  /** Stops every agent session (open items stay for next time), drops every WebSocket, stops listening. */
+  /**
+   * Stops every agent session (open items stay for next time), drops every WebSocket (`/ws` and
+   * live tunnels, both ends), gives requests in flight a moment, then cuts every connection left.
+   */
   close(): Promise<void>;
 }
 
@@ -49,6 +52,8 @@ export interface DaemonDeps {
   pushSend?: PushSend;
   /** How long a burst of cards on one thread waits to make one push (push.ts). Tests shorten it. */
   pushDebounceMs?: number;
+  /** How long requests in flight get to finish when the daemon stops (`SHUTDOWN_GRACE_MS`). */
+  shutdownGraceMs?: number;
 }
 
 /** Starts listening, with a plain message when the port is taken. */
@@ -72,11 +77,43 @@ function listen(
   });
 }
 
-/** Stops a server and drops its open connections. */
-function stopServer(server: ReturnType<typeof serve>): Promise<void> {
+type Listener = ReturnType<typeof serve>;
+
+/** How long requests in flight get to finish when the daemon stops, before they are cut. */
+const SHUTDOWN_GRACE_MS = 1000;
+
+/**
+ * Every connection a listener holds, upgraded ones included: once a socket is upgraded, Node's
+ * own `closeAllConnections` no longer reaches it, and `close()` waits for it forever.
+ */
+function trackConnections(server: Listener): Set<Socket> {
+  const open = new Set<Socket>();
+  server.on("connection", (socket: Socket) => {
+    open.add(socket);
+    socket.once("close", () => open.delete(socket));
+  });
+  return open;
+}
+
+/**
+ * Stops a listener: no new connections, idle kept-alive ones closed at once, requests in flight
+ * given `graceMs` to finish, then every connection still open destroyed.
+ */
+function stopServer(
+  server: Listener,
+  connections: Set<Socket>,
+  graceMs = SHUTDOWN_GRACE_MS,
+): Promise<void> {
   return new Promise<void>((resolve, reject) => {
-    server.close((error) => (error ? reject(error) : resolve()));
-    if ("closeAllConnections" in server) server.closeAllConnections();
+    const cut = setTimeout(() => {
+      for (const socket of connections) socket.destroy();
+    }, graceMs);
+    server.close((error) => {
+      clearTimeout(cut);
+      if (error) reject(error);
+      else resolve();
+    });
+    if ("closeIdleConnections" in server) server.closeIdleConnections();
   });
 }
 
@@ -140,14 +177,19 @@ export async function startDaemon(
   // ws types `noServer` as optional; Hono's adapter wants it present. It is, at runtime.
   const websocket = { server: wss as unknown as WebSocketServerLike };
 
-  let server: ReturnType<typeof serve>;
-  let liveServer: ReturnType<typeof serve>;
+  let server: Listener;
+  let liveServer: Listener;
+  let connections: Set<Socket>;
+  let liveConnections: Set<Socket>;
+  const tunnels: LiveTunnels = new Set();
+  let stopping = false;
   try {
     server = await listen(
       { fetch: app.fetch, hostname: config.host, port: config.port, websocket },
       `${config.host}:${config.port} is already in use; is tenzo already running? Set TENZO_PORT to use another port.`,
       () => wss.close(),
     );
+    connections = trackConnections(server);
     // Threads' live apps, on an origin of their own (live.ts).
     const livePort = config.livePort ?? (config.port === 0 ? 0 : config.port + 1);
     const liveOrigins = config.liveOrigins ?? [];
@@ -160,14 +202,16 @@ export async function startDaemon(
         { fetch: createLiveApp({ policy, portOf, devices }).fetch, hostname: config.host, port: livePort },
         `${config.host}:${livePort} (threads' live apps) is already in use. Set TENZO_LIVE_PORT to use another port.`,
       );
+      liveConnections = trackConnections(liveServer);
     } catch (error) {
       wss.close();
-      await stopServer(server);
+      await stopServer(server, connections);
       throw error;
     }
-    liveServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) =>
-      liveUpgrade(request, socket, head, { policy, portOf, devices }),
-    );
+    liveServer.on("upgrade", (request: IncomingMessage, socket: Duplex, head: Buffer) => {
+      if (stopping) socket.destroy();
+      else liveUpgrade(request, socket, head, { policy, portOf, devices, tunnels });
+    });
     engine.setLive({
       port: (liveServer.address() as AddressInfo).port,
       origins: liveOrigins,
@@ -194,11 +238,21 @@ export async function startDaemon(
     push,
     close: () => {
       closing ??= (async () => {
+        stopping = true;
+        // No new sockets from here on: ws refuses a `/ws` handshake once closing (503, no 101),
+        // as the live listener's upgrade handler does (`stopping`).
+        wss.close();
         stopHeartbeat();
         push.close();
         await engine.close();
+        // Upgraded sockets first: `/ws` clients and both ends of every live app's tunnel (a
+        // dev server's HMR socket). The listeners can't finish closing while one is open.
         for (const client of wss.clients) client.terminate();
-        await Promise.all([stopServer(server), stopServer(liveServer)]);
+        for (const end of tunnels) end.destroy();
+        await Promise.all([
+          stopServer(server, connections, deps.shutdownGraceMs),
+          stopServer(liveServer, liveConnections, deps.shutdownGraceMs),
+        ]);
         store.close();
         unlock();
       })();
