@@ -184,7 +184,15 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       errorMessage: z.string().optional(),
       /** What the session has spent so far, all turns (Claude's running total), in USD. */
       costUsd: z.number().optional(),
+      /** What this turn alone spent, in USD: worked out by the daemon from the running totals. */
+      turnCostUsd: z.number().optional(),
+      /** The turn's wall-clock time, waiting on you included. */
       durationMs: z.number().optional(),
+      /**
+       * How much of the turn it spent waiting on you (a question, a permission, a proposal open),
+       * in ms: worked out by the daemon. The rest of `durationMs` it was working.
+       */
+      waitedMs: z.number().optional(),
       /** The agent ended the turn itself because the spend Tenzo allowed it ran out. */
       stoppedBy: z.literal("budget").optional(),
     }),

@@ -260,6 +260,8 @@ export const ThreadView = z.object({
   updatedAt: z.iso.datetime(),
   archivedAt: z.iso.datetime().nullable(),
   phase: ThreadPhase,
+  /** Its work landed: the agent's `landed` held (git agreed). An archived thread may have or not. */
+  landed: z.boolean().default(false),
   origin: ThreadOrigin.default("user"),
   /** The thread whose agent started this one (origin `agent`). */
   parentId: ThreadId.nullable().default(null),

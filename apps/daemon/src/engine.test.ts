@@ -1037,6 +1037,7 @@ describe("Engine: review actions and landing", () => {
     expect(d.engine.view(thread.id).status).toBe("active"); // not mid-turn
     session.complete();
     await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
+    expect(d.engine.view(thread.id).landed).toBe(true);
     expect(session.stopped).toBe(true);
     expect(existsSync(thread.worktreePath)).toBe(false);
     expect(sh(repoOf(d, thread.id), "branch", "--list", thread.branch)).toContain(thread.branch);
@@ -2510,5 +2511,38 @@ describe("Engine: where a thread starts, and what its turns took", () => {
         payload: { message: expect.stringMatching(/^Started from your local main, which has diverged from origin\/main/) },
       }),
     ]);
+  });
+
+  it("gives each turn its own cost, and how long of it was spent waiting on you", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-06T10:00:00Z"));
+      const d = daemon();
+      const thread = await d.engine.createThread({ project: "app", prompt: "Paint it" });
+      await settle();
+      const session = d.adapter.last;
+      session.ask([color]);
+      await settle();
+      vi.setSystemTime(new Date("2026-10-06T10:00:30Z"));
+      const [item] = d.engine.snapshot().items;
+      await d.engine.answer(item?.id ?? "", blue);
+      await settle();
+      session.complete("completed", { costUsd: 0.1 });
+      await settle();
+      d.engine.send(thread.id, "More");
+      await settle();
+      session.complete("completed", { costUsd: 0.25 });
+      await settle();
+
+      const turns = d.engine
+        .events(thread.id)
+        .events.flatMap((e) => (e.event.type === "turn.completed" ? [e.event.payload] : []));
+      expect(turns).toEqual([
+        { state: "completed", costUsd: 0.1, turnCostUsd: 0.1, waitedMs: 30_000 },
+        { state: "completed", costUsd: 0.25, turnCostUsd: 0.15, waitedMs: 0 },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

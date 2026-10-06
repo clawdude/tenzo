@@ -20,7 +20,7 @@ import { callDaemon } from "./client.ts";
 import { readConfig } from "./config.ts";
 import { pairingOrigin } from "./devices.ts";
 import { TenzoError } from "./errors.ts";
-import { formatEvent, formatItem } from "./format.ts";
+import { formatEvent, formatItem, threadRow } from "./format.ts";
 import { readProjectConfig } from "./project-config.ts";
 import { addProject, listProjects, removeProject } from "./projects.ts";
 import { startDaemon } from "./server.ts";
@@ -273,17 +273,7 @@ async function thread([sub, ...rest]: string[]): Promise<void> {
         includeArchived: flags.has("--all"),
       });
       if (threads.length === 0) console.log("No threads.");
-      else
-        printTable(
-          threads.map((t) => [
-            t.id,
-            t.projectName,
-            t.status === "archived" ? "archived" : t.activity,
-            t.phase,
-            t.branch,
-            t.origin === "automation" ? `${t.title} (automation: ${t.automation ?? "?"})` : t.title,
-          ]),
-        );
+      else printTable(threads.map(threadRow));
       return;
     }
     case "archive": {

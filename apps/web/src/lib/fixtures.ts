@@ -75,6 +75,7 @@ export function thread(tag: string, overrides: Partial<ThreadView> = {}): Thread
 		updatedAt: at,
 		archivedAt: null,
 		phase: 'discussing',
+		landed: false,
 		origin: 'user',
 		parentId: null,
 		automation: null,
