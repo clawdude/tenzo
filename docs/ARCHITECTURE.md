@@ -106,11 +106,11 @@ Root scripts (`package.json`):
    - threads whose agent called `landed` in their last turn are archived (unless a landing card is open);
    - threads with queued prompts are pumped (their Claude session resumes by its stored session id);
    - threads still under a stand-in title are named again;
-   - `wake_me` wakes, snoozes and automation wall-clock budgets are re-armed from the log (`timers.ts`; a time already passed fires now);
+   - timers are re-armed from the tables the log's projection keeps (`timers.ts`; a time already passed fires now): `wake_me` wakes from `threads.wake` (`threadsToWake`), snoozes from open items' `snoozedUntil`, wall-clock budgets from unfinished `automation_runs` rows (`unfinishedRuns`);
    - the automations scheduler starts (missed schedules run once).
-10. **Heartbeat** (`socket.ts` `heartbeat`): every 30 s each socket is pinged; one that didn't answer since the last round is terminated.
+10. **Heartbeat** (`socket.ts` `heartbeat`, main listener's `/ws` only): every 30 s each socket is pinged; one that didn't answer since the last round is terminated. Live-listener tunnels have no heartbeat.
 
-`SIGINT`/`SIGTERM` call `close()`: timers cleared, naming aborted, detached `git` killed, every session stopped (a cut-short turn queues `RESTART_PROMPT` for next time), sockets terminated, listeners closed, store closed, lock released. A second signal exits at once.
+`SIGINT`/`SIGTERM` call `close()`: timers cleared, naming aborted, detached `git` killed, every session stopped (a cut-short turn queues `RESTART_PROMPT` for next time), the main listener's `/ws` clients terminated, both listeners closed (`stopServer`: `close()` plus `closeAllConnections()`), store closed, lock released. A second signal exits at once. **Known gap:** WebSocket tunnels on the live listener (`liveUpgrade`, e.g. a live app's HMR socket) are upgraded sockets that `stopServer` doesn't reach and nothing else closes, so `close()` can hang until a second signal while one is open. Tracked in [#52](https://github.com/clawdude/tenzo/issues/52).
 
 ### Main listener routes (`app.ts`)
 
@@ -119,9 +119,9 @@ Middleware order: `markDaemon` (`x-tenzo-daemon: 1` on every response, so `expos
 | Route | Who | What |
 |---|---|---|
 | `GET /health` | anyone allowed by Host | `{ ok, version, environmentId }` |
-| `POST /api/commands` | local or paired | One `Command` (JSON only, 415 otherwise), parsed with zod, run by `executeCommand` (`commands.ts`). 400 for the client's mistakes, 500 for ours. |
+| `POST /api/commands` | local or paired | One `Command` (JSON only, 415 otherwise), parsed with zod, run by `executeCommand` (`commands.ts`). 400 for the client's mistakes, 500 for ours, 503 when the daemon has no engine (non-device commands). |
 | `GET /api/session` | anyone | `{ mode: local\|remote, device }`: whether this browser is the Mac, paired, or neither. `no-store`. |
-| `POST /api/pair` | anyone | Trades a pairing code for a device token, set as the `__Host-tenzo` cookie ([§13](#13-remote-access-and-security)). |
+| `POST /api/pair` | anyone | Trades a pairing code for a device token, set as the `__Host-tenzo` cookie ([§13](#13-remote-access-and-security)). 415 if not JSON, 400 for a bad or used code, 429 with `Retry-After` while failures are rate-limited, 503 without devices. |
 | `GET /api/attachments/:thread/:file` | local or paired | A screenshot copy (`attachments.ts` `storedAttachment`), with `nosniff`, `CSP: default-src 'none'; sandbox`, immutable caching. |
 | `/api/*` (other) | | 404 JSON |
 | `/live`, `/live/*` | | 404: live apps are only on the live listener. |
@@ -130,20 +130,25 @@ Middleware order: `markDaemon` (`x-tenzo-daemon: 1` on every response, so `expos
 
 ### Access guard (`access.ts`)
 
-Applied to every request on both listeners, against DNS rebinding and cross-site requests (a WebSocket has no CORS preflight):
+Applied to every request on both listeners, against DNS rebinding and cross-site requests (a WebSocket has no CORS preflight). The policy differs per listener:
 
-- **Host** must name loopback (`127.0.0.1`, `localhost`, `[::1]`) or a `TENZO_ALLOWED_HOSTS` name; else 403.
-- **Origin** (on `/ws` and `/api/*` of the main listener; on everything on the live listener) must be absent (CLI, curl), the exact host:port the request came in on over `http` for loopback, an allowed host over `https` whose host:port equals the `Host` header (Tailscale Serve on any port), or a `TENZO_DEV_ORIGIN`. Other localhost ports are refused.
+| | Main listener (`app.ts`) | Live listener (`server.ts` policy, `live.ts`) |
+|---|---|---|
+| **Host** allowed | loopback (`127.0.0.1`, `localhost`, `[::1]`) or a `TENZO_ALLOWED_HOSTS` name; else 403 | the same, plus the host names of `TENZO_LIVE_ORIGIN` |
+| **Origin** checked on | `/ws` and `/api/*` | every request, and WebSocket upgrades (`liveUpgrade`) |
+| **Origin** allowed | absent (CLI, curl); for loopback over `http`, exactly the host:port the request came in on; for an allowed host over `https`, host:port equal to the `Host` header (Tailscale Serve on any port); or a `TENZO_DEV_ORIGIN` | the same rules for the live listener's own origin, never a `TENZO_DEV_ORIGIN` (its policy has no dev origins), so Tenzo's own pages are refused |
+
+Other localhost ports are refused as Origins.
 
 ### Auth: local or remote (`auth.ts`)
 
-`requestMode` says **local** only when all three hold: the socket's peer is loopback, `Host` names loopback, and no proxy forwarding header is present (`Forwarded`, `X-Forwarded-*`, `X-Real-IP`, `Via`, `Tailscale-User-*`, `Tailscale-App-Capabilities`). Tailscale Serve connects from 127.0.0.1 but adds `X-Forwarded-For` and passes the tailnet `Host`, so its requests are remote. Spoofing only makes a request remote.
+`requestMode` says **local** only when all three hold: the socket's peer is loopback, `Host` names loopback, and none of these exact headers is present (`FORWARDING_HEADERS`): `Forwarded`, `X-Forwarded-For`, `X-Forwarded-Host`, `X-Forwarded-Proto`, `X-Forwarded-Port`, `X-Real-IP`, `Via`, `Tailscale-User-Login`, `Tailscale-User-Name`, `Tailscale-User-Profile-Pic`, `Tailscale-App-Capabilities`. It is an exact list, not a pattern: another header such as `X-Forwarded-Prefix` does not make a request remote. Tailscale Serve connects from 127.0.0.1 but adds `X-Forwarded-For` and passes the tailnet `Host`, so its requests are remote. Spoofing only makes a request remote.
 
 `callerOf` (`app.ts`): local → `{ mode: "local" }`; remote → the device whose `__Host-tenzo` cookie verifies (every value under that name is tried), and only when `Sec-Fetch-Site` is `same-origin`, `none` or absent (`fromOwnPage`), so a same-site live page can't use it. No caller: 401 on `/ws` and `/api/*`, except `/api/session` and `/api/pair`. The web app's files stay public (they hold no data), so an unpaired phone gets the "Pair this device" page.
 
 ### Security headers
 
-`securityHeaders` on every main-listener response: `Content-Security-Policy: frame-ancestors 'none'` (merged into an existing CSP), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. No page may frame the Pass (a live page is same-site, and on the Mac any website could frame the login-free Pass).
+`securityHeaders` on every main-listener response: `Content-Security-Policy: frame-ancestors 'none'` (set when the response has no CSP; appended to one that lacks `frame-ancestors`; a CSP that already has `frame-ancestors` is left as it is), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`. No page may frame the Pass (a live page is same-site, and on the Mac any website could frame the login-free Pass).
 
 ### Commands (`commands.ts`)
 
@@ -176,7 +181,7 @@ Migrations run in order, each once, all-or-nothing in one `BEGIN IMMEDIATE` tran
 | 4 | unfinished names and create keys | `threads.naming` (prompt still owed a title), `client_key` (unique), `client_request`: idempotent `thread.create`. |
 | 5 | thread phase | `threads.phase` (default `discussing`; existing threads with a session became `building`). |
 | 6 | finished work | `threads.attachments` (JSON, pending for the next report), `threads.preview` (exposed `{port, path}`). |
-| 7 | error items | `threads.turn_prompt`, `threads.turn_error` (what Retry sends, and why it failed). |
+| 7 | error items | `threads.turn_prompt` (the current turn's prompt, which an error card keeps; Retry quotes it in `carryOn` rather than resending it) and `threads.turn_error` (why the turn failed). |
 | 8 | landing and agent threads | `threads.wake` (JSON `{at, why}`), `origin` (user/agent), `parent_id`; index on `events.type`. |
 | 9 | thread model override | `threads.thinking` (the thread's own thinking level). |
 | 10 | automations | `threads.automation`; `automations` (project, name, schedule_key, next_run_at); `automation_runs` (trigger, result, reason, thread, budget, deadline_at, cap_usd, cost_usd, finished_at). |
@@ -195,10 +200,10 @@ Migrations run in order, each once, all-or-nothing in one `BEGIN IMMEDIATE` tran
 
 ### Adapter interface (`agent/agent.ts`)
 
-The boundary between Tenzo and a coding agent. Above it there are only runtime events and these calls; nothing above `apps/daemon/src/agent/` knows it is Claude.
+The boundary between Tenzo and a coding agent. Above it there are only runtime events and these calls; nothing above `apps/daemon/src/agent/` knows it is Claude, with one exception: the titler (`titles.ts`) imports `@anthropic-ai/claude-agent-sdk` directly, and `findClaude`/`claudeEnv` from `agent/claude.ts`, for its one-shot naming run.
 
 - `AgentAdapter.start(StartSessionInput) → AgentSession`. Input: thread id, `cwd` (the worktree), `resumeSessionId`, `restarted`, per-phase `models`, optional `permissionMode`, optional spend `budget`, `phase`, `attachmentsDir`, `pendingAttachments`, the thread `prompts`, and a `SessionHost` (`phase()`, `checkLanded()`, `startThread()`) for tools that need the daemon.
-- `AgentSession`: `sessionId`, `events` (async iterable of `RuntimeEvent`), `sendTurn(prompt) → TurnId` (one turn at a time), `respondToRequest`, `respondToUserInput`, `respondToProposal`, `reconfigure(settings) → "unchanged" | "restart" | Promise`, `backgroundWork`, `interrupt()`, `stop()`.
+- `AgentSession`: `threadId`, `sessionId`, `events` (async iterable of `RuntimeEvent`), `sendTurn(prompt) → TurnId` (one turn at a time), `respondToRequest`, `respondToUserInput`, `respondToProposal`, `reconfigure(settings) → "unchanged" | "restart" | Promise`, `backgroundWork`, `interrupt()`, `stop()`.
 - `agent/fake-agent.ts` and `agent/claude-testing.ts` are test doubles; tests never spawn `claude`.
 
 ### Claude adapter (`agent/claude.ts`)
@@ -218,11 +223,13 @@ Runs `query()` from `@anthropic-ai/claude-agent-sdk` with:
 | `model`, `thinking`/`effort` | from `models[phase]` (`modelOptions`) | `thinking: off` → `thinking: {type: "disabled"}`; `low/medium/high` → `effort`. |
 | `maxBudgetUsd` | automation runs only: cap − spent (min $0.01) | Claude stops the turn itself (`error_max_budget_usd`). |
 
-**Live switches vs restarts.** Before every turn the engine computes the thread's settings (`#settingsOf`: config read now, thread override, phase, budget) and calls `session.reconfigure`. `planSwitch` decides:
-- live, in place: another named model (`setModel`), back to your own model (`setModel(ownModel())`, from `ANTHROPIC_MODEL` or your settings via Claude's `get_settings`), another effort level (`applyFlagSettings({effortLevel})`), thinking off (`setMaxThinkingTokens(0)`);
-- `restart`: thinking back on after off, another permission mode, another subagent model, another spend cap. The engine ends the session at the turn boundary and starts a new one resuming the conversation (`restarted: true`).
+**Live switches vs restarts.** Before every turn the engine computes the thread's settings (`#settingsOf`: config read now, thread override, phase, budget) and calls `session.reconfigure`, which decides in two steps:
+1. `reconfigure` itself returns `"restart"` when something fixed for the process's life changed: the permission mode, the subagent model, or the spend cap (`claude.ts`, before any planning).
+2. Otherwise `planSwitch` plans only model and thinking. Live, in place: another named model (`setModel`), back to your own model (`setModel(ownModel())`, from `ANTHROPIC_MODEL` or your settings via Claude's `get_settings`), another effort level (`applyFlagSettings({effortLevel})`), back to your own effort level, thinking off (`setMaxThinkingTokens(0)`). Its one restart case is thinking changing away from `off` (to a level, or back to your own thinking).
 
-The turn waits for a switch up to 15 s (`switchTimeoutMs`); a switch that isn't confirmed becomes one restart, and a restarted session that still doesn't confirm runs the turn as is with a `runtime.error` note. A session that won't stop within 15 s is abandoned; its queued prompts go on an error card whose Retry sends them. *Build it* switches to the build model inside the same turn (`propose` awaits `switchTo(models.build)` before returning).
+On `"restart"` the engine ends the session at the turn boundary and starts a new one resuming the conversation (`restarted: true`).
+
+The turn waits for a live switch up to 15 s (`switchTimeoutMs`). Every switch that isn't confirmed in time appends a `runtime.error` note. Then, if the session isn't itself a settings restart and `#canRestart` allows it, it becomes one restart; otherwise (already a restart, or background work running) the turn runs as is. A settings restart whose session won't stop within 15 s (`#restartSession`) is abandoned: its queued prompts go on an error card whose Retry sends them. (Archive and daemon shutdown wait for `stop()` instead.) *Build it* switches to the build model inside the same turn (`propose` awaits `switchTo(models.build)` before returning).
 
 **Background work.** The adapter counts Claude's `background_tasks_changed` tasks that are real work (`isWork`: non-ambient, or a Monitor). While any run, or while Claude is in a turn it started itself, the engine never restarts the session (`#canRestart`); the change waits for a clean turn boundary or the session's natural end. Sessions stay up between turns so background work keeps reporting.
 
@@ -230,7 +237,7 @@ The turn waits for a switch up to 15 s (`switchTimeoutMs`); a switch that isn't 
 
 ### SDK messages → events (`agent/claude-events.ts`)
 
-`translate(state, message)` is pure. `system/init` → `session.started` (first time) and `session.configured` (first time and when the model changes; tools, MCP servers with status, skills, plugins, agents, permission mode, version). `assistant` text/thinking → `item.completed` (`assistant_message`/`reasoning`); `tool_use` → `item.started` (with `toolKind`, a one-line summary, bounded input). `user` tool results → `item.completed` with output cut to 2,000 chars. `result` → `turn.completed` (state, result text, `costUsd` = Claude's session total, duration, `stoppedBy: "budget"`), preceded by `runtime.error` when failed. A turn Claude starts by itself (a background task reporting) is opened as a synthetic `turn.started` without a prompt; our prompt's UUID is the turn id, which Claude echoes on its result, so results of other turns don't close ours (`isForAnotherTurn`). Requests carry a SHA-256 **fingerprint** over the tool name and its full input (`agent/fingerprint.ts`), taken before anything is cut for display.
+`translate(state, message)` is pure. `system/init` → `session.started` (first time) and `session.configured` (first time and when the model changes; tools, MCP servers with status, skills, plugins, agents, permission mode, version). After a live `setModel` to a named model the adapter emits `session.configured` itself at once (`switched`), and the next init reporting that model is taken quietly, with no second event. `assistant` text/thinking → `item.completed` (`assistant_message`/`reasoning`); `tool_use` → `item.started` (with `toolKind`, a one-line summary, bounded input). `user` tool results → `item.completed` with output cut to 2,000 chars. `result` → `turn.completed` (state, result text, `costUsd` = Claude's session total, duration, `stoppedBy: "budget"`), preceded by `runtime.error` when failed. A turn Claude starts by itself (a background task reporting) is opened as a synthetic `turn.started` without a prompt; our prompt's UUID is the turn id, which Claude echoes on its result, so results of other turns don't close ours (`isForAnotherTurn`). Requests carry a SHA-256 **fingerprint** over the tool name and its full input (`agent/fingerprint.ts`), taken before anything is cut for display.
 
 ### Event vocabulary (`packages/contracts/src/runtime.ts`)
 
@@ -267,7 +274,7 @@ Tools only describe and validate; their behaviour is the session's (`TenzoToolHo
 | Tool | Waits? | Semantics and guards |
 |---|---|---|
 | `propose(summary, headline?)` | yes, until you answer | Opens a proposal card. Only one pending per session. Build it → result is `"Approved, build it."` + the build prompt, phase becomes building, build model switched in. Change → "Not yet. <note> Revise, and propose again." |
-| `report(summary, how_to_test, checks[], headline?)` | no | Refused while discussing ("propose first") and while landing. Emits `report.submitted` with pending attachments and the live preview; resets the attach count. |
+| `report(summary, how_to_test, checks[], headline?)` | no | Refused while discussing ("propose first") and while landing. Emits `report.submitted` carrying only `{headline?, summary, howToTest, checks}`; the fold builds the finished item from it plus the thread's pending attachments and exposed preview, and clears the pending attachments. The adapter resets its attach count. |
 | `attach(path, caption?)` | no | PNG/JPEG/GIF/WebP by magic bytes, ≤ 10 MB, inside the worktree after resolving symlinks, re-checked on the open file (same inode, no hard links), ≤ 8 per report (`attachments.ts`). Copied to `$TENZO_HOME/attachments/<thread>/`. |
 | `expose(port, path?)` | no | Port 1024–65535; something must answer at `localhost:<port>/live/<thread>/<path>`; refused if it is Tenzo (`x-tenzo-daemon`); the listening process must run inside the worktree (`lsof`; unchecked without lsof). Warns when the page references assets outside the base. |
 | `wake_me(in, why)` | no | 1 minute to 7 days (`parseWait`). One wake per thread; a new one replaces it. Survives restarts. |
@@ -286,18 +293,22 @@ Plain Markdown, HTML comments stripped (`cleanPrompt`), read at every session st
 `ThreadPhase` (`queue.ts`) is `discussing | building | review | landing`; `archived` is the thread's `status`, not a phase.
 
 ```
-create ─▶ discussing ──propose → Build it──▶ building ──report──▶ review
+create ─▶ discussing ──propose → Build it──▶ building ──report──▶ review ──Done──▶ (stays review)
                                                ▲                    │
                                                │ Needs changes      │ Merge / Open PR
                                                └────────────────────┤
                                                                     ▼
-                                                                 landing ──landed + turn end──▶ archived
+                                                                 landing ──landed, then archive──▶ archived
+
+thread.archive (`tenzo thread archive`, an error card's Archive, a budget card's Stop) archives from any phase.
 ```
+
+`#archiveLanded` runs after `thread.landed` when the turn completes, when the session's event stream ends first (`#read`), and on daemon start for threads that landed in their last turn (unless a landing card is open).
 
 - **Create** (`engine.createThread` → `threads.ts` `createThread`): resolve the default branch's commit (`resolveBase`: local branch, else `origin/`), pick a slug (`slug.ts`; `-2`, `-3` if the project has it as a thread or a `tenzo/<slug>` branch), `git worktree add --no-track -b tenzo/<slug> -- <path> <base>`, insert the row (undoing the worktree and branch if that fails). `clientKey` makes it idempotent across restarts; the same key with a different request is refused. Without a title, the prompt's first words stand in (`quickTitle`) and a one-shot `claude` on haiku (no tools, no settings, not persisted, 30 s timeout) names it later (`titles.ts`).
 - **Prompts** go through the queue: `#pump` sends the next prompt when no turn of ours runs, starting or resuming the session as needed. A session that can't start drops the queue into an error card `start` whose Retry resends them.
-- **Archive** (`engine.archive`): refuses before stopping anything if the worktree has uncommitted changes (unless `force`) or the repo is gone; stops the session, `git worktree remove` (branch kept), clears prompts, wake and budget timers, finishes the automation run, deletes attachment copies, appends `thread.archived`. With `--force` and a vanished repo, only Tenzo's own `worktrees/<project>/<id>` folder is deleted, after path checks.
-- **Landed**: after `thread.landed`, the turn's end triggers `#archiveLanded`. If you sent a message meanwhile, or archiving fails, the thread stays landing with an `unarchived` card; `send` to a landed thread is refused. A landing turn that completes with no wake, no open card, nothing queued and no `landed` gets a `stalled` card (`#checkStalled`) whose Retry sends `STALLED_PROMPT`.
+- **Archive** (`engine.archive`): refuses before stopping anything if the worktree has uncommitted changes or the repo is gone (`force` skips both refusals: `checkArchivable`); stops the session, `git worktree remove` (branch kept), clears prompts, wake and budget timers, finishes the automation run, deletes attachment copies, appends `thread.archived`. With `--force` and a vanished repo, only Tenzo's own `worktrees/<project>/<id>` folder is deleted, after path checks.
+- **Landed**: after `thread.landed`, the turn's end triggers `#archiveLanded`. If you sent a message meanwhile, or archiving fails, the thread stays landing with an `unarchived` card. `send` is refused only while the landed thread is being archived (`#landing`) or while the session that called `landed` is still live; after a restart with an `unarchived` card open, `send` is accepted. A landing turn that completes with no wake, no open card, nothing queued and no `landed` gets a `stalled` card (`#checkStalled`) whose Retry sends `STALLED_PROMPT`.
 - **Projects** (`projects.ts`): `addProject` reads the repo (`git rev-parse` top level, default branch from `origin/HEAD`, else `main`/`master`, else HEAD) and writes nothing into it. `removeProject` refuses while threads are active and only hides the project (`removed_at`); adding it again restores it.
 
 ### Restart behaviour
@@ -309,7 +320,7 @@ create ─▶ discussing ──propose → Build it──▶ building ──repo
 | A question/permission/proposal was open | It stays on the Pass, `detached: true`. Answering appends the `*.resolved` event and queues `deliveryPrompt` ("Your session ended while you were waiting for my answer…", or "I allow it. Go ahead…") with a standing reply ([§7](#7-items-and-the-pass)). |
 | Claude crashes mid-turn | `session.exited` with `exitKind: error` → error card `crash`, unless the turn was waiting on you. |
 | Turn fails | error card `turn`. Retry sends `carryOn` ("Your last turn didn't finish: … Check what is already done…"), never the original prompt again. |
-| Wakes, snoozes, budgets, schedules | Kept in the log/DB, re-armed on start; times already past fire immediately. |
+| Wakes, snoozes, budgets, schedules | Re-armed on start from tables: `threads.wake`, open items' `snoozedUntil`, unfinished `automation_runs`, `automations.next_run_at`; times already past fire immediately. |
 | Stand-in titles | Named again on start. |
 
 ## 7. Items and the Pass
@@ -318,7 +329,7 @@ create ─▶ discussing ──propose → Build it──▶ building ──repo
 
 | Kind | Lane | Opened by | Options (`fold.ts`) | Answer (`ItemAnswer`) |
 |---|---|---|---|---|
-| `question` | quick | `user-input.requested` (`AskUserQuestion`) | the agent's options; `recommended` from "(Recommended)" in the label | per question id: option value(s) or free text |
+| `question` | quick | `user-input.requested` (`AskUserQuestion`) | the agent's options; `recommended` comes from "(Recommended)" in the label, parsed by the adapter (`agent/claude.ts` `parseQuestions`) | per question id: option value(s) or free text |
 | `permission` | quick | `request.opened` | Allow (suggested), Deny | allow / deny + optional reason |
 | `proposal` | quick | `proposal.requested` | Build it | build / change + note |
 | `finished` | review | `report.submitted` | Merge, Open PR, Done | merge / pr / done / changes + note |
@@ -332,8 +343,8 @@ Budget and config cards are error items with their own cause, not kinds of their
 ### Answer delivery (`engine.answer`, `answers.ts`)
 
 `checkAnswer` validates and tidies the answer for the item's kind. Then:
-- **live**: question, permission or proposal with the asking session still up → handed to the session; the call waits up to 10 s for the `*.resolved` event.
-- **message**: the asking session has ended (detached), or the item is finished/ready/error → the resolution event is appended and a prompt queued in one transaction, then pumped. Finished: `reviewPrompt` (Merge/Open PR carry `landing.md`; Done sends nothing → `none`); ready: `mergePrompt`; error: `errorPrompts` (start/stalled/unarchived/budget resend their stored prompts, others send `carryOn`, tell sends your words; a budget Continue also grants more budget).
+- **live**: question, permission or proposal with the asking session still up → handed to the session; the call waits up to 10 s for the `*.resolved` event. It falls back to **message** if the session ended during the hand-over, or if the item became detached before the confirmation; with neither and no confirmation in 10 s it answers `live` with the item still open.
+- **message**: the asking session has ended (detached), or the item is finished/ready/error → the resolution event is appended and a prompt queued in one transaction, then pumped. Finished: `reviewPrompt` (Merge/Open PR carry `landing.md`; Done sends nothing → `none`); ready: `mergePrompt`; error: `errorPrompts` (tell sends your words; Retry on start/stalled/unarchived/budget resends the card's stored prompts when it has any, else `carryOn`; Retry on turn/crash sends `carryOn`). Any answer to a budget card other than Stop (Continue or words) also grants more budget (`grantMore`).
 - **none**: Done, or a config card's Retry/Dismiss (Retry re-reads the config and reconfigures a live session).
 - **archived**: Archive (Stop on a budget card).
 
@@ -341,7 +352,7 @@ Budget and config cards are error items with their own cause, not kinds of their
 
 **Snooze.** `item.snooze` appends `item.snoozed` with `until = now + TENZO_SNOOZE_MS` (default 15 min); a per-item timer appends `item.unsnoozed` (`returned`) at that time, also after restarts; `item.unsnooze` (Undo) appends it with `undo`. The daemon's clock decides; clients only count down using their clock offset. A thread whose open items are all snoozed shows `activity: "snoozed"`.
 
-**Suggested answers.** The filled button is `suggested` (questions: the recommended option, else the first, `client-runtime` `suggestedOption`). On finished cards the filled button is the project's landing rule (`merge` or `pr`, `pass.ts` `stepsOf`), but `suggestedAnswer` (what "take every suggestion" sends) is **Done**, and the CLI merges only on the word `merge`: landing is never a reflex.
+**Suggested answers.** In the item (`fold.ts`), `suggested` is: a question's recommended option value, or `null` when none is marked; `allow` for permissions; `build`, `merge` (finished, whatever the landing rule), `merge` (ready) and `retry` for the other kinds. The web app's filled button comes from `pass.ts` `stepsOf`: questions use `suggestedOption` (the recommended option, else the first); permissions read `item.suggested` (`suggestedDecision`); the other kinds are hard-coded there (Build it, Retry, Continue for budget cards, Merge on ready cards, and on finished cards the project's landing rule, `merge` or `pr`). `suggestedAnswer` (what "take every suggestion" sends) gives **Done** for finished work and nothing for ready PRs, and the CLI merges only on the word `merge`: landing is never a reflex.
 
 ## 8. Protocol
 
@@ -364,7 +375,7 @@ All shapes are zod schemas in `packages/contracts`; both ends validate on arriva
 | client → | `ping` | liveness |
 | client → | `visibility` | the page is in view or not (suppresses push to that device) |
 
-Hello and snapshot are sent and the engine subscription made in one tick, so nothing is missed or doubled. There is no replay: a client that reconnects gets a fresh snapshot. A socket with more than 4 MB unsent is terminated; frames over 1 MB are refused; a revoked device's sockets close with code 4401. `thread.watch` answers with a backlog (up to 200 latest events, or those after `after` when few enough, with `older` and `reset` flags) and then streams `event` frames in log order; at most 16 watches per socket.
+Hello and snapshot are sent and the engine subscription made in one tick, so nothing is missed or doubled. There is no replay: a client that reconnects gets a fresh snapshot. A socket with more than 4 MB unsent is terminated; frames over 1 MB are refused; a revoked device's sockets close with code 4401. `thread.watch` answers with a backlog (the `limit` latest events, default 200 `WATCH_BACKLOG`, at most 500 `MAX_EVENT_PAGE`; or those after `after` when there are no more than `limit` of them; with `older` and `reset` flags) and then streams `event` frames in log order; at most 16 watches per socket.
 
 ### Commands (`commands.ts` in contracts)
 
@@ -377,7 +388,7 @@ Hello and snapshot are sent and the engine subscription made in one tick, so not
 | `thread.events` | page of events (`after`, `before`, `limit` ≤ 500) |
 | `thread.watch` / `thread.unwatch` | WebSocket only |
 | `thread.setModel` | thread's own model/thinking (null: config decides) |
-| `thread.diff` | `git diff --numstat` vs the default branch plus untracked files (`diff.ts`; ≤ 300 files listed) |
+| `thread.diff` | `git diff --raw --numstat` against the point where the thread's branch left the default branch (later commits on the default branch don't count), plus untracked files as new; an archived thread compares its kept branch (`diff.ts`; ≤ 300 files listed) |
 | `project.list`, `snapshot` | |
 | `item.answer`, `item.snooze`, `item.unsnooze` | |
 | `automation.list`, `automation.run`, `automation.pause`, `automation.archiveFinished` | |
@@ -395,46 +406,48 @@ See the route table in [§3](#main-listener-routes-appts). The CLI's client (`ap
 `packages/client-runtime/src`, framework-free:
 
 - **`Connection`** (`connection.ts`): the one owner of the WebSocket. `connected` only after the daemon's `hello`. Reconnects with capped exponential backoff plus jitter (500 ms → 15 s; the attempt count resets only after 30 s up). Hello timeout 10 s; ping every 15 s, dead after 10 s without any frame. **Wakeups** (`visibilitychange`, `pageshow`, `online`): a page away ≥ 30 s replaces the socket at once; otherwise a probe ping with a 3 s timeout, during which `probing` marks data as possibly stale. `clockOffset` = daemon clock − device clock from each hello. Frames are validated against `ServerFrame`.
-- **`TenzoClient`** (`client.ts`): keeps `Data` (threads, items, projects, live, automations) current via the pure reducer `applyFrame` (`state.ts`: snapshot replaces, thread/item upsert or remove, idempotent). `synced` is true only when this connection's snapshot arrived and no probe is out. `command(...)` sends over the socket and resolves with the typed result; `CommandError` reasons `offline` (never sent; commands are never queued), `lost` (sent, socket dropped: may or may not have run), `rejected`, `invalid`. `setVisible` sends `visibility` frames. `watch(threadId, listener)` manages `thread.watch`, re-watching after reconnects.
+- **`TenzoClient`** (`client.ts`): keeps `Data` (threads, items, projects, live, automations, `automationsPaused`, `automationProblems`) current via the pure reducer `applyFrame` (`state.ts`: snapshot replaces, thread/item upsert or remove, idempotent). `synced` is true only when this connection's snapshot arrived and no probe is out. `command(...)` sends over the socket and resolves with the typed result; `CommandError` reasons `offline` (never sent; commands are never queued), `lost` (sent, socket dropped: may or may not have run), `rejected`, `invalid`. `setVisible` sends `visibility` frames. `watch(threadId, listener)` manages `thread.watch`, re-watching after reconnects.
 - **Feeds** (`feed.ts`): a watched thread's events, at most 2,000 kept; `applyBacklog`, `appendLive`, `prependOlder` (pages of 200 via `thread.events` with `before`).
 - **`session.ts`**: `fetchSession()` (`GET /api/session`) and `pairBrowser()` (`POST /api/pair`).
 - **`answers.ts`**: `suggestedOption`, `suggestedDecision`, `suggestedAnswer`.
 
 ## 10. The web app
 
-`apps/web`. One `TenzoClient` for the whole app (`src/lib/tenzo.svelte.ts`), opened by the layout after `GET /api/session` says this browser is local or paired; an unpaired remote browser gets `PairDevice.svelte` and opens no socket. A socket that keeps failing re-checks the session and falls back to pairing if the device was revoked. The socket URL switches to `wss:` under HTTPS.
+`apps/web`. One `TenzoClient` for the whole app (`src/lib/tenzo.svelte.ts`), opened by the layout after `GET /api/session` answers. Only an unpaired remote browser skips it: it gets `PairDevice.svelte` and opens no socket. When the session can't be fetched, the socket opens anyway. A socket that keeps failing re-checks the session and falls back to pairing if the device was revoked. The socket URL switches to `wss:` under HTTPS.
 
 ### Routes (`src/routes/`)
 
 | Route | Screen |
 |---|---|
 | `/` | **The Pass** (`+page.svelte`): the pile (`Card.svelte` on top, up to 4 edges behind), the all-clear card with *Meanwhile* (`AllClear.svelte`), snooze toast with Undo (`SnoozeToast.svelte`), `?item=<id>` focuses a card (notification taps). |
-| `/new` | New thread: prompt, project picker (remembered per browser), dictation, `clientKey` per draft; the draft survives closing. |
+| `/new` | New thread: prompt, project picker (remembered per browser), dictation, `clientKey` per draft; the draft is module state, so it survives leaving the screen (not a reload). |
 | `/threads` | Threads list in groups Needs you / Working / Landing / Today / Earlier, one status word per thread, origin markers; rows slide between groups. |
 | `/threads/[id]` | One thread's timeline (`Timeline.svelte`), live while open, with the "⋯" model menu (`ModelMenu.svelte`). |
 | `/automations` | Automations list: schedule in words, next/last run, Run now, archive finished runs, the off switch, broken configs. |
 | `/devices` | Paired devices: rename, revoke, notifications on/off, mute, test. |
 | `/pair` | Pairing link landing: reads the code from the fragment, removes it from history, pairs. |
 
-### Pure logic modules (`src/lib/*.ts`, each with a `*.test.ts`)
+### Logic modules (`src/lib/*.ts`; the pure ones each have a `*.test.ts`)
 
 | Module | Does |
 |---|---|
 | `pass.ts` | pile order (lane, then age), pile edges, card steps and buttons per kind (`stepsOf`, landing rule), snooze labels |
-| `answering.ts` | answering one card as a state machine; ignores taps for 350 ms after a card or question appears, and after an answer went |
+| `answering.ts` | answering one card as a state machine; ignores taps for 350 ms (`SETTLE_MS`) after a card or question appears, and every tap after an answer went, until it is refused or unsent |
 | `back.ts` | back of the card: *why it's asking*, *the change* (`thread.diff`), or the error's context |
 | `timeline.ts` | events → readable rows (prompts, replies, asks and answers, folded tool runs), paging window |
 | `threads.ts` | Threads list groups, tones and status words |
 | `meanwhile.ts` | the all-clear's working threads and snoozed items |
 | `finished.ts` | finished card: badges, screenshots, live link |
 | `automations.ts` | automations list rows and run outcomes |
-| `motion.ts`, `flip.ts` | card arrive/lift/swipe motion and card flip; reduced-motion aware |
-| `swipe.ts`, `swipeable.ts` | swipe-to-snooze gesture as a pure function, and its pointer wiring |
-| `trail.ts`, `nav.ts` | the app's own history trail, so Close goes back to the Pass the way the back gesture would |
+| `motion.ts` | the pile's card motion (arrive, lift, swipe away); reduced-motion aware |
+| `swipe.ts` | swipe-to-snooze gesture as a pure function of pointer positions |
+| `trail.ts` | the app's own history trail, so Close goes back to the Pass the way the back gesture would |
 | `markdown.ts` | a small, escape-everything Markdown renderer for agent text |
 | `notifications.ts` | what the service worker shows, where a tap goes, which notifications to clear (pure; used by the SW) |
 | `push.ts` | browser push support detection, subscribe/unsubscribe, Devices view lines |
 | `model.ts`, `devices.ts`, `projects.ts`, `create-key.ts`, `speech.ts`, `viewport.ts`, `status.ts` | model menu, device lines, project memory, idempotency keys, dictation, iOS keyboard viewport, connection label |
+| *Wiring (DOM, no tests):* `flip.ts`, `swipeable.ts`, `nav.ts` | card flip animation; pointer events feeding `swipe.ts`; leaving screens with `goto` along `trail.ts` |
+| *Shared state:* `tenzo.svelte.ts` | the app's one `TenzoClient`, its Svelte state, `command`, `watchThread` |
 
 ### Service worker (`src/service-worker/index.ts`)
 
@@ -462,22 +475,22 @@ Notifications only: caches nothing, handles no fetch. `push` → `showNotificati
 - **Merge**: `local.json` over `config.json`, deep, key by key; the merged automations must each have a prompt.
 - **Cache** (`ProjectConfigs`): re-read only when an `lstat` stamp of the folder or either file changes. The engine reads it before every turn and at every session start, so edits apply from the next turn without a restart.
 - **Permission ceiling**: `permissions` may be only `default`, `acceptEdits` or `dontAsk` (`PermissionModeName`). `auto` and `bypassPermissions` are refused with a message pointing to your own `~/.claude/settings.json` (Claude Code refuses them from repo settings too, and Tenzo passes the mode as a trusted flag). `plan` isn't offered.
-- **Model precedence** (`resolveModels`), field by field: the thread's own choice (`thread.setModel`, `--model`, an automation's `model`/`thinking`) → `models.discuss`/`models.build` → `TENZO_DEFAULT_MODEL` (models only) → Claude's own. `models.agents.model` → `CLAUDE_CODE_SUBAGENT_MODEL` (used only when the subagent names no model). With no config, nothing is passed.
+- **Model precedence** (`resolveModels`), field by field: the thread's own choice (`thread.setModel`, `--model`, an automation's `model`/`thinking`) → `models.discuss`/`models.build` → `TENZO_DEFAULT_MODEL` (models only) → Claude's own. `models.agents.model` → `CLAUDE_CODE_SUBAGENT_MODEL` (used only when the subagent names no model). With no config, no model or thinking of the thread's own and no `TENZO_DEFAULT_MODEL`, nothing is passed.
 - **Landing rule**: `landing` (`merge` default, or `pr`) picks the finished card's filled button; exposed on every `ThreadView`.
 - **Invalid config** never stops a thread: it runs on defaults, and the engine records `config.checked` with the problem, opening one config card per project (Retry re-reads, Dismiss hides it until the problem changes; it closes when a turn starts with the file fixed). Automations of a project with a broken config don't run.
 
 ## 12. Automations
 
-Definitions live in the project config under `automations` (≤ 20 per project; names `[a-z0-9-]`, ≤ 40; prompt ≤ 8,000 chars). The daemon keeps only schedules and runs (`automations`, `automation_runs` tables). Code: `apps/daemon/src/automations.ts` (scheduler, prompt, DB), budgets in `engine.ts`, schedule parsing in `packages/contracts/src/schedule.ts`.
+Definitions live in the project config under `automations` (≤ 20 per project; names start with `[a-z0-9]`, then `[a-z0-9-]`, ≤ 40 in all; prompt ≤ 8,000 chars). The daemon keeps only schedules and runs (`automations`, `automation_runs` tables). Code: `apps/daemon/src/automations.ts` (scheduler, prompt, DB), budgets in `engine.ts`, schedule parsing in `packages/contracts/src/schedule.ts`.
 
 - **Triggers** (`parseSchedule`): `every Nm|h|d` (5 min to 30 days), `hourly`, `daily HH:MM`, `weekdays HH:MM`, or a 5-field cron (Vixie-style day matching), in `trigger.timeZone` (default the machine's; DST "compatible" handling). No schedule: run by hand only. `enabled: false` switches a schedule off.
 - **Scheduler**: `Automations.tick()` looks at every project at the earliest due time, at least every 60 s and at most every 1 s. It recomputes `next_run_at` when the schedule key changes, fires what is due, and computes the next time before firing (`nextAfterFiring`), so missed runs while the daemon was down fire **once**. A schedule starts a run at most every 5 minutes. Removed automations and projects lose their schedules.
-- **Caps**: a scheduled run is skipped (and recorded) while automations are paused (`$TENZO_HOME/automations.paused`, toggled by `tenzo automation pause|resume` / `automation.pause`) or when 3 runs are already going across all projects (`MAX_RUNS_GOING`). Any run is skipped while its previous run is going, waiting on you, or paused by its budget. Run now ignores the pause and the global cap.
+- **Caps**: a scheduled run is skipped (and recorded) while automations are paused (`$TENZO_HOME/automations.paused`, toggled by `tenzo automation pause|resume` / `automation.pause`) or when 3 runs are already active across all projects (`MAX_RUNS_GOING`): every run whose thread is active and whose state is not `finished` or `archived` counts (so `waiting` and `paused` runs too), plus runs still starting. Any run is skipped while its previous run is going, waiting on you, or paused by its budget. Run now ignores the pause and the global cap.
 - **A run is an ordinary thread** created through `Engine.#create` with origin `automation`, title `<name> · <Mon D HH:MM>`, the automation's model/thinking as the thread's own choice, and its run row (with budget) inserted before the session starts. It goes through discuss like any thread; no approval gate stands before a scheduled run starts.
-- **Memory between runs** (`runPrompt`): the automation's prompt, then which automation and trigger this is, the previous run's last words (its latest report, else last answer; ≤ 1,500 chars, quoted), and where the notes file `.tenzo/automations/<name>.md` is newest (found by a read-only `git log` over the default branch and earlier runs' branches, 10 s timeout; if the worktree lacks it, a `git checkout <commit> -- <path>` instruction). The agent may update and commit that one file without proposing; it is asked to leave markers in external systems.
-- **Budgets** (default 1 h and $2; at most 24 h and $20 from the file): `deadline_at` = start + wall clock, `cap_usd`; Claude gets `maxBudgetUsd` = cap − spent. Over either (checked at turn end, at the wall-clock timer, and before sending a turn), the run is paused: `budget.exceeded` opens a quick-lane card, a running turn is interrupted (one waiting on your answer is re-checked a minute later), nothing more is sent. **Continue** grants one more budget from now (deadline = now + wall clock; cap = max(spent, old cap) + cost), which needs a new session for the new cap; **Stop** archives. Never a kill without asking. A run's budget stops applying once the run is finished (`finished_at`).
+- **Memory between runs** (`runPrompt`): the automation's prompt, then which automation and trigger this is, the previous run's last words (its latest report, else last answer; ≤ 1,500 chars, quoted), and where the notes file `.tenzo/automations/<name>.md` is newest (found by a read-only `git log` over the default branch and the branches of the last 20 started runs that still exist, 10 s timeout; if the worktree lacks it, a `git checkout <commit> -- <path>` instruction; if the lookup fails, the prompt says the file doesn't exist yet). The agent may update and commit that one file without proposing; it is asked to leave markers in external systems.
+- **Budgets** (default 1 h and $2; at most 24 h and $20 from the file): `deadline_at` = start + wall clock, `cap_usd`; Claude gets `maxBudgetUsd` = cap − spent. Over either (checked at turn end, at the wall-clock timer, and before sending a turn), or when Claude stopped itself at `maxBudgetUsd` (`stoppedBy: "budget"`), the run is paused: `budget.exceeded` opens a quick-lane card, a running turn is interrupted (one waiting on your answer is re-checked a minute later), nothing more is sent. **Continue**, or any words you answer the card with, grants one more budget from now (deadline = now + wall clock; cap = max(spent, old cap) + cost), which needs a new session for the new cap; **Stop** archives. Never a kill without asking. A run's budget stops applying once the run is finished (`finished_at`).
 - **Run state** (`#runState`): `paused`, `waiting`, `going` (working or landing), `finished` (nothing running or queued, nothing open but finished work), `archived`.
-- **Auto-archive**: when a new run starts, the previous run is archived if finished, with no open item, a clean worktree and no commits beyond its base (`#retireRun`); its branch stays. `automation.archiveFinished` archives all finished runs with clean worktrees.
+- **Auto-archive**: when a new run starts, the previous run is archived if finished, with no open item, a clean worktree and no commits beyond its base (`#retireRun`); its branch stays. `automation.archiveFinished` (one automation: project and name) archives that automation's runs that are `finished` with a clean worktree; unlike `#retireRun` it doesn't require no open item (a finished card may be waiting) or no commits beyond base.
 
 ## 13. Remote access and security
 
@@ -492,24 +505,34 @@ The daemon can start agents that run code as you, so its API is guarded against:
 - `tenzo pair` → `device.pair` (local only): a 26-char random code, 10 minutes, single use; only its SHA-256 is stored (`pairings`). Every `tenzo pair` lifts the failed-attempt limit.
 - The link is `<TENZO_PUBLIC_URL>/pair#<code>`: the fragment never reaches a server, log or Referer. The page posts it to `POST /api/pair` (JSON, same origin); `exchange` creates a device with a fresh 256-bit token, stored as SHA-256 (`devices`).
 - Failed exchanges are rate-limited to 10 per minute globally (behind Serve every request is 127.0.0.1); a good code is tried first and always pairs.
-- The token travels only as `__Host-tenzo` (`HttpOnly; Secure; SameSite=Strict; Path=/`, 400 days). It needs HTTPS. `last_seen_at` is written at most once a minute. Revoking (`device.revoke`) stops the token and closes every open socket of the device (Pass and live) at once (`Devices.track`).
+- The token travels only as `__Host-tenzo` (`HttpOnly; Secure; SameSite=Strict; Path=/`, 400 days). It needs HTTPS. `last_seen_at` is written at most once a minute. Revoking (`device.revoke`) stops the token, deletes the device's push subscription, and closes every open socket of the device (Pass and live) at once (`Devices.track`).
 
 ### Live origin isolation (`live.ts`)
 
-- A second listener serves only `/live/<thread>/…`, proxying HTTP and WebSocket to the port the thread's agent exposed last (`engine.livePort`, active threads only). Paths are forwarded unchanged; `Host` and `Origin` are rewritten to `localhost:<port>`; hop-by-hop headers, `Service-Worker-Allowed` and `Clear-Site-Data` are dropped; `x-tenzo-live` marks forwarded requests and a request coming back with it is a loop (508).
+- A second listener serves only `/live/<thread>/…`, proxying to the port the thread's agent exposed last (`engine.livePort`, active threads only). Paths are forwarded unchanged and every forwarded request carries `x-tenzo-live: 1`. A request arriving with `x-tenzo-live` is a loop (508, HTTP and WebSocket alike).
+- **HTTP** (`liveHandler`): request hop-by-hop headers and `Host` are dropped (the upstream sees `localhost:<port>`), `Origin` is rewritten to `http://localhost:<port>` when present, `Accept-Encoding` is forced to `identity`, and Tenzo's cookies are stripped from `Cookie`. On the response, hop-by-hop headers, `Service-Worker-Allowed` and `Clear-Site-Data` are dropped (and `Content-Encoding`/`Content-Length` when fetch decoded the body), `Set-Cookie` for Tenzo's cookies is dropped, and an absolute `Location` pointing at the dev server (`localhost`, `127.0.0.1`, `[::1]` on that port) becomes relative. An upstream that answers with `x-tenzo-daemon` is Tenzo itself: 508.
+- **WebSocket** (`liveUpgrade`): after the Host/Origin checks and the live credential, the raw handshake is piped to the port with every request header except `Host`, `Origin` and `x-tenzo-live` (which it sets anew: `Host: localhost:<port>`, `Origin: http://localhost:<port>` when there was one) and with Tenzo's cookies stripped from `Cookie`. On the way back only the handshake response is filtered, dropping `Set-Cookie` lines for Tenzo's cookies; after that the bytes pass through as they are. These tunnels are not closed on daemon shutdown ([§3](#startup), [#52](https://github.com/clawdude/tenzo/issues/52)).
 - The main listener refuses the live origin (Origin check; `Sec-Fetch-Site: same-site` doesn't count as own page). The live listener never accepts `__Host-tenzo`, strips both Tenzo cookies from every request before it reaches a dev server, and drops any `Set-Cookie` for them, WebSocket handshakes included.
-- Remote access to live apps takes only `__Host-tenzo-live`: an HMAC-signed pass `<device>.<expiry>.<mac>` (key in `auth_keys`), checked against revocation on every request. A paired device's snapshot carries a 1-hour grant, renewed over its socket every 20 minutes; Open live goes through the **door** `/_tenzo/live?grant=…&to=/live/<thread>/…`, which sets the live cookie (1 day, never past the device's own cookie) and redirects. An Open live link is personal for that hour.
+- Remote access to live apps takes only `__Host-tenzo-live`: an HMAC-signed pass `<device>.<expiry>.<mac>` (key in `auth_keys`), checked against revocation on every request. A paired device's snapshot carries a 1-hour grant, renewed over its socket every 20 minutes; Open live goes through the **door** `/_tenzo/live?grant=…&to=/live/<thread>/…`, which sets the live cookie (1 day, never past the device's own cookie) and redirects. An Open live link is personal: anyone who opens a shared one within its hour gets a 1-day live cookie for that device (live apps only, never Tenzo), until it expires or the device is revoked.
 
 ### Push (`push.ts`)
 
 - VAPID keys in `push-keys.json`; contact `TENZO_PUSH_CONTACT` (default the project page, so your tailnet name isn't sent).
-- Subscriptions are accepted only for endpoints on known push services (`https`, default port, a host name under `googleapis.com`, `google.com`, `push.apple.com`, `push.services.mozilla.com`, `notify.windows.com`; no IP literals), checked on subscribe and before every send; keys must be a real P-256 point and a 16-byte secret.
-- What pushes: open, awake, quick-lane items that opened or came back from a snooze. Per thread, a 3 s debounce makes one push for the newest unannounced card; tag = thread id. Not to muted devices, nor to devices whose page is in view (a `visibility` frame, stale after 45 s). `Urgency: high`, TTL 1 h, `Topic` = thread. Retries after 5 s, 30 s, 2 min (or `Retry-After`) while still relevant; 404/410 forget the subscription. Test pushes at most once per 10 s per device.
+- Subscriptions are accepted only for endpoints on known push services (`https`, default port, a host name under `googleapis.com`, `google.com`, `push.apple.com`, `push.services.mozilla.com`, `notify.windows.com`; no IP literals), checked on subscribe and before every send; keys must be a real P-256 point and a 16-byte secret. Sends use `redirect: "error"` (`fetchSend`), so a push service can't redirect the daemon elsewhere: the SSRF guard depends on it.
+- What pushes: open, awake, quick-lane items that opened or came back from a snooze. Per thread, the first such card starts a fixed 3 s window (later cards don't extend it); when it ends, one push goes for the newest card not yet announced; tag = thread id. Not to muted devices, nor to devices whose page is in view: a socket that said `visibility: true` and has sent any frame (ping, command, visibility) in the last 45 s. `Urgency: high`, TTL 1 h, `Topic` = thread.
+- Retries only when the push service gave no answer, 429 or 5xx (other 4xx are not retried), after 5 s, 30 s, 2 min, each wait the larger of that and `Retry-After` (capped at 10 min), and only while the card is still open, still its thread's latest push, and the device still subscribed, unmuted and not looking; 404/410 forget the subscription.
+- Test pushes (`device.testPush`) go at most once per 10 s per device, regardless of mute and of `TENZO_PUSH_PREVIEW` (a fixed "Notifications work on <device>" message).
 - Payload privacy: thread title (≤ 60) and one line (≤ 120): a question's text, "Allow <tool>?" (never the command or input), proposal/ready headlines; never context. `TENZO_PUSH_PREVIEW=none` reduces every push to "A thread needs you." The Mac itself doesn't push.
 
 ### Tailscale setup (`tailscale.ts`, `tailscale-setup.ts`)
 
-`tenzo pair --tailscale` reads `tailscale status --json` and `tailscale serve status --json`, plans two HTTPS routes (default `:8443` → daemon port, `:8444` → live port; a port serving something else moves to the next free one), shows the exact commands and runs them after you confirm (`--yes` to skip). It never removes or changes other routes and never uses `--tcp`/`--tls-terminated-tcp` (`assertSafeServe`); it refuses while a raw TCP route points at Tenzo. It then aligns the daemon's `TENZO_ALLOWED_HOSTS`, `TENZO_LIVE_ORIGIN`, `TENZO_PUBLIC_URL` (editing only those keys of the launchd plist and restarting the service, or printing the restart command) and prints the pairing link and QR (`uqr`).
+`tenzo pair --tailscale` (`setUpTailscale`):
+
+1. Reads `tailscale status --json` and `tailscale serve status --json`. It refuses while a raw TCP route points at Tenzo's ports.
+2. Plans two HTTPS routes (`planServe`): the Pass (default `:8443` → daemon port) and live apps (default `:8444` → live port). A route that already points at the right local port is kept, on whatever port it has. Without a port option, a default port serving something else moves to the next free port; with `--https-port`/`--live-https-port`, a port serving something else is an error.
+3. Shows the missing routes' exact commands and runs them after you confirm (`--yes` skips it). It never removes or changes other routes and never uses `--tcp`/`--tls-terminated-tcp` (`assertSafeServe`).
+4. If the running daemon already has the matching `TENZO_ALLOWED_HOSTS`, `TENZO_LIVE_ORIGIN` and `TENZO_PUBLIC_URL`, it prints the pairing link and QR (`uqr`).
+5. Otherwise, with a launchd service: it shows the plist changes, asks again (also skipped by `--yes`), edits only those keys, restarts the service, waits up to 30 s for it, and then pairs. Without a service: it prints the `tenzo serve` command to restart with and exits with status 1 without pairing; run it again afterwards.
 
 ### Known limits
 
