@@ -58,6 +58,22 @@ On `/ws` the daemon sends a snapshot of active threads and open items, then ever
 | `TENZO_SNOOZE_MS` | 15 minutes | how long a swipe snoozes a card, in ms (e.g. `20000` to watch one come back) |
 | `TENZO_PUSH_PREVIEW` | `short` | what a notification says: `short` (the thread's name and a short line) or `none` ("A thread needs you."); see [Notifications](#notifications-web-push) |
 | `TENZO_PUSH_CONTACT` | Tenzo's project page | the `mailto:` or `https:` contact push services see (VAPID `sub`) |
+| `TENZO_SMOKE_CHROMIUM` | Playwright's cache | the Chromium `pnpm smoke` drives (not read by the daemon) |
+
+The daemon reads these once at start (`apps/daemon/src/config.ts`, which refuses nonsense loudly), except `TENZO_CLAUDE_PATH`, looked up at each session start. Tenzo also sets one variable *in each thread's environment*: `TENZO_LIVE_BASE=/live/<thread>/`, the base path a dev server must serve under to be exposed (see [Finished work](#finished-work-report-attach-expose)).
+
+What lives in `$TENZO_HOME` (created readable only by you):
+
+| Path | What |
+|---|---|
+| `environment-id` | this machine's stable identity (`env_` + 20 chars), stamped on every record and event |
+| `tenzo.db` | SQLite (WAL): the event log and its projections; migrations run at start (`apps/daemon/src/db.ts`), and a database newer than the code refuses to open |
+| `daemon.pid` | the lock: one daemon per home |
+| `worktrees/<project>/<thread-id>/` | threads' worktrees |
+| `attachments/<thread-id>/` | copies of screenshots agents attached; removed when the thread is archived |
+| `push-keys.json` | the VAPID key pair (0600) |
+| `automations.paused` | the automations off switch: exists = paused |
+| `daemon.log` | the launchd service's output (`tenzo service`) |
 
 ### Keep it running (macOS)
 
@@ -71,6 +87,14 @@ pnpm tenzo service uninstall                   # stops it and removes the agent
 ```
 
 `install` writes `~/Library/LaunchAgents/dev.tenzo.daemon.plist` (readable only by you) and loads it. The agent runs `tenzo serve` from this checkout with the Node that ran `install`, in the environment of the shell you ran it from: your `PATH` (so threads find `claude`, `git` and your MCP servers' commands), `TENZO_*` settings such as `TENZO_ALLOWED_HOSTS` and `TENZO_PORT`, and your Claude configuration (`CLAUDE_CONFIG_DIR`, `ANTHROPIC_*`, proxies). Terminal-session variables (`TERM*`, `TMUX*`, `SSH_*`, pnpm's, a parent Claude Code's) are left out, and `TENZO_HOME` and `TENZO_WEB_DIR` are written as absolute paths. Output goes to `$TENZO_HOME/daemon.log` (`~/.tenzo/daemon.log` by default). launchd starts the daemon again when it exits with an error, at most every 10 s; a clean stop (SIGTERM) leaves it stopped. After changing any of those settings, moving the checkout or upgrading Node, run `install` again: it replaces the old agent. Stop a `tenzo serve` you started by hand first: it holds the same `TENZO_HOME`, and the service retries until it can take it. `install` warns when the checkout is a linked git worktree (removing it would leave the service failing at every start) or when it runs inside Claude Code (the service would get that session's environment). Elsewhere than macOS, run `tenzo serve` under your own init system.
+
+### Redeploying after a merge
+
+1. `git pull` in the checkout the daemon runs from, then `pnpm install` if the lockfile changed.
+2. `pnpm build` (the daemon serves `apps/web/build`; its own TypeScript runs from source).
+3. Restart the daemon: `tenzo service install` again for the service (it reloads it), or stop and start `tenzo serve`. Running turns resume with a "Tenzo restarted" prompt; open questions stay on the Pass.
+4. Migrations run at start. A database newer than the code refuses to open: update rather than roll back.
+5. Prompt edits (`apps/daemon/prompts/*.md`) and project config edits need no restart: they apply at the next session or turn.
 
 ## Projects and threads
 
@@ -124,7 +148,7 @@ pnpm tenzo thread log <thread-id> [--follow]                 # the thread's even
 
 `pnpm parity` checks that a thread really has everything the terminal has: one real thread on haiku in a scratch project with a subagent, a skill, a hook and an MCP server, run through a scratch daemon, then a PASS/FAIL table. Re-run it after every adapter change; see [docs/PARITY.md](docs/PARITY.md).
 
-`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: each screen loaded directly, navigation and Close, a thread's timeline, the Pass's motion (with and without reduced motion), Automations, framing protection, and pairing from elsewhere; any page error, a second WebSocket or page load fails it. The full list of checks is in [docs/ARCHITECTURE.md §15](docs/ARCHITECTURE.md#15-testing-and-verification). It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
+`pnpm smoke` builds the web app and drives it in headless Chromium (iPhone emulation) against a scratch daemon, covering what unit tests can't see: each screen loaded directly, navigation and Close, a thread's timeline, the Pass's motion (with and without reduced motion), Automations, framing protection, and pairing from elsewhere; any page error, a second WebSocket or page load fails it. The full list of checks is in `tools/smoke/src/smoke.ts`. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`~/Library/Caches/ms-playwright` or `~/.cache/ms-playwright`; `pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium` installs it). CI runs it as a job of its own next to `pnpm check`, with Chromium cached; locally, run it after changing routes or navigation.
 
 ### Project config: `.tenzo/config.json`
 
@@ -188,6 +212,7 @@ An automation is a saved thread recipe in the same config, under `automations`, 
 pnpm tenzo automation list [project]          # schedule, next run, last run (thread, cost, how it went)
 pnpm tenzo automation run <project> <name>    # run it now
 pnpm tenzo automation pause | resume          # the off switch: no schedule starts a run while paused
+pnpm tenzo automation archive <project> <name> # archive its finished runs whose worktree is clean
 ```
 
 - **A run is an ordinary thread**: the normal create path, its own worktree and branch (`tenzo/<name>-<date>`), discuss first, your own permissions and settings. Its origin is `automation` (the Threads list says "automation: <name>"; `ThreadView.automation`), and its cards land on the Pass like any other. It can start threads with `start_thread`.
