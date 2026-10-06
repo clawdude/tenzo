@@ -303,6 +303,9 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 				if (event.turnId) failedTurns.add(event.turnId);
 				push({ kind: 'note', key: `note:${seq}`, at, text: event.payload.message, tone: 'fail' });
 				break;
+			case 'thread.noted':
+				push({ kind: 'note', key: `note:${seq}`, at, text: event.payload.message, tone: 'quiet' });
+				break;
 			case 'turn.completed': {
 				const { state, errorMessage } = event.payload;
 				if (state === 'interrupted') {

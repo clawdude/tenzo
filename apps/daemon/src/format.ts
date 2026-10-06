@@ -1,6 +1,14 @@
-import type { QueueItem, RuntimeEvent } from "@tenzo/contracts";
+import type { QueueItem, RuntimeEvent, ThreadView } from "@tenzo/contracts";
 
 /** How the CLI shows threads' events and items. */
+
+/** A thread as a row of `tenzo thread list`: id, project, state, phase, branch, title. */
+export function threadRow(t: ThreadView): string[] {
+  // An archived thread's last phase says nothing more; whether it landed does.
+  const state = t.status === "archived" ? [t.landed ? "archived · landed" : "archived", ""] : [t.activity, t.phase];
+  const title = t.origin === "automation" ? `${t.title} (automation: ${t.automation ?? "?"})` : t.title;
+  return [t.id, t.projectName, ...state, t.branch, title];
+}
 
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */
 export function formatItem(item: QueueItem, threadTitle?: string): string {
@@ -101,8 +109,8 @@ function describe(event: RuntimeEvent): string {
       const p = event.payload;
       return [
         p.state,
-        p.costUsd === undefined ? undefined : `$${p.costUsd.toFixed(4)}`,
-        p.durationMs === undefined ? undefined : `${(p.durationMs / 1000).toFixed(1)}s`,
+        costOf(p.turnCostUsd, p.costUsd),
+        timeOf(p.durationMs, p.waitedMs),
         p.errorMessage,
         p.stoppedBy === "budget" ? "stopped at its spend limit" : undefined,
       ]
@@ -170,6 +178,7 @@ function describe(event: RuntimeEvent): string {
     case "budget.exceeded":
       return event.payload.message;
     case "runtime.error":
+    case "thread.noted":
       return event.payload.message;
     case "config.checked":
       return event.payload.problem ?? "fine again";
@@ -182,6 +191,22 @@ function describe(event: RuntimeEvent): string {
     case "error.resolved":
       return event.payload.action + (event.payload.text ? `: ${quote(event.payload.text)}` : "");
   }
+}
+
+/** The turn's own cost, and the session's running total, labelled as such. */
+function costOf(turn: number | undefined, session: number | undefined): string | undefined {
+  if (session === undefined) return undefined;
+  const total = `$${session.toFixed(4)} session total`;
+  return turn === undefined ? total : `$${turn.toFixed(4)} this turn (${total})`;
+}
+
+/** How long the turn took: working, and waiting on you, when the daemon measured that. */
+function timeOf(durationMs: number | undefined, waitedMs: number | undefined): string | undefined {
+  if (durationMs === undefined) return undefined;
+  const seconds = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
+  if (waitedMs === undefined) return `${seconds(durationMs)} wall clock`;
+  const working = `${seconds(Math.max(0, durationMs - waitedMs))} working`;
+  return waitedMs > 0 ? `${working}, ${seconds(waitedMs)} waiting on you` : working;
 }
 
 function quote(text: string): string {

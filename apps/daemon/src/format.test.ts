@@ -1,7 +1,7 @@
-import type { QueueItem, ThreadId } from "@tenzo/contracts";
+import { type QueueItem, type ThreadId, ThreadView } from "@tenzo/contracts";
 import { describe, expect, it } from "vitest";
 import { answerFromWords } from "./answers.ts";
-import { formatEvent, formatItem } from "./format.ts";
+import { formatEvent, formatItem, threadRow } from "./format.ts";
 
 const THREAD = "thr_abcdefghij0123456789" as ThreadId;
 
@@ -20,7 +20,27 @@ describe("formatEvent", () => {
         turnId: "11111111-1111-4111-8111-111111111111",
         payload: { state: "completed", costUsd: 0.01234, durationMs: 5700 },
       }),
-    ).toBe("turn.completed       completed · $0.0123 · 5.7s");
+    ).toBe("turn.completed       completed · $0.0123 session total · 5.7s wall clock");
+    const turn = { ...base, type: "turn.completed", turnId: "11111111-1111-4111-8111-111111111111" } as const;
+    // What the daemon measured: this turn's own cost, and its time working and waiting on you.
+    expect(
+      formatEvent({
+        ...turn,
+        payload: { state: "completed", costUsd: 0.2, turnCostUsd: 0.03, durationMs: 42_400, waitedMs: 30_100 },
+      }),
+    ).toBe(
+      "turn.completed       completed · $0.0300 this turn ($0.2000 session total) · 12.3s working, 30.1s waiting on you",
+    );
+    expect(
+      formatEvent({ ...turn, payload: { state: "completed", costUsd: 0.2, turnCostUsd: 0.2, durationMs: 5700, waitedMs: 0 } }),
+    ).toBe("turn.completed       completed · $0.2000 this turn ($0.2000 session total) · 5.7s working");
+    expect(
+      formatEvent({
+        ...base,
+        type: "thread.noted",
+        payload: { message: "Started from your local main, which has diverged from origin/main." },
+      }),
+    ).toBe("thread.noted         Started from your local main, which has diverged from origin/main.");
     expect(
       formatEvent({
         ...base,
@@ -226,5 +246,40 @@ describe("formatItem", () => {
 
   it("says when answering resumes a stopped agent", () => {
     expect(formatItem({ ...item, detached: true })).toMatch(/answering resumes it/);
+  });
+});
+
+describe("threadRow", () => {
+  const view = ThreadView.parse({
+    id: THREAD,
+    environmentId: "env_abcdefghij0123456789",
+    projectId: "prj_abcdefghij0123456789",
+    projectName: "app",
+    title: "Fix the login bug",
+    branch: "tenzo/fix-the-login-bug",
+    worktreePath: "/tmp/wt",
+    status: "active",
+    agent: "claude",
+    model: null,
+    createdAt: "2026-10-02T00:00:00.000Z",
+    updatedAt: "2026-10-02T00:00:00.000Z",
+    archivedAt: null,
+    phase: "landing",
+    activity: "working",
+    working: true,
+    queued: 0,
+    openItems: 0,
+    lastSeq: 1,
+    activeAt: "2026-10-02T00:00:00.000Z",
+  });
+
+  it("shows an active thread's activity and phase", () => {
+    expect(threadRow(view)).toEqual([THREAD, "app", "working", "landing", view.branch, view.title]);
+  });
+
+  it("shows an archived thread as archived, and whether it landed, not its last phase", () => {
+    const archived = { ...view, status: "archived" as const, activity: "idle" as const };
+    expect(threadRow(archived).slice(2, 4)).toEqual(["archived", ""]);
+    expect(threadRow({ ...archived, landed: true }).slice(2, 4)).toEqual(["archived · landed", ""]);
   });
 });

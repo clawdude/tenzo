@@ -8,6 +8,7 @@ import {
   enqueuePrompt,
   eventPage,
   getItem,
+  hasLanded,
   lastSeq,
   liveThreads,
   loadFoldState,
@@ -176,6 +177,19 @@ describe("event store", () => {
     for (const e of log()) appendEvent(store, e);
     await archiveThread(store, threadId);
     expect(openItems(store)).toEqual([]);
+  });
+
+  it("counts a thread landed only while its latest turn is the one that landed it", () => {
+    const LATER = "22222222-2222-4222-8222-222222222222" as TurnId;
+    const landed = ev({ type: "thread.landed", turnId: TURN, payload: { url: "https://example.invalid/pr/1" } });
+    appendEvent(store, ev({ type: "turn.started", turnId: TURN, payload: { prompt: "land it" } }));
+    expect(hasLanded(store, threadId)).toBe(false);
+    appendEvent(store, landed);
+    appendEvent(store, ev({ type: "turn.completed", turnId: TURN, payload: { state: "completed" } }));
+    expect(hasLanded(store, threadId)).toBe(true);
+    // It carried on with more work after landing: no longer what it stands for.
+    appendEvent(store, ev({ type: "turn.started", turnId: LATER, payload: { prompt: "one more thing" } }));
+    expect(hasLanded(store, threadId)).toBe(false);
   });
 });
 

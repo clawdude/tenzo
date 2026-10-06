@@ -10,7 +10,8 @@ import {
 import { join, relative } from "node:path";
 import { ThreadId } from "@tenzo/contracts";
 import { afterAll, beforeEach, describe, expect, it } from "vitest";
-import { addWorktree } from "./git.ts";
+import { diffStat } from "./diff.ts";
+import { addWorktree, commitsAhead, forkPoint } from "./git.ts";
 import { addProject, type Project, removeProject } from "./projects.ts";
 import { slugify } from "./slug.ts";
 import { openStore, type Store } from "./store.ts";
@@ -116,6 +117,42 @@ describe("createThread", () => {
 
     await archiveThread(store, first.id); // its branch is kept, so its name stays taken
     expect((await createThread(store, "app", "Add search")).slug).toBe("add-search-3");
+  });
+
+  it("starts from what landed on origin when your default branch is behind, which it leaves alone", async () => {
+    const origin = join(tempDir("origin"), "origin.git");
+    sh(tempDir(), "init", "--quiet", "--bare", "--initial-branch", "main", origin);
+    sh(repo, "remote", "add", "origin", origin);
+    sh(repo, "push", "--quiet", "origin", "main");
+    const yours = sh(repo, "rev-parse", "main");
+    const other = join(tempDir("other"), "other");
+    sh(tempDir(), "clone", "--quiet", origin, other);
+    const landed = commitFile(other, "MERGED.md", "Merged work.\n");
+    sh(other, "push", "--quiet", "origin", "main");
+    const notes: string[] = [];
+
+    const thread = await createThread(store, "app", "next", { onBaseNote: (n) => notes.push(n) });
+
+    expect(sh(thread.worktreePath, "rev-parse", "HEAD")).toBe(landed);
+    expect(sh(repo, "rev-parse", "main")).toBe(yours);
+    expect(notes).toEqual([]);
+
+    // Yours and origin's diverge: yours, and a note saying so.
+    commitFile(thread.worktreePath, "THREAD.md", "The thread's work.\n");
+    const local = commitFile(repo, "LOCAL.md", "Local work.\n");
+    const diverged = await createThread(store, "app", "again", { onBaseNote: (n) => notes.push(n) });
+    expect(sh(diverged.worktreePath, "rev-parse", "HEAD")).toBe(local);
+    expect(notes).toEqual([expect.stringMatching(/^Started from your local main, which has diverged/)]);
+
+    // The first thread's own work is still just its own, measured from its nearest fork point
+    // (origin's), not from your main, which now looks older to it: in its worktree and by branch.
+    const own = async (cwd: string, head?: string) => {
+      const base = await forkPoint(cwd, "main", head);
+      const diff = await diffStat(cwd, base, head ? { head } : {});
+      return { files: diff.files.map((f) => f.path), ahead: await commitsAhead(cwd, base, head ?? "HEAD") };
+    };
+    expect(await own(thread.worktreePath)).toEqual({ files: ["THREAD.md"], ahead: 1 });
+    expect(await own(repo, `refs/heads/${thread.branch}`)).toEqual({ files: ["THREAD.md"], ahead: 1 });
   });
 
   it("refuses an unknown project or a repo with no commits", async () => {

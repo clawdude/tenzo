@@ -16,7 +16,7 @@ import { Engine, type EngineChange, type EngineOptions, MAX_CHILD_THREADS, sente
 import { STALLED_PROMPT } from "./prompts.ts";
 import { addProject, findProject } from "./projects.ts";
 import { openStore, type Store } from "./store.ts";
-import { initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
+import { commitFile, initRepo, removeTempDirs, sh, tempDir } from "./testing.ts";
 import { getThread, projectOf } from "./threads.ts";
 
 afterAll(removeTempDirs);
@@ -1037,6 +1037,7 @@ describe("Engine: review actions and landing", () => {
     expect(d.engine.view(thread.id).status).toBe("active"); // not mid-turn
     session.complete();
     await expect.poll(() => d.engine.view(thread.id).status).toBe("archived");
+    expect(d.engine.view(thread.id).landed).toBe(true);
     expect(session.stopped).toBe(true);
     expect(existsSync(thread.worktreePath)).toBe(false);
     expect(sh(repoOf(d, thread.id), "branch", "--list", thread.branch)).toContain(thread.branch);
@@ -2481,5 +2482,100 @@ describe("Engine: a thread's own model (thread.setModel)", () => {
     expect(Command.safeParse({ type: "thread.setModel", threadId: thread.id, model: "x", thinking: "max" }).success).toBe(false);
     await d.engine.archive(thread.id);
     expect(() => d.engine.setModel(thread.id, { model: "opus" })).toThrow(/archived/);
+  });
+});
+
+describe("Engine: where a thread starts, and what its turns took", () => {
+  it("says so in the thread when it starts from a default branch diverged from origin's", async () => {
+    const d = daemon();
+    const repo = findProject(d.store, "app").path;
+    const origin = join(tempDir("origin"), "origin.git");
+    sh(tempDir(), "init", "--quiet", "--bare", "--initial-branch", "main", origin);
+    sh(repo, "remote", "add", "origin", origin);
+    sh(repo, "push", "--quiet", "origin", "main");
+    const same = await d.engine.createThread({ project: "app", title: "In step" });
+    expect(d.engine.events(same.id).events).toEqual([]);
+
+    const other = join(tempDir("other"), "other");
+    sh(tempDir(), "clone", "--quiet", origin, other);
+    commitFile(other, "MERGED.md", "Merged work.\n");
+    sh(other, "push", "--quiet", "origin", "main");
+    // Cut from origin's (yours is behind); its own work only, before and after yours moves on.
+    const behind = await d.engine.createThread({ project: "app", title: "Behind" });
+    commitFile(behind.worktreePath, "THREAD.md", "The thread's work.\n");
+    const paths = async () => (await d.engine.diff(behind.id)).files.map((f) => f.path);
+    expect(await paths()).toEqual(["THREAD.md"]);
+    const local = commitFile(repo, "LOCAL.md", "Local work.\n");
+    expect(await paths()).toEqual(["THREAD.md"]);
+
+    const thread = await d.engine.createThread({ project: "app", title: "Diverged" });
+
+    expect(sh(thread.worktreePath, "rev-parse", "HEAD")).toBe(local);
+    expect(d.engine.events(thread.id).events.map((e) => e.event)).toEqual([
+      expect.objectContaining({
+        type: "thread.noted",
+        payload: { message: expect.stringMatching(/^Started from your local main, which has diverged from origin\/main/) },
+      }),
+    ]);
+  });
+
+  it("gives each turn its own cost, and how long of it was spent waiting on you", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date("2026-10-06T10:00:00Z"));
+      const d = daemon();
+      const thread = await d.engine.createThread({ project: "app", prompt: "Paint it" });
+      await settle();
+      const session = d.adapter.last;
+      session.ask([color]);
+      await settle();
+      vi.setSystemTime(new Date("2026-10-06T10:00:30Z"));
+      const [item] = d.engine.snapshot().items;
+      await d.engine.answer(item?.id ?? "", blue);
+      await settle();
+      session.complete("completed", { costUsd: 0.1 });
+      await settle();
+      d.engine.send(thread.id, "More");
+      await settle();
+      session.complete("completed", { costUsd: 0.25 });
+      await settle();
+
+      const turns = d.engine
+        .events(thread.id)
+        .events.flatMap((e) => (e.event.type === "turn.completed" ? [e.event.payload] : []));
+      expect(turns).toEqual([
+        { state: "completed", costUsd: 0.1, turnCostUsd: 0.1, waitedMs: 30_000 },
+        { state: "completed", costUsd: 0.25, turnCostUsd: 0.15, waitedMs: 0 },
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("counts a new session's spend from zero: the agent's running total starts again", async () => {
+    const d = daemon();
+    const thread = await d.engine.createThread({ project: "app", prompt: "One" });
+    await settle();
+    const first = d.adapter.last;
+    first.complete("completed", { costUsd: 0.3 });
+    await settle();
+    first.crash("API error");
+    await settle();
+    d.engine.send(thread.id, "Two");
+    await settle();
+    const second = d.adapter.last;
+    expect(second).not.toBe(first);
+    // More than the last session's total, yet all of it this session's: not 0.4 - 0.3.
+    second.complete("completed", { costUsd: 0.4 });
+    await settle();
+
+    const costs = d.engine
+      .events(thread.id)
+      .events.flatMap((e) => (e.event.type === "turn.completed" ? [e.event.payload] : []))
+      .map(({ costUsd, turnCostUsd }) => ({ costUsd, turnCostUsd }));
+    expect(costs).toEqual([
+      { costUsd: 0.3, turnCostUsd: 0.3 },
+      { costUsd: 0.4, turnCostUsd: 0.4 },
+    ]);
   });
 });

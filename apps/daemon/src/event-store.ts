@@ -266,6 +266,26 @@ export function threadsToWake(store: Store): ThreadId[] {
 }
 
 /**
+ * Whether the thread stands landed: its agent's `landed` passed (git agreed) in its latest turn,
+ * which is what archives it. One that carried on with more work after landing doesn't.
+ */
+export function hasLanded(store: Store, threadId: ThreadId): boolean {
+  return Boolean(
+    store.db
+      .prepare(
+        `SELECT 1 FROM events l
+         WHERE l.thread_id = :thread AND l.type = 'thread.landed'
+           AND NOT EXISTS (
+             SELECT 1 FROM events s
+             WHERE s.thread_id = :thread AND s.type = 'turn.started' AND s.seq > l.seq
+           )
+         LIMIT 1`,
+      )
+      .get({ thread: threadId }),
+  );
+}
+
+/**
  * Active threads whose agent said they landed (`landed`) in their latest turn: the daemon
  * archives them. A turn after the landing (you told it something more) means it carries on.
  */

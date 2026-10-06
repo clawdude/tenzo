@@ -58,6 +58,7 @@ import {
   enqueuePrompt,
   eventPage,
   getItem,
+  hasLanded,
   landedThreads,
   lastEvent,
   liveThreads,
@@ -73,7 +74,7 @@ import {
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { branchExists, commitsAhead, hasChanges, landedOn, resolveBase, stopDetachedGit } from "./git.ts";
+import { branchExists, commitsAhead, forkPoint, hasChanges, landedOn, stopDetachedGit } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
   automationsOf,
@@ -238,6 +239,70 @@ interface Live {
   restarted: boolean;
   /** The next turn goes without asking the session to switch first (a switch timed out). */
   asIs: boolean;
+  /** What the session's turns cost and how long they waited on you (`measureTurn`). */
+  clock: TurnClock;
+}
+
+/** A session's running figures, to give each `turn.completed` what that turn alone took. */
+interface TurnClock {
+  /** The agent's running total at its last turn's end (it starts again at 0 with each session). */
+  spentUsd: number;
+  /** Asks open now (a question, a permission, a proposal), by request id. */
+  asking: Set<string>;
+  /** Since when at least one ask has been open, in ms; null while none is. */
+  waitingSince: number | null;
+  /** How long the current turn has waited on you so far, in ms. */
+  waitedMs: number;
+}
+
+const RESOLVES_ASK = new Set<RuntimeEvent["type"]>([
+  "user-input.resolved",
+  "request.resolved",
+  "proposal.resolved",
+]);
+
+/**
+ * Keeps `clock` up to date with `event`, and gives a `turn.completed` the turn's own cost (the
+ * agent reports its session's running total) and how long it waited on you (the agent's
+ * duration counts that too). By the events' own times.
+ */
+export function measureTurn(clock: TurnClock, event: RuntimeEvent): RuntimeEvent {
+  const at = Date.parse(event.createdAt);
+  const pause = () => {
+    if (clock.waitingSince !== null) clock.waitedMs += Math.max(0, at - clock.waitingSince);
+    clock.waitingSince = null;
+  };
+  if (isAsk(event)) {
+    if (clock.asking.size === 0) clock.waitingSince = at;
+    clock.asking.add(event.requestId);
+  } else if (RESOLVES_ASK.has(event.type) && "requestId" in event) {
+    if (clock.asking.delete(event.requestId) && clock.asking.size === 0) pause();
+  } else if (event.type === "turn.started") {
+    clock.waitedMs = 0;
+    clock.waitingSince = clock.asking.size > 0 ? at : null;
+  } else if (event.type === "turn.completed") {
+    pause();
+    const waitedMs = clock.waitedMs;
+    clock.waitedMs = 0;
+    clock.waitingSince = clock.asking.size > 0 ? at : null;
+    const { costUsd } = event.payload;
+    let turnCostUsd: number | undefined;
+    if (costUsd !== undefined) {
+      // A total lower than the last one is a new count (the agent started again).
+      turnCostUsd = round(costUsd >= clock.spentUsd ? costUsd - clock.spentUsd : costUsd);
+      clock.spentUsd = costUsd;
+    }
+    return {
+      ...event,
+      payload: { ...event.payload, ...(turnCostUsd === undefined ? {} : { turnCostUsd }), waitedMs },
+    };
+  }
+  return event;
+}
+
+/** Rounded to a millionth of a dollar: what subtracting two totals leaves is noise below that. */
+function round(usd: number): number {
+  return Math.round(usd * 1e6) / 1e6;
 }
 
 export class Engine {
@@ -407,13 +472,17 @@ export class Engine {
     const run = input.run;
     // An automation's run takes its model and thinking as the thread's own choice.
     const own = run ? runThreadOptions(run.automation) : input.model ? { model: input.model } : {};
+    let baseNote = null as string | null; // set by createThread's callback
     const thread = await createThread(this.store, input.project, title, {
       ...own,
       ...(prompt && !given ? { naming: prompt } : {}),
       ...(client ? { client } : {}),
       ...(input.parent ? { parent: input.parent } : {}),
       ...(run ? { automation: run.name } : {}),
+      onBaseNote: (note) => (baseNote = note),
     });
+    // Where it started, when that needs saying (a default branch diverged from origin's).
+    if (baseNote) this.#append(draft(thread, { type: "thread.noted", payload: { message: baseNote } }));
     // The run is on record before its session starts, so the session starts with its budget.
     transaction(this.store, () => {
       if (run) {
@@ -622,10 +691,12 @@ export class Engine {
   async diff(threadId: string): Promise<ThreadDiff> {
     const thread = getThread(this.store, threadId);
     const project = projectOf(this.store, thread);
-    const base = await resolveBase(project.path, project.defaultBranch);
     const options = { baseName: project.defaultBranch };
+    // From its nearest fork point off yours or origin's default branch: never counting work
+    // that was merged upstream as the thread's own.
     // An archived thread's worktree is gone; its branch is kept, so compare that.
     if (thread.status === "active" && existsSync(thread.worktreePath)) {
+      const base = await forkPoint(thread.worktreePath, project.defaultBranch);
       return diffStat(thread.worktreePath, base, options);
     }
     if (!(await branchExists(project.path, thread.branch))) {
@@ -633,7 +704,9 @@ export class Engine {
         `${thread.branch} is gone (deleted since the thread was archived), so there is no change to show.`,
       );
     }
-    return diffStat(project.path, base, { ...options, head: `refs/heads/${thread.branch}` });
+    const head = `refs/heads/${thread.branch}`;
+    const base = await forkPoint(project.path, project.defaultBranch, head);
+    return diffStat(project.path, base, { ...options, head });
   }
 
   snapshot(): Snapshot {
@@ -1238,8 +1311,9 @@ export class Engine {
     if (openItems(this.store, threadId).length > 0) return false;
     if (!existsSync(thread.worktreePath) || (await hasChanges(thread.worktreePath))) return false;
     const project = projectOf(this.store, thread);
-    const base = await resolveBase(project.path, project.defaultBranch);
-    if ((await commitsAhead(project.path, base, `refs/heads/${thread.branch}`)) > 0) return false;
+    const head = `refs/heads/${thread.branch}`;
+    const base = await forkPoint(project.path, project.defaultBranch, head);
+    if ((await commitsAhead(project.path, base, head)) > 0) return false;
     try {
       await this.archive(threadId, {
         unless: () => this.#unfinished(threadId) ?? (openItems(this.store, threadId).length > 0 ? "It has an open item." : null),
@@ -1730,6 +1804,7 @@ export class Engine {
       abandoned: false,
       restarted,
       asIs: false,
+      clock: { spentUsd: 0, asking: new Set(), waitingSince: null, waitedMs: 0 },
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -1766,7 +1841,8 @@ export class Engine {
     }
   }
 
-  #ingest(live: Live, event: RuntimeEvent): void {
+  #ingest(live: Live, reported: RuntimeEvent): void {
+    const event = measureTurn(live.clock, reported);
     if (isAsk(event)) {
       const index = matchReply(live.standing, event);
       const [reply] = index === -1 ? [] : live.standing.splice(index, 1);
@@ -1937,6 +2013,7 @@ export class Engine {
       updatedAt: thread.updatedAt,
       archivedAt: thread.archivedAt,
       phase: runtime.phase,
+      landed: hasLanded(this.store, thread.id),
       origin: thread.origin,
       parentId: thread.parentId,
       automation: thread.automation,

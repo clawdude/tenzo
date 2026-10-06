@@ -64,7 +64,7 @@ A pnpm workspace; Node ≥ 22.18 runs the daemon's TypeScript directly, with no 
 
 `discussing → building → review → landing → archived` (archived is the thread's status, not a phase).
 
-1. **Create.** The daemon cuts a worktree on a new branch `tenzo/<slug>` from the default branch and inserts the thread (idempotent by `clientKey`). Without a title, the prompt's first words stand in until a one-shot `claude` on haiku names it.
+1. **Create.** The daemon fetches the default branch from origin (bounded and non-interactive; a failure is let go), cuts a worktree on a new branch `tenzo/<slug>` from the newer of your local default branch and origin's ([D7](#d7-one-worktree-and-branch-per-thread)), and inserts the thread (idempotent by `clientKey`). If the two have diverged, a `thread.noted` event says it started from yours. Without a title, the prompt's first words stand in until a one-shot `claude` on haiku names it.
 2. **Discuss.** The session runs with `discuss.md`. The agent reads, asks if it must, and calls `propose(summary)`, which waits: a proposal card goes on the Pass.
 3. **Build.** *Build it* returns from `propose` with the approval and `build.md`, switches to the build model inside the same turn, and the phase becomes building. Follow-up messages run directly.
 4. **Report.** `report(...)` puts a finished card on the Pass (handoff note, check badges, screenshots from `attach`, a live link from `expose`) and the thread enters review; the agent ends its turn.
@@ -125,8 +125,9 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 
 ### D7. One worktree and branch per thread
 - **Decision.** Each thread gets `$TENZO_HOME/worktrees/<project>/<thread>` on branch `tenzo/<slug>` (`--no-track`) from the default branch. Archive removes the worktree and keeps the branch. Tenzo writes nothing into your repo and clones nothing.
-- **Why.** Parallel agents on one checkout trample each other and your own work.
-- **Trade-off.** Disk per thread; a dev server must serve under `/live/<thread>/` to be exposed.
+- **Base.** Creating a thread first fetches `origin/<default>` (the same non-interactive fetch as D9's, capped at 10 s; failure or no origin: carry on with what is there), then branches from whichever of `<default>` and `origin/<default>` contains the other. When they have diverged it branches from your local one and records a `thread.noted` event saying so. Only the remote-tracking ref moves: Tenzo never updates, resets or checks out your branches. A thread's diff (and an automation run's "anything to keep?" check) is measured from its nearest fork point off either `<default>` or `origin/<default>`, so work merged upstream never counts as the thread's, whichever it was cut from and however the two have moved since.
+- **Why.** Parallel agents on one checkout trample each other and your own work. After a thread lands, origin is ahead of a local default branch you haven't pulled; a thread cut from the stale one would miss the merged work.
+- **Trade-off.** Disk per thread; a dev server must serve under `/live/<thread>/` to be exposed. Creating a thread can wait up to 10 s on an unresponsive origin.
 
 ### D8. Items survive restarts: detached answers and fingerprints
 - **Decision.** When a session ends with a question, permission or proposal open, the card stays on the Pass, marked detached. Your answer is delivered as a message, with a standing reply attached. If the resumed agent asks exactly the same thing (same SHA-256 fingerprint over the tool name and its full input), the engine answers from the standing reply; anything that differs is asked again. A cut-short turn is resumed once; a second interruption becomes an error card.
