@@ -1,6 +1,6 @@
 # Parity project
 
-The test project of Tenzo's feature-parity check (`docs/PARITY.md`). `pnpm parity` copies this
+The test project of Tenzo's feature-parity check (`tools/parity/README.md`). `pnpm parity` copies this
 folder to a temporary directory, renames `dot-claude/` to `.claude/` and `dot-mcp.json` to
 `.mcp.json`, makes it a git repo, and runs one Tenzo thread in it. Stored under the inert names,
 the config stays invisible to Claude Code sessions working on Tenzo itself.

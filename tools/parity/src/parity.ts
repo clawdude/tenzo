@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Tenzo's feature-parity check (docs/PARITY.md): one real Claude Code thread, run by a scratch
+ * Tenzo's feature-parity check (tools/parity/README.md): one real Claude Code thread, run by a scratch
  * `tenzo serve` and driven through the real `tenzo` CLI, in a scratch copy of
  * `tools/parity/fixture`, then a PASS/FAIL table for the subagent, the skill, the hook and the
  * MCP server. Uses your `claude` and your login; never touches ~/.tenzo, a running daemon's
