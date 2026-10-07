@@ -93,7 +93,7 @@ start, send and answer then show the thread's events until it needs you or goes 
 (--detach: don't wait; --json: events as JSON lines). Arguments after a bare -- are never
 options: tenzo thread new app -- --weird title
 
-Environment (details: README.md):
+Environment (details: docs/GUIDE.md):
   TENZO_PORT           port to listen on, and where the CLI finds the daemon (default 4780)
   TENZO_LIVE_PORT      port of the live listener for threads' live apps (default TENZO_PORT + 1)
   TENZO_LIVE_ORIGIN    the live listener's public origins, comma-separated
@@ -368,7 +368,7 @@ async function automation([sub, ...rest]: string[]): Promise<void> {
 }
 
 async function pair(args: string[]): Promise<void> {
-  // Raw TCP through Serve makes every client local, unpaired (README, docs/REMOTE.md).
+  // Raw TCP through Serve makes every client local, unpaired (docs/REMOTE.md).
   for (const tcp of ["--tcp", "--tls-terminated-tcp"]) {
     if (args.some((a) => a === tcp || a.startsWith(`${tcp}=`))) {
       throw new TenzoError(
