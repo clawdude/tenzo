@@ -52,5 +52,19 @@
       "Bash(rm -rf ~*)",
       "Bash(rm -rf ..*)"
     ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR/.claude/hooks/prune-worktrees.sh\"",
+            "async": true,
+            "timeout": 600
+          }
+        ]
+      }
+    ]
   }
 }
