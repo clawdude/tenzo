@@ -11,7 +11,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
-  PermissionModeName,
+  DefaultPermissionMode,
   RequestId,
   RuntimeEvent,
   ThinkingLevel,
@@ -483,8 +483,8 @@ function startSession(
     mcpServers: {
       [TENZO_MCP_SERVER]: tenzoMcpServer(host, { liveBase: liveBase(input.threadId) }),
     },
-    // No permissionMode unless the project's config sets one: the user's own defaultMode
-    // applies, in every phase.
+    // No permissionMode unless the project's config or TENZO_DEFAULT_PERMISSIONS sets one: the
+    // user's own defaultMode applies, in every phase.
     ...permissionOptions(input.permissionMode),
     canUseTool,
     env: {
@@ -781,10 +781,6 @@ export function modelOptions(choice: ModelChoice): Pick<Options, "model" | "thin
 }
 
 /**
- * The project's permission mode as the SDK's option, or nothing. Only modes a repo may set
- * (`PermissionModeName`): never one that needs the SDK's dangerous opt-in.
- */
-/**
  * An automation run's spend cap as `maxBudgetUsd`, which Claude counts from this session's start
  * (a resumed one too): what is left of the cap. Claude ends the turn there by itself
  * (`error_max_budget_usd`, reported as stopped by the budget). None: no option, as in a terminal.
@@ -795,7 +791,11 @@ export function budgetOptions(budget: SpendBudget | undefined): Pick<Options, "m
   return { maxBudgetUsd: Math.max(0.01, budget.capUsd - budget.spentUsd) };
 }
 
-export function permissionOptions(mode: PermissionModeName | undefined): Pick<Options, "permissionMode"> {
+/**
+ * The thread's permission mode as the SDK's option, or nothing. Never one that needs the SDK's
+ * dangerous opt-in (`DefaultPermissionMode`).
+ */
+export function permissionOptions(mode: DefaultPermissionMode | undefined): Pick<Options, "permissionMode"> {
   return mode ? { permissionMode: mode } : {};
 }
 

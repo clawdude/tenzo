@@ -31,6 +31,14 @@ export type LandingRule = z.infer<typeof LandingRule>;
 export const PermissionModeName = z.enum(["default", "acceptEdits", "dontAsk"]);
 export type PermissionModeName = z.infer<typeof PermissionModeName>;
 
+/**
+ * The modes the daemon's own `TENZO_DEFAULT_PERMISSIONS` may name for every thread: what a repo
+ * may set, and `auto`, because that setting is yours and not the repo's. Not `bypassPermissions`,
+ * which needs the SDK's dangerous opt-in and belongs in your own settings file.
+ */
+export const DefaultPermissionMode = z.enum([...PermissionModeName.options, "auto"]);
+export type DefaultPermissionMode = z.infer<typeof DefaultPermissionMode>;
+
 /** Modes a `.tenzo/` file may never set, and where they belong instead. */
 export const USER_ONLY_MODES = ["auto", "bypassPermissions"] as const;
 

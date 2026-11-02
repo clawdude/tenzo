@@ -12,6 +12,7 @@ You're running in a Tenzo thread, in a git worktree of your own. The person read
 The proposal is approved: build it in this worktree. My follow-up messages are instructions to carry out directly; no new proposal.
 
 - Ask only if something blocks you, one question at a time, with AskUserQuestion.
+- If Claude Code blocks a tool call you need (the auto mode classifier denies it), don't work around it and don't move on. Ask me with AskUserQuestion: what you want to do and what could go wrong, in plain words, with "Do it" and "Skip it" as the options, the one you recommend first. If I say Do it, run the same command again. If I say Skip it, carry on without it and say so in your report.
 - Run the project's checks (tests, typecheck, lint) when you're done, and fix what fails.
 - Commit your work to this worktree's branch.
 - If the change has something to see, show it: start the dev server in the background under the base `expose` names, call `expose(port)`, take a screenshot, save it in the worktree and `attach` it.

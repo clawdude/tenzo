@@ -141,7 +141,7 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 - **Trade-off.** A second Tailscale route. Live apps share one origin with each other. Without `lsof` the port is unchecked. An Open live link grants whoever opens it within the hour your device's access to live apps for up to a day.
 
 ### D11. Repo-controlled config is untrusted
-- **Decision.** `.tenzo/config.json` and `local.json` are read only from regular files inside the repo (no symlinks, ≤ 64 KB, re-checked on the open file). `permissions` may only be `default`, `acceptEdits` or `dontAsk`; `auto` and `bypassPermissions` belong in your own `~/.claude/settings.json`. Automation definitions can't set a permission mode. The automations off switch lives in `$TENZO_HOME`, not the repo. An invalid config never stops a thread: it runs on defaults and one config card says what's wrong.
+- **Decision.** `.tenzo/config.json` and `local.json` are read only from regular files inside the repo (no symlinks, ≤ 64 KB, re-checked on the open file). `permissions` may only be `default`, `acceptEdits` or `dontAsk`; `auto` belongs to the daemon's own `TENZO_DEFAULT_PERMISSIONS` (D18) or your `~/.claude/settings.json`, `bypassPermissions` only to the latter. Automation definitions can't set a permission mode. The automations off switch lives in `$TENZO_HOME`, not the repo. An invalid config never stops a thread: it runs on defaults and one config card says what's wrong.
 - **Why.** Anyone who can commit to the repo must not be able to raise an agent's permissions or remove the brake.
 
 ### D12. Local vs remote by peer, Host and forwarding headers; pairing, no cloud of ours
@@ -170,6 +170,11 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 ### D17. Agents can't fan out
 - **Decision.** `start_thread` creates an ordinary thread with origin `agent` and its parent recorded. A thread an agent started can't start threads; at most 10 per thread, ever (counted in the database), and 10 agent-started threads active at once.
 - **Why.** One runaway agent must not fill the Pass or the machine.
+
+### D18. Few cards: `auto` by a setting of yours, blocks come back as questions (**user decision**)
+- **Decision.** `TENZO_DEFAULT_PERMISSIONS=auto` runs threads in Claude Code's `auto` mode, below a project's `permissions` and above your own `defaultMode`. It is daemon-wide and unset by default, so without it threads still get your own mode. A classifier denial never reaches `canUseTool`, so the thread prompts have the agent ask with `AskUserQuestion` and retry on a yes.
+- **Why.** Most permission cards are routine work, and a card for each one drowns the few that matter. A question in the agent's own words also says more than a permission prompt can, and your answer counts as consent to the classifier. T3 Code has the same environment default with a project override, but only logs denials; Tenzo needs them on the Pass.
+- **Trade-off.** Reaching you is the prompt's doing: an agent that ignores it leaves only a failed tool in the timeline. Discussing has no permission card behind it. The classifier's rules are Claude Code's, not Tenzo's.
 
 ## 5. Known limits
 
