@@ -10,6 +10,7 @@ import {
   launchAgentFor,
   launchAgentPlist,
   plistPath,
+  reloadAgent,
   SERVICE_LABEL,
   serviceEnv,
 } from "./service.ts";
@@ -29,6 +30,59 @@ const agent: LaunchAgent = {
   },
   log: "/Users/me/.tenzo/daemon.log",
 };
+
+describe("reloadAgent", () => {
+  /** A fake launchd whose `bootstrap` answers from `bootstraps`; each sleep advances the clock. */
+  function launchd(bootout: boolean, bootstraps: boolean[]) {
+    const calls: string[] = [];
+    let clock = 0;
+    return {
+      calls,
+      elapsed: () => clock,
+      deps: {
+        run: (...args: string[]) => {
+          calls.push(args[0] ?? "");
+          const ok = args[0] === "bootout" ? bootout : (bootstraps.shift() ?? false);
+          return { ok, output: ok ? "" : "Bootstrap failed: 5: Input/output error" };
+        },
+        sleep: (ms: number) => {
+          clock += ms;
+        },
+        now: () => clock,
+      },
+    };
+  }
+
+  const load = (fake: ReturnType<typeof launchd>) =>
+    reloadAgent("gui/501", "/Users/me/agent.plist", fake.deps);
+
+  it("loads it at once when nothing is in the way", () => {
+    const fake = launchd(true, [true]);
+    load(fake);
+    expect(fake.calls).toEqual(["bootout", "bootstrap"]);
+    expect(fake.elapsed()).toBe(0);
+  });
+
+  it("waits for a stopped daemon to clear: bootstrap fails until launchd lets go of it", () => {
+    const fake = launchd(true, [false, false, true]);
+    load(fake);
+    expect(fake.calls).toEqual(["bootout", "bootstrap", "bootstrap", "bootstrap"]);
+  });
+
+  it("gives up with launchd's reason when the daemon never clears", () => {
+    const fake = launchd(true, []);
+    expect(() => load(fake)).toThrow(/couldn't load \/Users\/me\/agent\.plist: Bootstrap failed: 5/);
+    expect(fake.elapsed()).toBeGreaterThanOrEqual(25_000); // past launchd's own 20 s to kill it
+    expect(fake.elapsed()).toBeLessThan(60_000);
+  });
+
+  it("fails at once when nothing was stopped: there is nothing to wait for", () => {
+    const fake = launchd(false, []);
+    expect(() => load(fake)).toThrow(/couldn't load/);
+    expect(fake.calls).toEqual(["bootout", "bootstrap"]);
+    expect(fake.elapsed()).toBe(0);
+  });
+});
 
 describe("launchAgentPlist", () => {
   const plist = launchAgentPlist(agent);
