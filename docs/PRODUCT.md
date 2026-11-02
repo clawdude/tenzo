@@ -68,6 +68,7 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 
 - **A pile of cards.** The current item is a card; the ones behind it stick out above, darker and narrower, up to four edges. The pile's height is the only status display. No title, no counts.
 - **On the card:** thread name (small caps), one or two lines of context (large), the question or headline, a visible *More* pill ("Why it's asking" / "See the change" / "What it looked at"). At the bottom, under your thumb: **one filled button** that is always the suggested action, a **free-text field with a mic**, and the other options folded behind "2 other options."
+- **A permission card** reads as words first: what the agent wants to do, then the real command as code, because those words are the model's own. Allow and Deny sit side by side, one tap each, and neither is suggested: the request is the agent's.
 - **Text scrolls inside the card; buttons don't.** Long context never pushes the answer off screen.
 - **Answer → card lifts away, the next one is already there.**
 - **Swipe → snooze 15 min**, toast with Undo.

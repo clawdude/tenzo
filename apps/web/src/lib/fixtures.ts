@@ -190,7 +190,7 @@ export function permission(tag: string, suggested: string | null = 'allow'): Que
 		],
 		suggested,
 		questions: [],
-		permission: { toolKind: 'command', toolName: 'Bash', detail: 'uname -a', input: {} }
+		permission: { toolKind: 'command', toolName: 'Bash', detail: 'Bash: uname -a', input: {} }
 	});
 }
 

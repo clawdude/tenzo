@@ -101,10 +101,34 @@ export interface Step {
 	recommended: boolean;
 	/** The rest, folded behind "N other options". */
 	others: Choice[];
+	/** `others` beside `suggested` instead, as equals: a permission request's Deny. */
+	sideBySide?: boolean;
 	/** Quieter actions in a row under the field, always shown (finished work's Open PR, Done). */
 	row: Choice[];
 	/** The free-text field's hint; null: the card has no field. */
 	placeholder: string | null;
+}
+
+/**
+ * What a permission request would actually run or touch, for the card's code block: the command
+ * as written, else the request's one line. Null when the ask already says it (an old item whose
+ * ask is "Allow <detail>?") or there is nothing beyond the tool's name.
+ */
+export function requestedCode(item: QueueItem): string | null {
+	const request = item.permission;
+	if (!request || item.ask === `Allow ${request.detail}?`) return null;
+	const command = commandOf(request.input);
+	if (command) return command;
+	const prefix = `${request.toolName}: `;
+	const line = request.detail.startsWith(prefix) ? request.detail.slice(prefix.length) : request.detail;
+	return line === request.toolName ? null : line;
+}
+
+/** A permission request's command as written, line breaks included; null for other tools. */
+export function commandOf(input: unknown): string | null {
+	if (typeof input !== 'object' || input === null || !('command' in input)) return null;
+	const { command } = input;
+	return typeof command === 'string' && command.trim() ? command.trim() : null;
 }
 
 /** What was picked on a step: a button, or words typed or dictated into the field. */
@@ -215,8 +239,10 @@ export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[]
 				key: 'permission',
 				ask: item.ask,
 				suggested,
-				recommended: item.suggested === decision,
+				// The request is the agent's, not a recommendation: nothing here says to allow it.
+				recommended: false,
 				others: choices.filter((c) => c.value !== suggested.value),
+				sideBySide: true,
 				row: [],
 				placeholder: 'Or say why not'
 			}

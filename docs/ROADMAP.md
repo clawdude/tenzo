@@ -42,6 +42,10 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 - [x] #42 Tailscale Serve setup docs and `tenzo pair --tailscale`
 - [x] #43 Web Push for quick-lane items, per-device mute; iOS home-screen install polish
 
+## From real use
+
+- [x] #63 Quiet, readable permission cards: allow unless dangerous
+
 ## M5 · Codex
 
 - [ ] Codex adapter over `codex app-server`: approvals, async questions, same card set

@@ -47,6 +47,7 @@ import {
   type Configured,
   initialTranslation,
   startTurn,
+  permissionTitle,
   summarizeTool,
   toolKind,
   type Translated,
@@ -446,7 +447,7 @@ function startSession(
         toolKind: toolKind(toolName),
         toolName,
         detail: summarizeTool(toolName, toolInput),
-        ...(context.title ? { title: context.title } : {}),
+        title: permissionTitle(toolName, toolInput, context.title),
         ...(context.decisionReason ? { reason: context.decisionReason } : {}),
         input: boundedInput(toolInput), // Claude gets the full input back below
         itemId: context.toolUseID,

@@ -10,6 +10,7 @@ import {
 	othersLabel,
 	pileEdges,
 	pileOf,
+	requestedCode,
 	snoozedLabel,
 	stepsOf
 } from './pass.ts';
@@ -222,16 +223,45 @@ describe('stepsOf', () => {
 		]);
 	});
 
-	it('offers Allow on a permission request, with Deny folded', () => {
+	it('offers Allow and Deny side by side on a permission request, recommending neither', () => {
 		const [step] = stepsOf(permission('p'));
 		expect(step).toMatchObject({
 			ask: 'Allow Bash: uname -a?',
 			suggested: { label: 'Allow', value: 'allow' },
-			recommended: true,
+			recommended: false,
+			sideBySide: true,
 			placeholder: 'Or say why not'
 		});
 		expect(step?.others.map((o) => o.label)).toEqual(['Deny']);
 		expect(stepsOf(permission('p', null))[0]?.suggested?.label).toBe('Allow');
+	});
+
+	it('shows the command a permission card asks about, with its line breaks', () => {
+		const item = permission('p');
+		const command = "printf 'hi' > a.sh\nchmod +x a.sh";
+		const asked = {
+			...item,
+			ask: 'Make a.sh',
+			permission: { ...item.permission!, input: { command, description: 'Make a.sh' } }
+		};
+		expect(requestedCode(asked)).toBe(command);
+	});
+
+	it('falls back to the request\'s one line, without the tool\'s name', () => {
+		const item = permission('p');
+		const edit = {
+			...item,
+			ask: 'Edit app.ts',
+			permission: { ...item.permission!, toolName: 'Edit', detail: 'Edit: src/app.ts', input: { file_path: 'src/app.ts' } }
+		};
+		expect(requestedCode(edit)).toBe('src/app.ts');
+	});
+
+	it('shows no code when the ask already says it all, or there is nothing to show', () => {
+		const item = permission('p');
+		expect(requestedCode(item)).toBeNull(); // the fallback ask: "Allow Bash: uname -a?"
+		expect(requestedCode({ ...item, ask: 'Use Bash', permission: { ...item.permission!, detail: 'Bash' } })).toBeNull();
+		expect(requestedCode({ ...item, permission: undefined })).toBeNull();
 	});
 
 	it('offers Build it on a proposal, the headline as the ask; the field changes something', () => {

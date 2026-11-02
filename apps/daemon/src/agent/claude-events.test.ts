@@ -9,6 +9,7 @@ import {
   initialTranslation,
   OUTPUT_LIMIT,
   startTurn,
+  permissionTitle,
   summarizeTool,
   toolKind,
   translate,
@@ -502,6 +503,42 @@ describe("boundedInput", () => {
     const payload = events[0]?.payload as { input: { content: string }; text: string };
     expect(payload.input.content.length).toBeLessThan(400);
     expect(payload.text).toBe("Write: /w/a.txt");
+  });
+});
+
+describe("permissionTitle", () => {
+  it("says what a command is for, in the agent's words, never the command", () => {
+    const input = { command: "printf 'x' > ciao.sh && chmod +x ciao.sh", description: "Create ciao.sh" };
+    expect(permissionTitle("Bash", input)).toBe("Create ciao.sh");
+    expect(permissionTitle("Bash", { command: "rm -rf build" })).toBe("Run a command");
+    expect(permissionTitle("Bash", { command: "ls", description: "  " })).toBe("Run a command");
+  });
+
+  it("puts a description on one line, cut to fit a headline", () => {
+    expect(permissionTitle("Bash", { description: "Update\n  the file" })).toBe("Update the file");
+    expect(permissionTitle("Bash", { description: "word ".repeat(60) }).length).toBeLessThanOrEqual(120);
+  });
+
+  it("names the file or the place for other tools", () => {
+    expect(permissionTitle("Edit", { file_path: "/w/src/app.ts" })).toBe("Edit app.ts");
+    expect(permissionTitle("Write", { file_path: "/w/a b.md" })).toBe("Write a b.md");
+    expect(permissionTitle("NotebookEdit", { notebook_path: "/w/n.ipynb" })).toBe("Edit n.ipynb");
+    expect(permissionTitle("Read", { file_path: "/etc/hosts" })).toBe("Read hosts");
+    expect(permissionTitle("WebFetch", { url: "https://example.com/a?b=1" })).toBe("Open example.com");
+    expect(permissionTitle("WebFetch", { url: "not a url" })).toBe("Open a web page");
+    expect(permissionTitle("WebSearch", { query: "svelte runes" })).toBe("Search the web for svelte runes");
+  });
+
+  it("names what's left by the tool, and an MCP tool by its server", () => {
+    expect(permissionTitle("mcp__notes__add_note", {})).toBe("Use add_note on notes");
+    expect(permissionTitle("Edit", {})).toBe("Use Edit");
+    expect(permissionTitle("KillShell", {})).toBe("Use KillShell");
+  });
+
+  it("prefers Claude Code's own title", () => {
+    expect(permissionTitle("Bash", { description: "x" }, "Claude wants to run this")).toBe(
+      "Claude wants to run this",
+    );
   });
 });
 
