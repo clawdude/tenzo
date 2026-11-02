@@ -97,7 +97,7 @@ describe("project config: parsing and merging", () => {
       const read = parseProjectConfig({ [file]: json({ permissions: mode }) });
       expect(read.config).toBeNull();
       expect(read.problem).toBe(
-        `.tenzo/${file}.json: permissions: "${mode}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json: threads use that already.`,
+        `.tenzo/${file}.json: permissions: "${mode}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json: threads use that already. auto also works as TENZO_DEFAULT_PERMISSIONS.`,
       );
     });
 
