@@ -65,6 +65,8 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
     lines.push("    merge: merge it now", "    Or say what to do first.");
   } else {
     lines.push(`  ? ${item.ask}`);
+    // The ask is the agent's words: what would really run goes beside it, as on the card.
+    if (item.permission) lines.push(`    ${item.permission.detail}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
     lines.push("    1. Allow (suggested)", "    2. Deny");
   }

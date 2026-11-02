@@ -65,6 +65,20 @@ describe("formatEvent", () => {
   });
 });
 
+describe("formatItem: a permission request", () => {
+  it("prints what would really run beside the agent's words", () => {
+    const text = formatItem({
+      id: "itm_abcdefghij0123456789",
+      kind: "permission",
+      ask: "Tidy the build folder",
+      options: [],
+      questions: [],
+      permission: { toolKind: "command", toolName: "Bash", detail: "Bash: rm -rf ~/projects", input: {} },
+    } as unknown as QueueItem);
+    expect(text).toContain("Bash: rm -rf ~/projects");
+  });
+});
+
 describe("formatItem", () => {
   const item: QueueItem = {
     id: "itm_abcdefghij0123456789",

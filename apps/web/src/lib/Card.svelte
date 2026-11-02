@@ -69,8 +69,10 @@
 	const steps = $derived(stepsOf(item, threadView?.landing));
 	/** A permission card's command or path, shown as it is: the headline is the agent's words. */
 	const code = $derived(requestedCode(item));
-	/** More than the block holds: it fades out, and What exactly has all of it. */
-	const codeIsLong = $derived(!!code && (code.split('\n').length > 7 || code.length > 320));
+	let codeBox = $state(0);
+	let codeHeight = $state(0);
+	/** More than the block holds (its padding is 24 px): it says so, and What exactly has it all. */
+	const codeIsCut = $derived(codeHeight + 24 > codeBox + 1);
 	/** Finished work's content; null on every other card. */
 	const view = $derived(finishedView(item, thread, liveOrigin, liveGrant));
 	/** The screenshot shown full screen, if one was tapped. */
@@ -188,7 +190,7 @@
 				ondeeper={() => (returnTo = item.id)}
 			/>
 		{:else}
-		{#if item.context && !compact && !view}
+		{#if item.context && !compact && !view && !item.permission}
 			<!--
 				Three lines, one while the options are out; all of it is on the back. The end is what
 				leads into the question (the daemon keeps the end too), so a long context shows its last
@@ -224,9 +226,13 @@
 			<pre
 				class={[
 					'mb-3 max-h-[9.5em] overflow-hidden rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft',
-					codeIsLong && '[mask-image:linear-gradient(to_bottom,#000_calc(100%-2.5em),transparent)]'
+					codeIsCut && '[mask-image:linear-gradient(to_bottom,#000_calc(100%-2.5em),transparent)]'
 				]}
-				data-testid="permission-code">{code}</pre>
+				bind:clientHeight={codeBox}
+				data-testid="permission-code"><code class="block" bind:clientHeight={codeHeight}>{code}</code></pre>
+			{#if codeIsCut}
+				<p class="mb-3 text-[14px] text-mute" data-testid="permission-cut">There's more: see What exactly.</p>
+			{/if}
 		{/if}
 		{#if item.permission?.reason}
 			<p class="mb-3 text-[15px] leading-snug text-ink-soft" data-testid="permission-reason">

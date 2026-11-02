@@ -516,7 +516,7 @@ describe("permissionTitle", () => {
 
   it("puts a description on one line, cut to fit a headline", () => {
     expect(permissionTitle("Bash", { description: "Update\n  the file" })).toBe("Update the file");
-    expect(permissionTitle("Bash", { description: "word ".repeat(60) }).length).toBeLessThanOrEqual(120);
+    expect(permissionTitle("Bash", { description: "word ".repeat(60) }).length).toBeLessThanOrEqual(80);
   });
 
   it("names the file or the place for other tools", () => {

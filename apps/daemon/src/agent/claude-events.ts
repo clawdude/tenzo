@@ -381,7 +381,7 @@ export function summarizeTool(name: string, input: Record<string, unknown>): str
   return trim(what === "" ? name : `${name}: ${what.replaceAll(/\s+/g, " ")}`, 300);
 }
 
-const TITLE_LIMIT = 120;
+const TITLE_LIMIT = 80;
 
 /**
  * What a permission card asks, in words: Claude Code's own title, else what the agent says a
