@@ -76,6 +76,24 @@ describe("formatItem: a permission request", () => {
       permission: { toolKind: "command", toolName: "Bash", detail: "Bash: rm -rf ~/projects", input: {} },
     } as unknown as QueueItem);
     expect(text).toContain("Bash: rm -rf ~/projects");
+    expect(text).toContain("1. Allow\n");
+  });
+
+  it("prints an MCP tool's input, not its description", () => {
+    const text = formatItem({
+      id: "itm_abcdefghij0123456789",
+      kind: "permission",
+      ask: "Use execute on db",
+      options: [],
+      questions: [],
+      permission: {
+        toolKind: "tool",
+        toolName: "mcp__db__execute",
+        detail: "mcp__db__execute: Clean up old rows",
+        input: { description: "Clean up old rows", sql: "DROP TABLE users" },
+      },
+    } as unknown as QueueItem);
+    expect(text).toContain("DROP TABLE users");
   });
 });
 

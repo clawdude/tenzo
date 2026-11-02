@@ -266,6 +266,31 @@ describe('stepsOf', () => {
 		expect(code).toContain('DROP TABLE users');
 	});
 
+	it('doesn\'t take a `path`, `url` or `query` as all there is on a tool it doesn\'t know', () => {
+		const item = permission('p');
+		const of = (toolName: string, input: object) =>
+			requestedCode({
+				...item,
+				ask: 'Use it',
+				permission: { ...item.permission!, toolName, detail: toolName, input }
+			});
+		expect(of('mcp__shell__run', { path: '/tmp/build', command: 'rm -rf ~' })).toContain('rm -rf ~');
+		expect(of('mcp__db__execute', { query: 'Clean up', sql: 'DROP TABLE users' })).toContain('DROP TABLE');
+		expect(of('mcp__http__request', { url: 'https://x.test', method: 'DELETE' })).toContain('DELETE');
+	});
+
+	it('leaves a description out of the input it shows, unless it is all there is', () => {
+		const item = permission('p');
+		const of = (input: object) =>
+			requestedCode({
+				...item,
+				ask: 'Use it',
+				permission: { ...item.permission!, toolName: 'mcp__db__query', detail: 'x', input }
+			});
+		expect(of({ description: 'Tidy', sql: 'DROP TABLE users' })).not.toContain('Tidy');
+		expect(of({ description: 'Tidy' })).toContain('Tidy');
+	});
+
 	it('takes `command` as a command only from Bash', () => {
 		const item = permission('p');
 		const input = { command: 'sh', args: ['-c', 'rm -rf ~'] };

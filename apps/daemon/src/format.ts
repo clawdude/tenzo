@@ -10,6 +10,16 @@ export function threadRow(t: ThreadView): string[] {
   return [t.id, t.projectName, ...state, t.branch, title];
 }
 
+/**
+ * A permission request in one line. `detail` is fair for Claude Code's own tools, where it names
+ * the command or the file. For a subagent or an MCP tool it can be the model's `description`, so
+ * those print their input.
+ */
+function requestLine(request: NonNullable<QueueItem["permission"]>): string {
+  const own = !/^mcp__|^(Task|Agent)$/.test(request.toolName);
+  return own ? request.detail : `${request.toolName}: ${JSON.stringify(request.input)}`;
+}
+
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */
 export function formatItem(item: QueueItem, threadTitle?: string): string {
   const head = [item.id, threadTitle, item.kind].filter(Boolean).join(" · ");
@@ -66,9 +76,9 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
   } else {
     lines.push(`  ? ${item.ask}`);
     // The ask is the agent's words: what would really run goes beside it, as on the card.
-    if (item.permission) lines.push(`    ${item.permission.detail}`);
+    if (item.permission) lines.push(`    ${requestLine(item.permission)}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
-    lines.push("    1. Allow (suggested)", "    2. Deny");
+    lines.push("    1. Allow", "    2. Deny");
   }
   if (item.snoozedUntil) {
     lines.push(`  Snoozed until ${new Date(item.snoozedUntil).toLocaleTimeString()}.`);

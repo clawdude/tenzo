@@ -109,15 +109,24 @@ export interface Step {
 	placeholder: string | null;
 }
 
-/** A tool's own target, by the keys Claude Code's file and web tools use. */
-const TARGET_KEYS = ['file_path', 'notebook_path', 'path', 'url', 'query', 'pattern'];
+/** Claude Code's own file and web tools, and what each acts on. Any other tool's input is its own. */
+const TARGETS: Record<string, string> = {
+	Edit: 'file_path',
+	MultiEdit: 'file_path',
+	Write: 'file_path',
+	Read: 'file_path',
+	NotebookEdit: 'notebook_path',
+	WebFetch: 'url',
+	WebSearch: 'query'
+};
 
 /**
  * What a permission request would actually run or touch, for the card's code block: Bash's
- * command as written, a file or web tool's target, else the whole input, because a field called
- * `description` on some other tool is only more of the model's words. Blank lines go, so padding
- * can't push the rest out of sight. Null when the ask already says it (an old item whose ask is
- * "Allow <detail>?") or there is no input.
+ * command as written, a built-in file or web tool's target, else the whole input without its
+ * `description`, which is only more of the model's words. A field called `path` on some other
+ * tool says nothing about the rest. Blank lines go, so padding can't push the rest out of sight.
+ * Null when the ask already says it (an old item whose ask is "Allow <detail>?") or there is no
+ * input.
  */
 export function requestedCode(item: QueueItem): string | null {
 	const request = item.permission;
@@ -125,11 +134,12 @@ export function requestedCode(item: QueueItem): string | null {
 	const command = commandOf(request);
 	if (command) return command.replaceAll(/\n\s*\n/g, '\n');
 	const input = recordOf(request.input);
-	for (const key of TARGET_KEYS) {
-		const target = input[key];
-		if (typeof target === 'string' && target.trim()) return target.trim();
-	}
-	return Object.keys(input).length > 0 ? JSON.stringify(input, null, 2) : null;
+	const key = TARGETS[request.toolName];
+	const target = key ? input[key] : undefined;
+	if (typeof target === 'string' && target.trim()) return target.trim();
+	const { description: _, ...rest } = input;
+	const shown = Object.keys(rest).length > 0 ? rest : input;
+	return Object.keys(shown).length > 0 ? JSON.stringify(shown, null, 2) : null;
 }
 
 /** Bash's command as written, line breaks included; null for any other tool. */

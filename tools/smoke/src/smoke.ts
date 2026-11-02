@@ -690,7 +690,10 @@ async function permissionCard(browser: Browser, base: string): Promise<string[]>
     if ((await top.getByText("Suggested").count()) > 0) problems.push("Allow is marked Suggested");
     await onScreen("suggested");
     await onScreen("option");
-    await onScreen("permission-code");
+    // Code in sight above the buttons, not merely above the bottom of the screen.
+    const codeTop = (await top.getByTestId("permission-code").boundingBox())?.y ?? Infinity;
+    const buttonsTop = (await top.getByTestId("decide").boundingBox())?.y ?? 0;
+    if (codeTop + 60 > buttonsTop) problems.push("the code is pushed out of sight");
     if (shots) await page.screenshot({ path: `${shots}/permission-long.png` });
     await top.getByTestId("more").tap();
     await top.getByTestId("details").waitFor();

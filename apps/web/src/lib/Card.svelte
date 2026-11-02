@@ -219,7 +219,10 @@
 				{a.ask} <span class="text-ink-soft">{a.said}</span>
 			</p>
 		{/each}
-		<h2 class="mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]" data-testid="ask">
+		<h2
+			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', item.permission && 'line-clamp-3']}
+			data-testid="ask"
+		>
 			{view?.headline ?? step?.ask ?? item.ask}
 		</h2>
 		{#if code}
