@@ -220,7 +220,7 @@
 			</p>
 		{/each}
 		<h2
-			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', item.permission && 'line-clamp-3']}
+			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', code && 'line-clamp-3']}
 			data-testid="ask"
 		>
 			{view?.headline ?? step?.ask ?? item.ask}

@@ -11,13 +11,15 @@ export function threadRow(t: ThreadView): string[] {
 }
 
 /**
- * A permission request in one line. `detail` is fair for Claude Code's own tools, where it names
- * the command or the file. For a subagent or an MCP tool it can be the model's `description`, so
- * those print their input.
+ * A permission request in one line. `detail` is fair for the tools the card knows, where it names
+ * the command or the file. For any other it can be the model's `description`, so those print
+ * their input.
  */
 function requestLine(request: NonNullable<QueueItem["permission"]>): string {
-  const own = !/^mcp__|^(Task|Agent)$/.test(request.toolName);
-  return own ? request.detail : `${request.toolName}: ${JSON.stringify(request.input)}`;
+  const own = ["Bash", "Edit", "MultiEdit", "Write", "Read", "NotebookEdit", "WebFetch", "WebSearch"];
+  return own.includes(request.toolName)
+    ? request.detail
+    : `${request.toolName}: ${JSON.stringify(request.input)}`;
 }
 
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */

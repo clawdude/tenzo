@@ -73,6 +73,20 @@ describe("readConfig", () => {
     expect(() => readConfig({ TENZO_LIVE_ORIGIN: "mac.ts.net:8444" })).toThrow(/TENZO_LIVE_ORIGIN/);
   });
 
+  it("takes threads' default permission mode from TENZO_DEFAULT_PERMISSIONS", () => {
+    expect(readConfig({}).defaultPermissions).toBeUndefined();
+    expect(readConfig({ TENZO_DEFAULT_PERMISSIONS: " " }).defaultPermissions).toBeUndefined();
+    expect(readConfig({ TENZO_DEFAULT_PERMISSIONS: " auto " }).defaultPermissions).toBe("auto");
+    expect(readConfig({ TENZO_DEFAULT_PERMISSIONS: "acceptEdits" }).defaultPermissions).toBe("acceptEdits");
+  });
+
+  it("refuses a TENZO_DEFAULT_PERMISSIONS it won't run threads with", () => {
+    expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "bypassPermissions" })).toThrow(/settings\.json/);
+    expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "plan" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
+    expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "dontAsk" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
+    expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "Auto" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
+  });
+
   it("takes a default model for threads from TENZO_DEFAULT_MODEL", () => {
     expect(readConfig({}).defaultModel).toBeUndefined();
     expect(readConfig({ TENZO_DEFAULT_MODEL: " " }).defaultModel).toBeUndefined();

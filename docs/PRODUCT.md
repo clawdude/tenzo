@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo doesn't choose a permission mode: your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo chooses no permission mode unless the project's config (`permissions`) or, for threads you start, `TENZO_DEFAULT_PERMISSIONS` names one: otherwise your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
@@ -131,7 +131,7 @@ MVP triggers: schedule and "run now." Event triggers (webhooks) later; they need
 }
 ```
 
-Anything missing falls back to the agent's own defaults. Discuss model runs until *Build it*, build model after; agents model goes to subagents. A thread can override the model from its "⋯". An optional `permissions` key overrides the permission mode, limited to `default`, `acceptEdits` or `dontAsk` because the file lives in the repo. `agent` accepts only `claude` until the Codex adapter exists (M5, deferred). Every key: [GUIDE.md](GUIDE.md#project-config).
+Anything missing falls back to the agent's own defaults. Discuss model runs until *Build it*, build model after; agents model goes to subagents. A thread can override the model from its "⋯". An optional `permissions` key overrides the permission mode, limited to `default`, `acceptEdits` or `dontAsk` because the file lives in the repo; `TENZO_DEFAULT_PERMISSIONS=auto` is how threads you start get cards only for what looks dangerous. `agent` accepts only `claude` until the Codex adapter exists (M5, deferred). Every key: [GUIDE.md](GUIDE.md#project-config).
 
 ## 9. Remote access and auth
 
