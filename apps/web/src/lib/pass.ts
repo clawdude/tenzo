@@ -95,16 +95,69 @@ export interface Choice {
 export interface Step {
 	key: string;
 	ask: string;
-	/** The filled button: the agent's recommendation, else the first option. */
+	/** The filled button: the agent's recommendation, else the first option, else Allow. */
 	suggested: Choice | null;
 	/** The agent marked `suggested` itself (it is not merely the first option). */
 	recommended: boolean;
 	/** The rest, folded behind "N other options". */
 	others: Choice[];
+	/** `others` beside `suggested`, one tap each, not folded: a permission request's Deny. */
+	sideBySide?: boolean;
 	/** Quieter actions in a row under the field, always shown (finished work's Open PR, Done). */
 	row: Choice[];
 	/** The free-text field's hint; null: the card has no field. */
 	placeholder: string | null;
+}
+
+/** Claude Code's own file and web tools, and what each acts on. Any other tool's input is its own. */
+const TARGETS: Record<string, string> = {
+	Edit: 'file_path',
+	MultiEdit: 'file_path',
+	Write: 'file_path',
+	Read: 'file_path',
+	NotebookEdit: 'notebook_path',
+	WebFetch: 'url',
+	WebSearch: 'query'
+};
+
+/**
+ * What a permission request would actually run or touch, for the card's code block: Bash's
+ * command as written, a built-in file or web tool's target, else the whole input without its
+ * `description`, which is only more of the model's words. A field called `path` on some other
+ * tool says nothing about the rest. Blank lines go, so padding can't push the rest out of sight.
+ * Null when the ask already says it (an old item whose ask is "Allow <detail>?") or there is no
+ * input.
+ */
+export function requestedCode(item: QueueItem): string | null {
+	const request = item.permission;
+	if (!request || item.ask === `Allow ${request.detail}?`) return null;
+	const command = commandOf(request);
+	if (command) return command.replaceAll(/\n\s*\n/g, '\n');
+	const input = recordOf(request.input);
+	const key = TARGETS[request.toolName];
+	const target = key ? input[key] : undefined;
+	if (typeof target === 'string' && target.trim()) return target.trim();
+	const { description: _, ...rest } = input;
+	const shown = Object.keys(rest).length > 0 ? rest : input;
+	return Object.keys(shown).length > 0 ? JSON.stringify(shown, null, 2) : null;
+}
+
+/** Bash's command as written, line breaks included; null for any other tool. */
+export function commandOf(request: NonNullable<QueueItem['permission']>): string | null {
+	if (request.toolName !== 'Bash') return null;
+	const { command } = recordOf(request.input);
+	return typeof command === 'string' && command.trim() ? command.trim() : null;
+}
+
+/** What else a Bash request says, for the back: all but its command and its description. */
+export function otherInput(request: NonNullable<QueueItem['permission']>): Record<string, unknown> {
+	return Object.fromEntries(
+		Object.entries(recordOf(request.input)).filter(([key]) => key !== 'command' && key !== 'description')
+	);
+}
+
+function recordOf(input: unknown): Record<string, unknown> {
+	return typeof input === 'object' && input !== null ? { ...input } : {};
 }
 
 /** What was picked on a step: a button, or words typed or dictated into the field. */
@@ -215,8 +268,10 @@ export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[]
 				key: 'permission',
 				ask: item.ask,
 				suggested,
-				recommended: item.suggested === decision,
+				// The request is the agent's, not a recommendation: nothing here says to allow it.
+				recommended: false,
 				others: choices.filter((c) => c.value !== suggested.value),
+				sideBySide: true,
 				row: [],
 				placeholder: 'Or say why not'
 			}

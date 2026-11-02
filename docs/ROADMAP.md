@@ -44,7 +44,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 
 ## From real use
 
-- [ ] #63 Quiet, readable permission cards: allow unless dangerous
+- [x] #63 Quiet, readable permission cards: allow unless dangerous
 
 ## M5 · Codex
 

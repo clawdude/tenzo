@@ -16,7 +16,7 @@
 	import { finishedView, type Shot } from '#lib/finished.ts';
 	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
-	import { ageLabel, othersLabel, type Pick, stepsOf } from '#lib/pass.ts';
+	import { ageLabel, othersLabel, type Pick, requestedCode, stepsOf } from '#lib/pass.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 
 	interface Props {
@@ -67,6 +67,12 @@
 	}
 
 	const steps = $derived(stepsOf(item, threadView?.landing));
+	/** A permission card's command or path, shown as it is: the headline is the agent's words. */
+	const code = $derived(requestedCode(item));
+	let codeBox = $state(0);
+	let codeHeight = $state(0);
+	/** More than the block holds (its padding is 24 px): it says so, and What exactly has it all. */
+	const codeIsCut = $derived(codeHeight + 24 > codeBox + 1);
 	/** Finished work's content; null on every other card. */
 	const view = $derived(finishedView(item, thread, liveOrigin, liveGrant));
 	/** The screenshot shown full screen, if one was tapped. */
@@ -184,7 +190,7 @@
 				ondeeper={() => (returnTo = item.id)}
 			/>
 		{:else}
-		{#if item.context && !compact && !view}
+		{#if item.context && !compact && !view && !item.permission}
 			<!--
 				Three lines, one while the options are out; all of it is on the back. The end is what
 				leads into the question (the daemon keeps the end too), so a long context shows its last
@@ -213,13 +219,28 @@
 				{a.ask} <span class="text-ink-soft">{a.said}</span>
 			</p>
 		{/each}
-		<h2 class="mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]" data-testid="ask">
+		<h2
+			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', code && 'line-clamp-3']}
+			data-testid="ask"
+		>
 			{view?.headline ?? step?.ask ?? item.ask}
 		</h2>
-		{#if item.permission && !item.ask.includes(item.permission.detail)}
+		{#if code}
 			<pre
-				class="mb-4 rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft">{item
-					.permission.detail}</pre>
+				class={[
+					'mb-3 max-h-[9.5em] overflow-hidden rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft',
+					codeIsCut && '[mask-image:linear-gradient(to_bottom,#000_calc(100%-2.5em),transparent)]'
+				]}
+				bind:clientHeight={codeBox}
+				data-testid="permission-code"><code class="block" bind:clientHeight={codeHeight}>{code}</code></pre>
+			{#if codeIsCut}
+				<p class="mb-3 text-[14px] text-mute" data-testid="permission-cut">There's more: see What exactly.</p>
+			{/if}
+		{/if}
+		{#if item.permission?.reason}
+			<p class="mb-3 text-[15px] leading-snug text-ink-soft" data-testid="permission-reason">
+				{item.permission.reason}
+			</p>
 		{/if}
 		{#if item.proposal}
 			<!-- What it will change, where, and how it will check: what Build it says yes to. -->
@@ -340,7 +361,7 @@
 			</p>
 		{/if}
 
-		{#if step && showOthers}
+		{#if step && showOthers && !step.sideBySide}
 			{#each step.others as choice (choice.value)}
 				<button
 					type="button"
@@ -351,7 +372,25 @@
 			{/each}
 		{/if}
 
-		{#if step?.suggested}
+		{#if step?.sideBySide && step.suggested}
+			{@const suggested = step.suggested}
+			<div class="flex gap-2.5" data-testid="decide">
+				{#each step.others as choice (choice.value)}
+					<button
+						type="button"
+						class="opt min-h-14 flex-1 rounded-[18px] bg-fill px-4 text-[17px] font-semibold"
+						onclick={() => pick({ choice })}
+						data-testid="option">{choice.label}</button
+					>
+				{/each}
+				<button
+					type="button"
+					class="opt min-h-14 flex-1 rounded-[18px] bg-clay px-4 text-[17px] font-semibold text-on-clay"
+					onclick={() => pick({ choice: suggested })}
+					data-testid="suggested">{suggested.label}</button
+				>
+			</div>
+		{:else if step?.suggested}
 			{@const suggested = step.suggested}
 			<button
 				type="button"
@@ -423,7 +462,7 @@
 			</div>
 		{/if}
 
-		{#if step && step.others.length > 0}
+		{#if step && step.others.length > 0 && !step.sideBySide}
 			<button
 				type="button"
 				class="min-h-9 text-[14px] text-mute"

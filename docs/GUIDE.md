@@ -34,6 +34,7 @@ The daemon reads these once at start (`apps/daemon/src/config.ts`, which refuses
 | `TENZO_PUSH_PREVIEW` | `short` | what a notification says: `short` (thread name and a short line) or `none` ("A thread needs you.") |
 | `TENZO_PUSH_CONTACT` | the project's GitHub page | the `mailto:` or `https:` contact push services see (VAPID `sub`) |
 | `TENZO_SMOKE_CHROMIUM` | Playwright's cache | the Chromium `pnpm smoke` drives (not read by the daemon) |
+| `TENZO_SMOKE_SHOTS` | none | a folder where `pnpm smoke` saves the permission card's screenshots (not read by the daemon) |
 
 Each thread's environment also gets `TENZO_LIVE_BASE=/live/<thread>/`, the base path its dev server must serve under to be exposed.
 

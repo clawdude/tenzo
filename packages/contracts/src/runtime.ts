@@ -209,7 +209,7 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
       toolName: z.string(),
       /** One line: "Bash: rm -rf build". */
       detail: z.string(),
-      /** The agent's own sentence for the ask, when it gave one. */
+      /** The ask in words, never the raw command: the agent's, or a plain phrase per tool. */
       title: z.string().optional(),
       /** Why it is asking, when the agent says (e.g. a path outside the worktree). */
       reason: z.string().optional(),

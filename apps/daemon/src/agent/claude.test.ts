@@ -507,6 +507,7 @@ describe("Claude adapter: permission requests", () => {
       payload: {
         toolKind: "command",
         toolName: "Bash",
+        title: "Clean",
         detail: "Bash: rm -rf build",
         input: rmInput,
         itemId: "toolu_b",

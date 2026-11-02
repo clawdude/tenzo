@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo chooses no permission mode unless you or the project's config name one (`TENZO_DEFAULT_PERMISSIONS`, `permissions`): your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo chooses no permission mode unless the project's config (`permissions`) or, for threads you start, `TENZO_DEFAULT_PERMISSIONS` names one: otherwise your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 
@@ -68,6 +68,7 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 
 - **A pile of cards.** The current item is a card; the ones behind it stick out above, darker and narrower, up to four edges. The pile's height is the only status display. No title, no counts.
 - **On the card:** thread name (small caps), one or two lines of context (large), the question or headline, a visible *More* pill ("Why it's asking" / "See the change" / "What it looked at"). At the bottom, under your thumb: **one filled button** that is always the suggested action, a **free-text field with a mic**, and the other options folded behind "2 other options."
+- **A permission card** is the exception to the bottom row: it reads as words first, what the agent wants to do, then the real command as code, because those words are the model's own. Allow and Deny sit side by side, one tap each, with nothing folded and no "Suggested" label: the request is the agent's, not a recommendation.
 - **Text scrolls inside the card; buttons don't.** Long context never pushes the answer off screen.
 - **Answer → card lifts away, the next one is already there.**
 - **Swipe → snooze 15 min**, toast with Undo.

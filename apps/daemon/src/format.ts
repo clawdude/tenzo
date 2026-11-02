@@ -10,6 +10,18 @@ export function threadRow(t: ThreadView): string[] {
   return [t.id, t.projectName, ...state, t.branch, title];
 }
 
+/**
+ * A permission request in one line. `detail` is fair for the tools the card knows, where it names
+ * the command or the file. For any other it can be the model's `description`, so those print
+ * their input.
+ */
+function requestLine(request: NonNullable<QueueItem["permission"]>): string {
+  const own = ["Bash", "Edit", "MultiEdit", "Write", "Read", "NotebookEdit", "WebFetch", "WebSearch"];
+  return own.includes(request.toolName)
+    ? request.detail
+    : `${request.toolName}: ${JSON.stringify(request.input)}`;
+}
+
 /** An open item as a few lines: who asks, the context, the ask, numbered options. */
 export function formatItem(item: QueueItem, threadTitle?: string): string {
   const head = [item.id, threadTitle, item.kind].filter(Boolean).join(" · ");
@@ -65,8 +77,10 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
     lines.push("    merge: merge it now", "    Or say what to do first.");
   } else {
     lines.push(`  ? ${item.ask}`);
+    // The ask is the agent's words: what would really run goes beside it, as on the card.
+    if (item.permission) lines.push(`    ${requestLine(item.permission)}`);
     if (item.permission?.reason) lines.push(`    (${item.permission.reason})`);
-    lines.push("    1. Allow (suggested)", "    2. Deny");
+    lines.push("    1. Allow", "    2. Deny");
   }
   if (item.snoozedUntil) {
     lines.push(`  Snoozed until ${new Date(item.snoozedUntil).toLocaleTimeString()}.`);

@@ -381,6 +381,49 @@ export function summarizeTool(name: string, input: Record<string, unknown>): str
   return trim(what === "" ? name : `${name}: ${what.replaceAll(/\s+/g, " ")}`, 300);
 }
 
+const TITLE_LIMIT = 80;
+
+/**
+ * What a permission card asks, in words: Claude Code's own title, else what the agent says a
+ * command is for, else a plain phrase per tool. Never the raw command: the card shows that as
+ * code, and has to, because a command's description is written by the model.
+ */
+export function permissionTitle(
+  name: string,
+  input: Record<string, unknown>,
+  title?: string | undefined,
+): string {
+  const text = (key: string) => {
+    const value = input[key];
+    return typeof value === "string" ? value.replaceAll(/\s+/g, " ").trim() : "";
+  };
+  const file = (key: string) => text(key).split("/").pop() ?? "";
+  const words = (() => {
+    if (title?.trim()) return title.trim();
+    switch (name) {
+      case "Bash":
+        return text("description") || "Run a command";
+      case "Edit":
+      case "MultiEdit":
+        return file("file_path") && `Edit ${file("file_path")}`;
+      case "Write":
+        return file("file_path") && `Write ${file("file_path")}`;
+      case "NotebookEdit":
+        return file("notebook_path") && `Edit ${file("notebook_path")}`;
+      case "Read":
+        return file("file_path") && `Read ${file("file_path")}`;
+      case "WebFetch":
+        return `Open ${URL.parse(text("url"))?.host || "a web page"}`;
+      case "WebSearch":
+        return text("query") && `Search the web for ${text("query")}`;
+      default:
+        return "";
+    }
+  })();
+  const mcp = /^mcp__(.+?)__(.+)$/.exec(name);
+  return trim(words || (mcp ? `Use ${mcp[2]} on ${mcp[1]}` : `Use ${name}`), TITLE_LIMIT);
+}
+
 /** A string field of a tool's input kept on an event; a command gets more room than the rest. */
 export const INPUT_STRING_LIMIT = 300;
 const COMMAND_LIMIT = 2000;
