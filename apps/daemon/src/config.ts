@@ -1,5 +1,6 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
+import { DefaultPermissionMode } from "@tenzo/contracts";
 
 export const DEFAULT_PORT = 4780;
 
@@ -47,6 +48,11 @@ export interface DaemonConfig {
    */
   defaultModel?: string;
   /**
+   * The permission mode of threads you started whose project's config names none, `auto` above
+   * all: allow unless dangerous. `TENZO_DEFAULT_PERMISSIONS`; unset, the user's own `defaultMode`.
+   */
+  defaultPermissions?: DefaultPermissionMode;
+  /**
    * How long a swipe snoozes an item, in ms. `TENZO_SNOOZE_MS`, for trying snooze without
    * waiting; unset, 15 minutes (engine.ts).
    */
@@ -85,9 +91,27 @@ export function readConfig(env: Record<string, string | undefined>): DaemonConfi
     devOrigins: readOrigins(env.TENZO_DEV_ORIGIN, "TENZO_DEV_ORIGIN", "http://localhost:5173"),
     ...publicUrl(env.TENZO_PUBLIC_URL),
     ...(env.TENZO_DEFAULT_MODEL?.trim() ? { defaultModel: env.TENZO_DEFAULT_MODEL.trim() } : {}),
+    ...readDefaultPermissions(env.TENZO_DEFAULT_PERMISSIONS),
     ...(env.TENZO_SNOOZE_MS?.trim() ? { snoozeMs: readSnooze(env.TENZO_SNOOZE_MS.trim()) } : {}),
     ...readPush(env),
   };
+}
+
+function readDefaultPermissions(value: string | undefined): Pick<DaemonConfig, "defaultPermissions"> {
+  const mode = value?.trim();
+  if (!mode) return {};
+  if (mode === "bypassPermissions") {
+    throw new Error(
+      'TENZO_DEFAULT_PERMISSIONS can\'t be "bypassPermissions": set `defaultMode` in your own ~/.claude/settings.json instead.',
+    );
+  }
+  const parsed = DefaultPermissionMode.safeParse(mode);
+  if (!parsed.success) {
+    throw new Error(
+      `TENZO_DEFAULT_PERMISSIONS is one of ${DefaultPermissionMode.options.join(", ")}, got "${mode}"`,
+    );
+  }
+  return { defaultPermissions: parsed.data };
 }
 
 function readPush(env: Record<string, string | undefined>): Pick<DaemonConfig, "pushPreview" | "pushContact"> {

@@ -5,6 +5,7 @@ import {
   type AutomationsState,
   type AutomationView,
   type ItemAnswer,
+  type DefaultPermissionMode,
   ModelName,
   type LiveInfo,
   MAX_EVENT_PAGE,
@@ -166,6 +167,11 @@ export interface EngineOptions {
    */
   defaultModel?: string;
   /**
+   * The permission mode of threads you started whose project's config names none
+   * (`TENZO_DEFAULT_PERMISSIONS`). Default: the user's own `defaultMode`.
+   */
+  defaultPermissions?: DefaultPermissionMode;
+  /**
    * Tenzo's thread prompts, read as each session starts so an edit applies to the next one.
    * Default: the files in `apps/daemon/prompts` (prompts.ts).
    */
@@ -319,6 +325,7 @@ export class Engine {
   readonly #quiet = new Set<QueueItemId>();
   readonly #titler: Titler | undefined;
   readonly #defaultModel: string | undefined;
+  readonly #defaultPermissions: DefaultPermissionMode | undefined;
   readonly #prompts: () => ThreadPrompts;
   /** Threads whose session the daemon ended to change its settings: the next one says so. */
   readonly #restarted = new Set<ThreadId>();
@@ -360,6 +367,7 @@ export class Engine {
     this.#answerTimeoutMs = options.answerTimeoutMs ?? 10_000;
     this.#titler = options.titler;
     this.#defaultModel = options.defaultModel;
+    this.#defaultPermissions = options.defaultPermissions;
     this.#prompts = options.prompts ?? (() => loadThreadPrompts());
     this.#snoozeMs = options.snoozeMs ?? SNOOZE_MS;
     this.#switchTimeoutMs = options.switchTimeoutMs ?? 15_000;
@@ -1119,7 +1127,10 @@ export class Engine {
    */
   #settingsOf(thread: Thread): SessionSettings {
     const read = this.#checkConfig(thread);
-    const permissionMode = permissionsOf(read);
+    // The daemon's default is for threads you started. A run's or an agent's prompt arrives as a
+    // user turn, which `auto`'s classifier takes as consent, and a repo writes automations (D18).
+    const permissionMode =
+      permissionsOf(read) ?? (thread.origin === "user" ? this.#defaultPermissions : undefined);
     const budget = this.#budgetOf(thread);
     return {
       models: this.#modelsOf(thread, read),

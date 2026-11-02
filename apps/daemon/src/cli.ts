@@ -105,6 +105,9 @@ Environment (details: docs/GUIDE.md):
   TENZO_DEV_ORIGIN     dev-server origins whose pages may use the API (pnpm dev sets Vite's)
   TENZO_CLAUDE_PATH    the claude binary threads run (default: found on PATH)
   TENZO_DEFAULT_MODEL  the model for threads started without --model (default: Claude's own)
+  TENZO_DEFAULT_PERMISSIONS
+                       the permission mode of threads you start: auto allows all but what
+                       looks dangerous (default: your own defaultMode)
   TENZO_SNOOZE_MS      how long a swipe snoozes an item, in ms (default 15 minutes)
   TENZO_PUSH_PREVIEW   what a notification says: short (default) or none
   TENZO_PUSH_CONTACT   the mailto: or https: contact push services see

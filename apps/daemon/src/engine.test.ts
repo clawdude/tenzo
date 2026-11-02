@@ -56,7 +56,10 @@ afterEach(async () => {
 /** A daemon's engine on `home`, as `tenzo serve` makes it. */
 function daemon(
   adapter = new FakeAdapter(),
-  options: Pick<EngineOptions, "titler" | "defaultModel" | "prompts" | "snoozeMs" | "switchTimeoutMs"> = {},
+  options: Pick<
+    EngineOptions,
+    "titler" | "defaultModel" | "defaultPermissions" | "prompts" | "snoozeMs" | "switchTimeoutMs"
+  > = {},
 ) {
   const store = openStore(home);
   stores.push(store);
@@ -1989,6 +1992,41 @@ describe("Engine: project config", () => {
       models: { discuss: { model: "haiku", thinking: "high" } },
       permissionMode: "dontAsk",
     });
+  });
+
+  it("runs threads on TENZO_DEFAULT_PERMISSIONS when the project's config names no mode", async () => {
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input).toMatchObject({ permissionMode: "auto" });
+  });
+
+  it("lets a project's config name its own mode over TENZO_DEFAULT_PERMISSIONS", async () => {
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    writeConfig(d, "config", { permissions: "default" });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input).toMatchObject({ permissionMode: "default" });
+  });
+
+  it("keeps a thread an agent started off TENZO_DEFAULT_PERMISSIONS: its prompt isn't yours", async () => {
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const parent = d.adapter.last;
+    expect(parent.input).toMatchObject({ permissionMode: "auto" });
+    await parent.input.host?.startThread({ prompt: "Fix the flaky test", title: "Flaky test" });
+    await settle();
+    expect(d.adapter.last).not.toBe(parent);
+    expect(d.adapter.last.input).not.toHaveProperty("permissionMode");
+  });
+
+  it("keeps TENZO_DEFAULT_PERMISSIONS when the project's config can't be read", async () => {
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    writeConfig(d, "config", { permissions: "auto" }); // refused: D11
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    expect(d.adapter.last.input).toMatchObject({ permissionMode: "auto" });
   });
 
   it("with no config, a session gets no models, thinking or permission mode", async () => {

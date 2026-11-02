@@ -1,6 +1,6 @@
 import type {
   AgentKind,
-  PermissionModeName,
+  SessionPermissionMode,
   RequestId,
   RuntimeEvent,
   ThreadId,
@@ -40,10 +40,11 @@ export interface StartSessionInput {
    */
   models?: SessionModels;
   /**
-   * The permission mode the project's config sets. Unset (the default): Tenzo sets none, and the
-   * user's own `defaultMode` applies, as in their terminal.
+   * The permission mode the project's config sets, else, for a thread you started,
+   * `TENZO_DEFAULT_PERMISSIONS`. Unset (the default): Tenzo sets none, and the user's own
+   * `defaultMode` applies, as in their terminal.
    */
-  permissionMode?: PermissionModeName;
+  permissionMode?: SessionPermissionMode;
   /** An automation run's spend cap (`SessionSettings.budget`). Unset: none, as in the terminal. */
   budget?: SpendBudget;
   /**
@@ -71,7 +72,7 @@ export interface StartSessionInput {
  */
 export interface SessionSettings {
   models: SessionModels;
-  permissionMode?: PermissionModeName | undefined;
+  permissionMode?: SessionPermissionMode | undefined;
   budget?: SpendBudget | undefined;
 }
 
