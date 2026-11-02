@@ -81,7 +81,7 @@ function parseFile(name: string, text: string): ProjectConfig | string {
   }
   const mode = isPlainObject(json) ? json.permissions : undefined;
   if ((USER_ONLY_MODES as readonly unknown[]).includes(mode)) {
-    return `${name}: permissions: "${String(mode)}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json, or auto with TENZO_DEFAULT_PERMISSIONS: threads honour both.`;
+    return `${name}: permissions: "${String(mode)}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json: threads use that already. auto also works as TENZO_DEFAULT_PERMISSIONS.`;
   }
   const parsed = ProjectConfig.safeParse(json);
   if (parsed.success) return parsed.data;
