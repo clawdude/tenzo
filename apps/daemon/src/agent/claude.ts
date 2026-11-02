@@ -11,7 +11,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type {
-  DefaultPermissionMode,
+  SessionPermissionMode,
   RequestId,
   RuntimeEvent,
   ThinkingLevel,
@@ -87,9 +87,9 @@ import {
  * - a `canUseTool` hook, which is how questions (`AskUserQuestion`) and permission prompts reach
  *   the Pass instead of a terminal.
  *
- * It never sets the permission mode, in any phase, unless the project's `.tenzo/` config does: the
- * user's own `defaultMode` (from their user, project or local settings) applies, as in their
- * terminal. Discussing is held by the discuss prompt and `propose`, not by a mode.
+ * It never sets the permission mode, in any phase, unless the project's `.tenzo/` config or
+ * `TENZO_DEFAULT_PERMISSIONS` does: the user's own `defaultMode` (from their user, project or
+ * local settings) applies, as in their terminal. Discussing is held by the discuss prompt and `propose`, not by a mode.
  *
  * Models come from the project's config and the thread (project-config.ts), per phase:
  * - the model as `model` (`--model`), thinking `off` as `thinking: disabled`, and `low`,
@@ -483,7 +483,7 @@ function startSession(
     mcpServers: {
       [TENZO_MCP_SERVER]: tenzoMcpServer(host, { liveBase: liveBase(input.threadId) }),
     },
-    // No permissionMode unless the project's config or TENZO_DEFAULT_PERMISSIONS sets one: the
+    // No permissionMode unless the engine has one to give (`SessionInput.permissionMode`): the
     // user's own defaultMode applies, in every phase.
     ...permissionOptions(input.permissionMode),
     canUseTool,
@@ -793,9 +793,9 @@ export function budgetOptions(budget: SpendBudget | undefined): Pick<Options, "m
 
 /**
  * The thread's permission mode as the SDK's option, or nothing. Never one that needs the SDK's
- * dangerous opt-in (`DefaultPermissionMode`).
+ * dangerous opt-in (`SessionPermissionMode`).
  */
-export function permissionOptions(mode: DefaultPermissionMode | undefined): Pick<Options, "permissionMode"> {
+export function permissionOptions(mode: SessionPermissionMode | undefined): Pick<Options, "permissionMode"> {
   return mode ? { permissionMode: mode } : {};
 }
 

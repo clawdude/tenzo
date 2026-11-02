@@ -56,7 +56,7 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
-Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo doesn't choose a permission mode: your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
+Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo chooses no permission mode unless you or the project's config name one (`TENZO_DEFAULT_PERMISSIONS`, `permissions`): your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
 
 **Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
 

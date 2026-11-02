@@ -81,7 +81,7 @@ function parseFile(name: string, text: string): ProjectConfig | string {
   }
   const mode = isPlainObject(json) ? json.permissions : undefined;
   if ((USER_ONLY_MODES as readonly unknown[]).includes(mode)) {
-    return `${name}: permissions: "${String(mode)}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json: threads use that already.`;
+    return `${name}: permissions: "${String(mode)}" is never taken from a file in the repo (Claude Code refuses it from project settings too). Set it as defaultMode in your own ~/.claude/settings.json, or auto with TENZO_DEFAULT_PERMISSIONS: threads honour both.`;
   }
   const parsed = ProjectConfig.safeParse(json);
   if (parsed.success) return parsed.data;
@@ -252,7 +252,7 @@ export function landingOf(read: ConfigRead): LandingRule {
   return read.config?.landing ?? "merge";
 }
 
-/** The permission mode the config sets, or none: the user's own `defaultMode` applies. */
+/** The permission mode the config sets, or none: the engine's default, else the user's own. */
 export function permissionsOf(read: ConfigRead): PermissionModeName | undefined {
   return read.config?.permissions;
 }

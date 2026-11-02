@@ -48,8 +48,8 @@ export interface DaemonConfig {
    */
   defaultModel?: string;
   /**
-   * The permission mode of threads whose project's config names none, `auto` above all: allow
-   * unless dangerous. `TENZO_DEFAULT_PERMISSIONS`; unset, the user's own `defaultMode`.
+   * The permission mode of threads you started whose project's config names none, `auto` above
+   * all: allow unless dangerous. `TENZO_DEFAULT_PERMISSIONS`; unset, the user's own `defaultMode`.
    */
   defaultPermissions?: DefaultPermissionMode;
   /**

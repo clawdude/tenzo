@@ -2001,12 +2001,24 @@ describe("Engine: project config", () => {
     expect(d.adapter.last.input).toMatchObject({ permissionMode: "auto" });
   });
 
-  it("lets a project's config lower TENZO_DEFAULT_PERMISSIONS", async () => {
+  it("lets a project's config name its own mode over TENZO_DEFAULT_PERMISSIONS", async () => {
     const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
     writeConfig(d, "config", { permissions: "default" });
     await d.engine.createThread({ project: "app", prompt: "Go" });
     await settle();
     expect(d.adapter.last.input).toMatchObject({ permissionMode: "default" });
+  });
+
+  it("keeps a thread an agent started off TENZO_DEFAULT_PERMISSIONS: its prompt isn't yours", async () => {
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    await d.engine.createThread({ project: "app", prompt: "Go" });
+    await settle();
+    const parent = d.adapter.last;
+    expect(parent.input).toMatchObject({ permissionMode: "auto" });
+    await parent.input.host?.startThread({ prompt: "Fix the flaky test", title: "Flaky test" });
+    await settle();
+    expect(d.adapter.last).not.toBe(parent);
+    expect(d.adapter.last.input).not.toHaveProperty("permissionMode");
   });
 
   it("keeps TENZO_DEFAULT_PERMISSIONS when the project's config can't be read", async () => {

@@ -172,9 +172,9 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 - **Why.** One runaway agent must not fill the Pass or the machine.
 
 ### D18. Few cards: `auto` by a setting of yours, blocks come back as questions (**user decision**)
-- **Decision.** `TENZO_DEFAULT_PERMISSIONS=auto` runs threads in Claude Code's `auto` mode, below a project's `permissions` and above your own `defaultMode`. It is daemon-wide and unset by default, so without it threads still get your own mode. A classifier denial never reaches `canUseTool`, so the thread prompts have the agent ask with `AskUserQuestion` and retry on a yes.
+- **Decision.** `TENZO_DEFAULT_PERMISSIONS=auto` runs threads in Claude Code's `auto` mode, below a project's `permissions` and above your own `defaultMode`. It is unset by default, so without it threads still get your own mode, and it applies only to threads you started: an automation's or agent's prompt arrives as a user turn, which the classifier takes as consent, and a repo writes automations (D11). A classifier denial never reaches `canUseTool`, so the build and landing prompts have the agent ask with `AskUserQuestion`, quoting the exact command, and run it once on a yes.
 - **Why.** Most permission cards are routine work, and a card for each one drowns the few that matter. A question in the agent's own words also says more than a permission prompt can, and your answer counts as consent to the classifier. T3 Code has the same environment default with a project override, but only logs denials; Tenzo needs them on the Pass.
-- **Trade-off.** Reaching you is the prompt's doing: an agent that ignores it leaves only a failed tool in the timeline. Discussing has no permission card behind it. The classifier's rules are Claude Code's, not Tenzo's.
+- **Trade-off.** Reaching you is the prompt's doing: an agent that ignores it leaves only a failed tool in the timeline, and the question is the agent's own wording. Discussing has no permission card behind it. Automations keep their permission cards. A project's `permissions` can still name `acceptEdits` over `auto`, as it always could. The classifier's rules are Claude Code's, not Tenzo's.
 
 ## 5. Known limits
 

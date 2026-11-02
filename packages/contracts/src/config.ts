@@ -25,18 +25,25 @@ export type LandingRule = z.infer<typeof LandingRule>;
  * less (`default`, `dontAsk`). Never `auto` or `bypassPermissions`: Claude Code itself refuses
  * those from repo-controllable settings, and Tenzo hands the mode to Claude as a trusted flag, so
  * taking them from the repo would get past that guard. They belong in your own
- * `~/.claude/settings.json` (`defaultMode`), which threads honour already. Not `plan` either: it
+ * `~/.claude/settings.json` (`defaultMode`), which threads honour already, and `auto` also in
+ * `TENZO_DEFAULT_PERMISSIONS`. Not `plan` either: it
  * stops every tool, so nothing could be built.
  */
 export const PermissionModeName = z.enum(["default", "acceptEdits", "dontAsk"]);
 export type PermissionModeName = z.infer<typeof PermissionModeName>;
 
 /**
- * The modes the daemon's own `TENZO_DEFAULT_PERMISSIONS` may name for every thread: what a repo
- * may set, and `auto`, because that setting is yours and not the repo's. Not `bypassPermissions`,
- * which needs the SDK's dangerous opt-in and belongs in your own settings file.
+ * What a session can run with: what a repo may set, and `auto` from the daemon's own setting.
+ * Not `bypassPermissions`, which needs the SDK's dangerous opt-in.
  */
-export const DefaultPermissionMode = z.enum([...PermissionModeName.options, "auto"]);
+export type SessionPermissionMode = PermissionModeName | "auto";
+
+/**
+ * The modes the daemon's own `TENZO_DEFAULT_PERMISSIONS` may name: `auto`, because that setting is
+ * yours and not the repo's. Not `dontAsk`: it denies what isn't pre-approved without asking, which
+ * takes Tenzo's own tools and `AskUserQuestion` with it, so no thread could reach you.
+ */
+export const DefaultPermissionMode = z.enum(["default", "acceptEdits", "auto"]);
 export type DefaultPermissionMode = z.infer<typeof DefaultPermissionMode>;
 
 /** Modes a `.tenzo/` file may never set, and where they belong instead. */

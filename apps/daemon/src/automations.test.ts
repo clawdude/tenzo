@@ -45,7 +45,10 @@ afterEach(async () => {
   for (const store of stores) store.close();
 });
 
-function daemon(adapter = new FakeAdapter(), options: Pick<EngineOptions, "defaultModel"> = {}) {
+function daemon(
+  adapter = new FakeAdapter(),
+  options: Pick<EngineOptions, "defaultModel" | "defaultPermissions"> = {},
+) {
   const store = openStore(home);
   stores.push(store);
   const engine = new Engine({ store, adapters: { claude: adapter }, log: () => {}, ...options });
@@ -177,6 +180,13 @@ describe("automations: definitions", () => {
 });
 
 describe("automations: running", () => {
+  it("stays off TENZO_DEFAULT_PERMISSIONS: a repo wrote the prompt, and auto takes it as yours", async () => {
+    config({ nightly: NIGHTLY });
+    const d = daemon(new FakeAdapter(), { defaultPermissions: "auto" });
+    await d.engine.runAutomation("app", "nightly");
+    expect(d.adapter.last.input).not.toHaveProperty("permissionMode");
+  });
+
   it("runs one by hand: an ordinary thread, origin automation, with its model and Tenzo's additions", async () => {
     config({ nightly: { ...NIGHTLY, model: "haiku", thinking: "low" } });
     const d = daemon();

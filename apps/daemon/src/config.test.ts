@@ -83,6 +83,7 @@ describe("readConfig", () => {
   it("refuses a TENZO_DEFAULT_PERMISSIONS it won't run threads with", () => {
     expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "bypassPermissions" })).toThrow(/settings\.json/);
     expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "plan" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
+    expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "dontAsk" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
     expect(() => readConfig({ TENZO_DEFAULT_PERMISSIONS: "Auto" })).toThrow(/TENZO_DEFAULT_PERMISSIONS/);
   });
 

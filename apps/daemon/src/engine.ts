@@ -167,7 +167,7 @@ export interface EngineOptions {
    */
   defaultModel?: string;
   /**
-   * The permission mode of threads whose project's config names none
+   * The permission mode of threads you started whose project's config names none
    * (`TENZO_DEFAULT_PERMISSIONS`). Default: the user's own `defaultMode`.
    */
   defaultPermissions?: DefaultPermissionMode;
@@ -1127,8 +1127,10 @@ export class Engine {
    */
   #settingsOf(thread: Thread): SessionSettings {
     const read = this.#checkConfig(thread);
-    // A repo can lower the daemon's default (D11), and only ever to modes it may set.
-    const permissionMode = permissionsOf(read) ?? this.#defaultPermissions;
+    // The daemon's default is for threads you started. A run's or an agent's prompt arrives as a
+    // user turn, which `auto`'s classifier takes as consent, and a repo writes automations (D18).
+    const permissionMode =
+      permissionsOf(read) ?? (thread.origin === "user" ? this.#defaultPermissions : undefined);
     const budget = this.#budgetOf(thread);
     return {
       models: this.#modelsOf(thread, read),

@@ -29,7 +29,7 @@ The daemon reads these once at start (`apps/daemon/src/config.ts`, which refuses
 | `TENZO_DEV_ORIGIN` | none (`pnpm dev` sets Vite's) | dev-server origins whose pages may use the API and `/ws`, comma-separated |
 | `TENZO_CLAUDE_PATH` | found | the `claude` threads run: the first on `PATH`, else `~/.local/bin`, `~/.claude/local`, `/opt/homebrew/bin` or `/usr/local/bin` |
 | `TENZO_DEFAULT_MODEL` | Claude's own | the model for threads that weren't given one and whose project config names none (`haiku` for cheap trial runs) |
-| `TENZO_DEFAULT_PERMISSIONS` | your own `defaultMode` | the permission mode of threads whose project config names none: `default`, `acceptEdits`, `dontAsk` or `auto` ([below](#permissions)) |
+| `TENZO_DEFAULT_PERMISSIONS` | your own `defaultMode` | the permission mode of threads you start, when the project config names none: `default`, `acceptEdits` or `auto` ([below](#permissions)) |
 | `TENZO_SNOOZE_MS` | 15 minutes | how long a swipe snoozes a card, in ms |
 | `TENZO_PUSH_PREVIEW` | `short` | what a notification says: `short` (thread name and a short line) or `none` ("A thread needs you.") |
 | `TENZO_PUSH_CONTACT` | the project's GitHub page | the `mailto:` or `https:` contact push services see (VAPID `sub`) |
@@ -124,8 +124,9 @@ TENZO_DEFAULT_PERMISSIONS=auto pnpm tenzo serve   # or: … pnpm tenzo service i
 
 A running service keeps its own copy of this setting, so add it to the plist and restart it, or reinstall with every `TENZO_*` setting in the shell.
 
-- **Which mode wins:** the project config's `permissions`, then `TENZO_DEFAULT_PERMISSIONS`, then your own `defaultMode`. A repo can lower the mode but can't set `auto` itself. A change applies from the thread's next turn.
-- **What a block looks like.** Claude Code denies the call without asking anyone, so Tenzo's prompts tell the agent to bring it to you: a question card saying what it wants to do and what could go wrong, with *Do it* and *Skip it*. *Do it* lets it retry. That is the agent following its prompt, not something the daemon enforces; a block it skipped past shows in the thread's timeline as a failed tool. While landing, a yes never lifts the landing rules.
+- **Which mode wins:** the project config's `permissions`, then `TENZO_DEFAULT_PERMISSIONS`, then your own `defaultMode`. The project's key can still pick `default`, `acceptEdits` or `dontAsk`, but a repo can't set `auto`. A change applies [as any other mode change does](#project-config): at a turn boundary, once no background work runs.
+- **Only threads you start.** Automation runs and threads an agent started keep your own `defaultMode`, so they ask. Their prompts arrive as your words, `auto` takes your words as consent, and a repo writes automations.
+- **What a block looks like.** Claude Code denies the call without asking anyone, so the build and landing prompts tell the agent to bring it to you: a question card quoting the exact command, saying what could go wrong, with *Do it* and *Skip it*. *Do it* lets it run exactly that, once. The agent writes this card, so read what it quotes. It is the agent following its prompt, not something the daemon enforces; a block it skipped past shows in the thread's timeline as a failed tool. While landing, a yes never lifts the landing rules.
 - **Discussing.** "Don't change anything until we agree" is the prompt's rule and always was. With `auto` there is no permission card behind it.
 
 `auto` needs a Claude Code version, account and model that support it. `session.configured` in a thread's log shows the mode it really got.
