@@ -294,8 +294,38 @@ export function writePlist(path: string, plist: string): void {
 /** (Re)loads the agent from its plist: stops the running daemon, if any, and starts it again. */
 export function loadService(path: string = plistPath()): void {
   requireMac();
-  launchctl("bootout", `${domain()}/${SERVICE_LABEL}`); // the one running, if any
-  const loaded = launchctl("bootstrap", domain(), path);
+  reloadAgent(domain(), path, {
+    run: launchctl,
+    sleep: (ms) => void Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms),
+    now: Date.now,
+  });
+}
+
+/** Long enough for launchd to give a daemon its 20 s to exit, then kill it. */
+const RELOAD_TIMEOUT_MS = 30_000;
+const RELOAD_RETRY_MS = 250;
+
+/**
+ * `bootout` returns with the service still on its way out, and until it has gone `bootstrap` fails
+ * with launchd's catch-all "5: Input/output error". So after stopping a daemon, keep trying.
+ * That error also covers a plist launchd won't load, so with nothing stopped it fails at once.
+ */
+export function reloadAgent(
+  domain: string,
+  path: string,
+  deps: {
+    run: (...args: string[]) => { ok: boolean; output: string };
+    sleep: (ms: number) => void;
+    now: () => number;
+  },
+): void {
+  const stopped = deps.run("bootout", `${domain}/${SERVICE_LABEL}`).ok; // the one running, if any
+  const deadline = deps.now() + (stopped ? RELOAD_TIMEOUT_MS : 0);
+  let loaded = deps.run("bootstrap", domain, path);
+  while (!loaded.ok && deps.now() < deadline) {
+    deps.sleep(RELOAD_RETRY_MS);
+    loaded = deps.run("bootstrap", domain, path);
+  }
   if (!loaded.ok) {
     throw new TenzoError(`launchctl couldn't load ${path}: ${loaded.output || "no reason given"}`);
   }
