@@ -142,7 +142,7 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 
 ### D11. Repo-controlled config is untrusted
 - **Decision.** `.tenzo/config.json` and `local.json` are read only from regular files inside the repo (no symlinks, ≤ 64 KB, re-checked on the open file). `permissions` may only be `default`, `acceptEdits` or `dontAsk`; `auto` belongs to the daemon's own `TENZO_DEFAULT_PERMISSIONS` (D18) or your `~/.claude/settings.json`, `bypassPermissions` only to the latter. Automation definitions can't set a permission mode. The automations off switch lives in `$TENZO_HOME`, not the repo. An invalid config never stops a thread: it runs on defaults and one config card says what's wrong.
-- **Why.** Anyone who can commit to the repo must not be able to raise an agent's permissions or remove the brake.
+- **Why.** Anyone who can commit to the repo must not be able to reach `auto` or `bypassPermissions`, or remove the brake. The modes a repo may name are what Claude Code's own project settings could already grant, so naming one over your default is no new power.
 
 ### D12. Local vs remote by peer, Host and forwarding headers; pairing, no cloud of ours
 - **Decision.** A request is local only when the peer is loopback, `Host` names loopback, and no forwarding header (an exact list: `X-Forwarded-For`, `Forwarded`, `Tailscale-User-*`, …) is present; spoofing can only make a request remote. Every request is checked for Host (loopback or `TENZO_ALLOWED_HOSTS`, against DNS rebinding) and Origin (its own host and port, an allowed host over https on any port, or `TENZO_DEV_ORIGIN`; WebSockets get no preflight). Remote callers need a paired device's cookie: `__Host-tenzo`, `HttpOnly; Secure; SameSite=Strict; Path=/`, no Domain, 400 days, never in a response body, taken only from Tenzo's own pages (`Sec-Fetch-Site` same-origin or none). Every response carries `frame-ancestors 'none'`, `X-Frame-Options: DENY`, `nosniff` and `Referrer-Policy: no-referrer`. Public: the web app's files, `/health`, `GET /api/session` and `POST /api/pair`. Tailscale is the pipe, not the identity; there are no accounts and no relay.
@@ -178,6 +178,7 @@ Short ADRs. Decisions marked **user decision** were made explicitly by the user 
 
 ## 5. Known limits
 
+- **"Threads you started" means anything using the local API.** D18 keeps `auto` from automations and agent-started threads, but a thread's own shell can reach the daemon over loopback, which counts as you (D12), and start a thread with origin `user`.
 - **SSH tunnels count as local.** `ssh -L` to the daemon's port arrives from loopback with a loopback Host.
 - **Raw TCP forwarding makes everyone local.** `tailscale serve --tcp`/`--tls-terminated-tcp`, `socat`, `ssh -R`, ngrok TCP (or an HTTP proxy that rewrites Host to loopback and drops forwarding headers) bypass pairing. Use only `tailscale serve --https`.
 - **Cost figures are Claude's estimates**; a session that ended before saving its total can undercount a run.

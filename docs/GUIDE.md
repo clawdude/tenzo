@@ -125,7 +125,7 @@ TENZO_DEFAULT_PERMISSIONS=auto pnpm tenzo serve   # or: … pnpm tenzo service i
 A running service keeps its own copy of this setting, so add it to the plist and restart it, or reinstall with every `TENZO_*` setting in the shell.
 
 - **Which mode wins:** the project config's `permissions`, then `TENZO_DEFAULT_PERMISSIONS`, then your own `defaultMode`. The project's key can still pick `default`, `acceptEdits` or `dontAsk`, but a repo can't set `auto`. A change applies [as any other mode change does](#project-config): at a turn boundary, once no background work runs.
-- **Only threads you start.** Automation runs and threads an agent started keep your own `defaultMode`, so they ask. Their prompts arrive as your words, `auto` takes your words as consent, and a repo writes automations.
+- **Only threads you start.** Automation runs and threads an agent started keep your own `defaultMode` instead. Their prompts arrive as your words, `auto` takes your words as consent, and a repo writes automations. So `defaultMode: "auto"` in your own settings reaches them too; `TENZO_DEFAULT_PERMISSIONS` doesn't.
 - **What a block looks like.** Claude Code denies the call without asking anyone, so the build and landing prompts tell the agent to bring it to you: a question card quoting the exact command, saying what could go wrong, with *Do it* and *Skip it*. *Do it* lets it run exactly that, once. The agent writes this card, so read what it quotes. It is the agent following its prompt, not something the daemon enforces; a block it skipped past shows in the thread's timeline as a failed tool. While landing, a yes never lifts the landing rules.
 - **Discussing.** "Don't change anything until we agree" is the prompt's rule and always was. With `auto` there is no permission card behind it.
 
@@ -175,7 +175,7 @@ Optional: `.tenzo/config.json` (commit it) and `.tenzo/local.json` (yours; gitig
 | `models.discuss` | until *Build it*. `model` as `--model`; `thinking` `off` (thinking disabled) or `low`/`medium`/`high` (Claude's effort level, what `/effort` sets) |
 | `models.build` | from *Build it* on: building, review, landing. *Build it* switches the running session in place |
 | `models.agents` | subagents' `model` (`CLAUDE_CODE_SUBAGENT_MODEL`), used only for a subagent whose own definition names none |
-| `permissions` | the permission mode in every phase: `default`, `acceptEdits` or `dontAsk`. Absent (the usual), `TENZO_DEFAULT_PERMISSIONS` applies, else your own `defaultMode`. `auto` and `bypassPermissions` are refused here: set `auto` with [`TENZO_DEFAULT_PERMISSIONS`](#permissions), or either in your own `~/.claude/settings.json`. `plan` isn't offered |
+| `permissions` | the permission mode in every phase: `default`, `acceptEdits` or `dontAsk`. Absent (the usual), `TENZO_DEFAULT_PERMISSIONS` applies to threads you start, else your own `defaultMode`. `auto` and `bypassPermissions` are refused here: set `auto` with [`TENZO_DEFAULT_PERMISSIONS`](#permissions), or either in your own `~/.claude/settings.json`. `plan` isn't offered |
 | `landing` | the finished card's filled button: `merge` (default) or `pr` |
 | `automations` | below |
 

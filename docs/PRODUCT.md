@@ -130,7 +130,7 @@ MVP triggers: schedule and "run now." Event triggers (webhooks) later; they need
 }
 ```
 
-Anything missing falls back to the agent's own defaults. Discuss model runs until *Build it*, build model after; agents model goes to subagents. A thread can override the model from its "⋯". An optional `permissions` key overrides the permission mode, limited to `default`, `acceptEdits` or `dontAsk` because the file lives in the repo; `TENZO_DEFAULT_PERMISSIONS=auto` is how you get cards only for what looks dangerous. `agent` accepts only `claude` until the Codex adapter exists (M5, deferred). Every key: [GUIDE.md](GUIDE.md#project-config).
+Anything missing falls back to the agent's own defaults. Discuss model runs until *Build it*, build model after; agents model goes to subagents. A thread can override the model from its "⋯". An optional `permissions` key overrides the permission mode, limited to `default`, `acceptEdits` or `dontAsk` because the file lives in the repo; `TENZO_DEFAULT_PERMISSIONS=auto` is how threads you start get cards only for what looks dangerous. `agent` accepts only `claude` until the Codex adapter exists (M5, deferred). Every key: [GUIDE.md](GUIDE.md#project-config).
 
 ## 9. Remote access and auth
 
