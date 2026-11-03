@@ -45,6 +45,8 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 ## From real use
 
 - [x] #63 Quiet, readable permission cards: allow unless dangerous
+- [x] #66 Answers come back as reply cards, the thread page takes messages, Archive by hand
+- [ ] #67 A thread archives on its own once its branch is merged
 
 ## M5 · Codex
 

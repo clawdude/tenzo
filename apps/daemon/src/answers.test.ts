@@ -78,6 +78,50 @@ const error = (prompts: string[] = ["Fix it"]): QueueItem => ({
   error: { cause: "turn", message: "API Error: 529", prompts },
 });
 
+describe("replies", () => {
+  const reply: QueueItem = {
+    ...base,
+    detached: false,
+    kind: "reply",
+    ask: "It races the mock",
+    options: [],
+    suggested: "done",
+    questions: [],
+    reply: { message: "It races the mock", prompt: "Why?" },
+  };
+
+  it("take got it, or words to send next, from the CLI too", () => {
+    for (const done of ["got it", "Got It", "1", "Done"]) {
+      expect(answerFromWords(reply, done.split(" "))).toEqual({ kind: "reply", decision: "done" });
+    }
+    // "Want me to do it?" "yes": words for the agent, never a silent Got it.
+    for (const words of ["yes", "y", "ok"]) {
+      expect(answerFromWords(reply, [words])).toEqual({ kind: "reply", decision: "send", text: words });
+    }
+    expect(answerFromWords(reply, ["yes,", "fix", "it"])).toEqual({
+      kind: "reply",
+      decision: "send",
+      text: "yes, fix it",
+    });
+    expect(() => answerFromWords(reply, [""])).toThrow(/got it, or say what/);
+  });
+
+  it("are checked: words to send are tidied and required; no standing reply", () => {
+    expect(checkAnswer(reply, { kind: "reply", decision: "send", text: " go " })).toEqual({
+      kind: "reply",
+      decision: "send",
+      text: "go",
+    });
+    expect(checkAnswer(reply, { kind: "reply", decision: "done", text: "x" })).toEqual({
+      kind: "reply",
+      decision: "done",
+    });
+    expect(() => checkAnswer(reply, { kind: "reply", decision: "send", text: " " })).toThrow(/Say what/);
+    expect(() => checkAnswer(reply, { kind: "error", action: "retry" })).toThrow(/is a reply; answer it with got it/);
+    expect(standingReply(reply, { kind: "reply", decision: "done" })).toBeNull();
+  });
+});
+
 describe("error items", () => {
   it("take retry, archive, or words to tell the agent, from the CLI too", () => {
     expect(answerFromWords(error(), ["retry"])).toEqual({ kind: "error", action: "retry" });

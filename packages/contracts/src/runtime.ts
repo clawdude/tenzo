@@ -392,13 +392,37 @@ export const RuntimeEvent = z.discriminatedUnion("type", [
     payload: z.object({ message: z.string(), prompts: z.array(z.string()) }),
   }),
   /**
+   * Recorded by the daemon: a turn ended with the agent's words and nothing else to come (no
+   * item, nothing queued, not landing, no wake), so its answer goes on the Pass as a reply card.
+   * `message`: its final words; `prompt`: what the turn answered, when Tenzo sent it.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("reply.opened"),
+    payload: z.object({ message: z.string(), prompt: z.string().optional() }),
+  }),
+  /**
+   * Recorded by the daemon: you put a reply away (`done`, Got it), or a prompt reached its thread
+   * (`continued`: from the card, the thread page, the CLI), in the transaction that queued it.
+   */
+  z.object({
+    ...base,
+    requestId: RequestId,
+    type: z.literal("reply.resolved"),
+    payload: z.object({ decision: z.enum(["done", "continued"]) }),
+  }),
+  /**
    * Recorded by the daemon, not an agent: the thread was archived, and its open items with it.
-   * In the log so that folding the log gives what the daemon shows.
+   * In the log so that folding the log gives what the daemon shows. `reason`: its agent's
+   * `landed` held (`landed`); you archived it (`manual`: the web, the CLI, a card's Archive or
+   * Stop, an automation's archive finished runs); an automation's run that left nothing to keep
+   * (`retired`). Absent on events from before it was recorded.
    */
   z.object({
     ...base,
     type: z.literal("thread.archived"),
-    payload: z.object({}),
+    payload: z.object({ reason: z.enum(["landed", "manual", "retired"]).optional() }),
   }),
   /**
    * Recorded by the daemon: something about the thread worth knowing that needs no answer, shown

@@ -63,6 +63,11 @@ describe("suggestedAnswer", () => {
     expect(suggestedAnswer(error)).toEqual({ kind: "error", action: "retry" });
   });
 
+  it("puts a reply away: Got it", () => {
+    const reply = item("x", "a", { kind: "reply", suggested: "done", questions: [] });
+    expect(suggestedAnswer(reply)).toEqual({ kind: "reply", decision: "done" });
+  });
+
   it("sends the suggested decision on a permission request, Allow when there is none", () => {
     const permission = item("x", "a", { kind: "permission", suggested: "allow" });
     expect(suggestedAnswer(permission)).toEqual({ kind: "permission", decision: "allow" });

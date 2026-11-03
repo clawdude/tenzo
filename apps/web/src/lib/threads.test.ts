@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import type { ThreadView } from '@tenzo/client-runtime';
-import { failure, finished, item, permission, proposal, thread } from './fixtures.ts';
+import { failure, finished, item, permission, proposal, reply, thread } from './fixtures.ts';
 import { entriesOf, groupThreads, originOf, rowOf, untilLabel } from './threads.ts';
 
 /** A ready PR card of a given thread. */
@@ -118,6 +118,17 @@ describe('rowOf', () => {
 		});
 	});
 
+	it('says replied, in clay under Needs you, for an answer waiting on you; done once put away', () => {
+		const t = thread('a', { activity: 'needs-you' });
+		const answered = { ...reply('r'), threadId: t.id };
+		expect(rowOf(t, [answered])).toMatchObject({ tone: 'clay', word: 'replied' });
+		expect(groupThreads([t], [answered], now)[0]?.key).toBe('needs-you');
+		// Got it: nothing open, nothing running. It was active today, so Today, as done.
+		const after = { ...t, activity: 'idle' as const, activeAt: new Date(now).toISOString() };
+		expect(rowOf(after, [])).toMatchObject({ tone: 'done', word: 'done' });
+		expect(groupThreads([after], [], now)[0]?.key).toBe('today');
+	});
+
 	it('says failed, in clay, for a thread whose last turn failed: never done', () => {
 		const t = thread('a', { activity: 'needs-you' });
 		const failed = { ...failure('e'), threadId: t.id };
@@ -189,9 +200,10 @@ describe('every state has its word', () => {
 			proposal('b'),
 			finished('f'),
 			failure('e'),
-			ready('r')
+			ready('r'),
+			reply('a')
 		].map((i) => rowOf(t, [{ ...i, threadId: t.id }]).word);
-		expect(words).toEqual(['asking', 'allow?', 'build?', 'review', 'failed', 'merge?']);
+		expect(words).toEqual(['asking', 'allow?', 'build?', 'review', 'failed', 'merge?', 'replied']);
 	});
 });
 

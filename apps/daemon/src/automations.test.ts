@@ -253,6 +253,8 @@ describe("automations: running", () => {
     a.say("Two upgrades are due: zod and hono.");
     a.complete("completed", { costUsd: 0.02 });
     await settle();
+    // A run's last words feed the next run: never a reply card, or there'd be one every hour.
+    expect(d.engine.snapshot().items).toEqual([]);
     await due(d);
     await until(() => d.adapter.sessions.length === 2, "the second run");
     expect(view(d).lastRun).toMatchObject({ trigger: "schedule", result: "started", state: "going" });

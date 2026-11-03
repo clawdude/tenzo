@@ -11,3 +11,4 @@ Files are Design-canvas components (`.dc.html`). The static ones open in a brows
 - `C2` snooze toast · `D1` all clear
 - `A1`–`A4` — the four question-card variations compared before choosing A1
 - `Threads`, `NewThread` — round 2; the built screens (#33) follow them, with hairlines replaced by slices and layers
+- `replies/` — reply card, thread page message field, archive sheet, archive when merged (2026-11-03; `frames.html` is the source, rendered at 2×)

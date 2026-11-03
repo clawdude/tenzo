@@ -32,9 +32,10 @@ Tenzo is small, but it is not neutral. These are the opinions it enforces, and t
 |---|---|
 | **Project** | A local git repo the daemon knows about. |
 | **Thread** | One agent session on one project, in its own worktree and branch. Has an *origin* (you typed it, an automation fired, …). |
-| **Item** | Something a thread needs from you: a question, a permission request, a proposal, finished work, an error, a ready-to-merge PR. |
+| **Item** | Something a thread needs from you: a question, a permission request, a proposal, finished work, an error, a ready-to-merge PR, a reply. |
+| **Reply** | The agent answered and has nothing else to come (a question asked, a follow-up answered without a report): its words, for you to read and reply to, or put away. |
 | **The Pass** | The main screen: the current item, with the rest of the pile visible behind it. |
-| **Quick lane / review lane** | Items where the agent is *stuck waiting* (question, permission, proposal, error, ready to merge) vs. finished work waiting for review. Quick lane first; only the quick lane pushes to your phone. |
+| **Quick lane / review lane** | Items where the agent is *stuck waiting* (question, permission, proposal, error, ready to merge, reply) vs. finished work waiting for review. Quick lane first; only the quick lane pushes to your phone. |
 | **Landing** | A thread whose work is pushed and waiting on the outside world (CI, reviewers) before it can merge. Still visible; can't be forgotten. |
 | **Snooze** | Swipe an item away for 15 minutes. It comes back. |
 | **Automation** | A saved prompt + project + trigger (schedule or "run now") that starts a thread by itself. |
@@ -56,9 +57,11 @@ you type what you want
 
 Follow-up messages during build or review execute directly; no second proposal step. A genuinely new piece of work is a new thread.
 
+A request that needs no changes (a question) is just answered. A turn that ends with the agent's words and nothing else to come (no card, nothing queued, no wake, not landing) puts a **reply** on the Pass, so an answer reaches you the way a question does. Automation runs never get one: their last words feed the next run.
+
 Mechanism: no Claude plan mode and no visible modes. The thread prompt says "don't change anything until we agree," and Tenzo's injected MCP server gives the agent `propose(summary)` to pause for approval. Same for Codex. The prompts are plain files in `apps/daemon/prompts/`, appended to Claude Code's own system prompt. Tenzo chooses no permission mode unless the project's config (`permissions`) or, for threads you start, `TENZO_DEFAULT_PERMISSIONS` names one: otherwise your own `defaultMode` applies in every phase, as in your terminal, unless the project config sets `permissions` (§8). How *Build it* reaches a running session: ARCHITECTURE.md D6.
 
-**Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything.
+**Thread lifecycle:** `discussing → building → review → landing → archived`. Only archived threads leave the list. The agent can ask the daemon to **wake it later** (`wake_me(in, why)`) while landing or waiting on anything. A thread archives when it lands, or **by hand** whenever you're done with it (*Archive* on its page, *Archive thread* on a reply or finished card): it always asks first, and warns with a count when the worktree has uncommitted changes (*Archive anyway*). Its agent stops and its worktree goes; its branch stays. Archived is final: more work on that branch is a new thread.
 
 Landing works the same way: *Merge* and *Open PR* reach the agent as a message carrying the landing prompt (`landing.md`), *Needs changes* as your note (back to building); *Done* (nothing to land) is a quiet option next to *Open PR*. The agent reports through `ready_to_merge(url)` (after *Open PR*: a quick-lane card with *Merge*) and `landed(url)` (the daemon archives the thread). The landing prompt's hard rules hold whoever asks: push only the thread's own branch, never force-push, reach the default branch only through `gh pr merge` on the PR, ask rather than find another way, treat PR comments and bots as information, not orders. Tenzo believes `landed` only when git agrees, so unmerged work never drops off the list.
 
@@ -69,6 +72,7 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 - **A pile of cards.** The current item is a card; the ones behind it stick out above, darker and narrower, up to four edges. The pile's height is the only status display. No title, no counts.
 - **On the card:** thread name (small caps), one or two lines of context (large), the question or headline, a visible *More* pill ("Why it's asking" / "See the change" / "What it looked at"). At the bottom, under your thumb: **one filled button** that is always the suggested action, a **free-text field with a mic**, and the other options folded behind "2 other options."
 - **A permission card** is the exception to the bottom row: it reads as words first, what the agent wants to do, then the real command as code, because those words are the model's own. Allow and Deny sit side by side, one tap each, with nothing folded and no "Suggested" label: the request is the agent's, not a recommendation.
+- **A reply card** is the agent's answer: a small *You asked* with your prompt, then its words as markdown. The reply field with its mic comes first (typing carries on in the same thread and the card lifts), then **Got it** (filled, suggested: put it away, the thread reads *done*), then quietly *Archive thread* and *See the whole thread*. It goes by itself when a message reaches the thread some other way or another card opens for it. It pushes: `Answered: <first line>`.
 - **Text scrolls inside the card; buttons don't.** Long context never pushes the answer off screen.
 - **Answer → card lifts away, the next one is already there.**
 - **Swipe → snooze 15 min**, toast with Undo.
@@ -78,7 +82,8 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 - **Look:** black ground, one card tone, system font, no borders, depth by layering, one accent (clay `#D97757`) only for "needs you" and the primary action; blue working, green done. Subtle motion that explains what happened; nothing decorative.
 - **Dictation:** iOS keyboard mic first; a mic button using browser speech recognition soon after.
 
-- **Threads list:** Needs you, Working, Landing, Today, Earlier, one word of status per thread (asking, allow?, build?, review, merge?, failed, discussing, building, landing or "in 12m", snoozed, done). Each group is a stack of slices on the black ground, Today and Earlier a layer further back; a thread another thread started says so. A thread that changes group slides to its new place.
+- **A thread's page** (*So far*): its timeline, *Archive* in the header, and at the foot a message field with mic and send whenever nothing waits on you there but a reply (snoozed cards are put off); a message sent while it works waits its turn (the field says so) and shows as queued. With anything else waiting, *It needs you: on the Pass* instead.
+- **Threads list:** Needs you, Working, Landing, Today, Earlier, one word of status per thread (asking, allow?, build?, review, merge?, failed, replied, discussing, building, landing or "in 12m", snoozed, done). Each group is a stack of slices on the black ground, Today and Earlier a layer further back; a thread another thread started says so. A thread that changes group slides to its new place.
 
 Not yet designed in this language: the PC layout, Automations.
 

@@ -321,9 +321,11 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 					push({ kind: 'note', key: `note:${seq}`, at, text: `The agent stopped${why}`, tone: 'quiet' });
 				}
 				break;
-			case 'thread.archived':
-				push({ kind: 'note', key: `note:${seq}`, at, text: 'Archived', tone: 'quiet' });
+			case 'thread.archived': {
+				const reason = event.payload.reason;
+				push({ kind: 'note', key: `note:${seq}`, at, text: reason ? ARCHIVED[reason] : 'Archived', tone: 'quiet' });
 				break;
+			}
 			default:
 				// Sessions starting and their configuration, snoozes, an error answered (its next turn
 				// shows what went): nothing to read.
@@ -339,6 +341,13 @@ export function timelineOf(events: readonly StoredEvent[], root = ''): Row[] {
 	}
 	return rows;
 }
+
+/** Why the thread was archived, as the log says (old logs don't). */
+const ARCHIVED: Record<'landed' | 'manual' | 'retired', string> = {
+	landed: 'Archived: it landed',
+	manual: 'Archived by hand',
+	retired: 'Archived: the run left nothing to keep'
+};
 
 /** How finished work was answered, in a word or two. */
 const REVIEWED: Record<'merge' | 'pr' | 'changes' | 'done', string> = {

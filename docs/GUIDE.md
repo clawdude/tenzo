@@ -91,6 +91,7 @@ pnpm tenzo thread list [app] [--all]
 pnpm tenzo thread log <thread-id> [--follow]
 pnpm tenzo items                               # what the threads need from you, oldest first
 pnpm tenzo answer <item-id> 2                  # an option's number or label, or your own words
+                                               # (a reply: `got it`; anything else, `yes` too, goes to it)
 pnpm tenzo thread archive <thread-id>          # refuses a dirty worktree; --force discards it (and
                                                # lets go of a thread whose repo was moved or deleted)
 ```
@@ -100,6 +101,10 @@ Project commands work on the database directly; thread commands go through the r
 The default branch is what `origin/HEAD` points at, else a local `main` or `master`, else the checked-out branch. A new thread first fetches it from `origin` (at most 10 s; only `origin/<default>` moves) and starts from whichever of your local default branch and origin's is newer, so work merged on GitHub is in the next thread even if you haven't pulled. If they have diverged it starts from yours and says so in the thread's timeline. A slug already used gets `-2`, `-3`, …
 
 A thread without a title is named by its prompt's first words, then a few seconds later by a 2–4 word name from a one-shot `claude` on haiku. Its agent stays up between turns (background tasks keep reporting) until the thread is archived, the daemon stops, or a settings change needs a new session; the next prompt then resumes Claude's stored session.
+
+A turn that ends with the agent's words and nothing else to come (no card, nothing queued, no wake, not landing) leaves a **reply** card: an answer to a question, say. It pushes like a question. Typing on it (or on the thread page, or `thread send`) carries on in the same session and puts the card away; *Got it* puts it away. Automation runs never get one.
+
+**Archive by hand** from the thread page's header, or *Archive thread* on a reply or finished card. A sheet always asks first; when the worktree has uncommitted changes it says how many files and offers *Archive anyway* (`--force`), and so it does when the thread's repo was moved or deleted. The branch is kept either way.
 
 To try it without touching your real state:
 

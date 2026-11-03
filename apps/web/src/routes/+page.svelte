@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { onMount } from 'svelte';
 	import AllClear from '#lib/AllClear.svelte';
+	import ArchiveSheet from '#lib/ArchiveSheet.svelte';
 	import Card from '#lib/Card.svelte';
 	import SnoozeToast from '#lib/SnoozeToast.svelte';
 	import type { Failure } from '#lib/answering.ts';
@@ -44,6 +45,9 @@
 		null
 	);
 	let toastTimer: ReturnType<typeof setTimeout> | undefined;
+	/** The thread whose Archive was tapped on its card: the sheet asks first. */
+	let archiving = $state<string | null>(null);
+	const archivingThread = $derived(live.threads.find((t) => t.id === archiving));
 
 	const pile = $derived(pileOf(live.items, { leaving, front: bringing ?? front }));
 	const current = $derived(pile[0]);
@@ -312,6 +316,7 @@
 						liveGrant={live.live?.grant ?? null}
 						threadView={live.threads.find((t) => t.id === item.threadId)}
 						onanswer={(a) => answer(item, a)}
+						onarchive={() => (archiving = item.threadId)}
 					/>
 				</div>
 			{/each}
@@ -326,3 +331,8 @@
 		{/if}
 	</div>
 </main>
+
+{#if archivingThread}
+	<!-- Archived, its cards are dismissed by the daemon and leave the pile by themselves. -->
+	<ArchiveSheet thread={archivingThread} onclose={() => (archiving = null)} />
+{/if}

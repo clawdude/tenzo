@@ -67,7 +67,7 @@ pnpm tenzo pair --name "My iPhone"
 
 ## Notifications
 
-A paired device can get a notification when a thread is stuck waiting on it (a question, a permission, a proposal, an error or budget pause, a PR ready to merge), never for finished work. One notification per thread, replaced by the newest card; none while Tenzo is open and in view on that device, none to a muted device, and none on the Mac itself. They go through the browser's own push service (Apple's for iPhone), outbound from the daemon, so a tailnet-only daemon still reaches your phone.
+A paired device can get a notification when a thread is stuck waiting on it (a question, a permission, a proposal, an error or budget pause, a PR ready to merge, an answer it gave), never for finished work. One notification per thread, replaced by the newest card; none while Tenzo is open and in view on that device, none to a muted device, and none on the Mac itself. They go through the browser's own push service (Apple's for iPhone), outbound from the daemon, so a tailnet-only daemon still reaches your phone.
 
 **On iPhone** (iOS 16.4 or later), only the home-screen app gets them:
 
@@ -78,7 +78,7 @@ A paired device can get a notification when a thread is stuck waiting on it (a q
 
 Each device's card in Devices has *Mute* / *Unmute*, *Test* and *Turn off*.
 
-**What they say**: the thread's name and one short line (the question, or "Allow Bash?" for a permission; never the command, its input or context), cut to 60 and 120 characters. They are encrypted to your browser, but Apple or Google still see when and how big. `TENZO_PUSH_PREVIEW=none` makes each one just "Tenzo · A thread needs you." When you open Tenzo it clears the notifications of threads that no longer need you.
+**What they say**: the thread's name and one short line (the question, "Allow Bash?" for a permission, "Answered: " and an answer's first line; never the command, its input or context), cut to 60 and 120 characters. They are encrypted to your browser, but Apple or Google still see when and how big. `TENZO_PUSH_PREVIEW=none` makes each one just "Tenzo · A thread needs you." When you open Tenzo it clears the notifications of threads that no longer need you.
 
 ## Devices
 

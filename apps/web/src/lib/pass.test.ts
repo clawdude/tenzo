@@ -1,9 +1,10 @@
 import { describe, expect, it } from 'vitest';
 import { type QueueItem, suggestedAnswer } from '@tenzo/client-runtime';
-import { at, failure, finished, item, permission, proposal, question, ready } from './fixtures.ts';
+import { at, failure, finished, item, permission, proposal, question, ready, reply } from './fixtures.ts';
 import {
 	ageLabel,
 	answerOf,
+	asidesOf,
 	commandOf,
 	byLaneThenAge,
 	LANES,
@@ -19,6 +20,41 @@ import {
 
 const t0 = Date.parse(at);
 const later = (minutes: number) => new Date(t0 + minutes * 60_000).toISOString();
+
+describe('a reply card', () => {
+	it('suggests Got it; words go on as the next prompt', () => {
+		const card = reply('r');
+		expect(stepsOf(card)).toEqual([
+			{
+				key: 'reply',
+				ask: "It races the payment mock's timer",
+				suggested: { label: 'Got it', value: 'done', description: '' },
+				recommended: true,
+				others: [],
+				row: [],
+				placeholder: 'Reply to keep going…'
+			}
+		]);
+		const [step] = stepsOf(card);
+		if (!step?.suggested) throw new Error('no step');
+		expect(answerOf(card, [{ choice: step.suggested }])).toEqual({ kind: 'reply', decision: 'done' });
+		expect(answerOf(card, [{ text: ' Yes, fix it ' }])).toEqual({
+			kind: 'reply',
+			decision: 'send',
+			text: 'Yes, fix it'
+		});
+		expect(suggestedAnswer(card)).toEqual({ kind: 'reply', decision: 'done' });
+		// It is the agent waiting on you: the quick lane, ahead of finished work.
+		expect(pileOf([finished('f'), card]).map((i) => i.kind)).toEqual(['reply', 'finished']);
+	});
+
+	it('offers Archive thread on replies and finished work, and the whole thread on a reply', () => {
+		expect(asidesOf(reply('r')).map((a) => a.label)).toEqual(['Archive thread', 'See the whole thread']);
+		expect(asidesOf(finished('f')).map((a) => a.kind)).toEqual(['archive']);
+		expect(asidesOf(item('q'))).toEqual([]);
+		expect(asidesOf(failure('e'))).toEqual([]);
+	});
+});
 
 describe('pileEdges', () => {
 	it('shows one edge per card waiting behind the current one, up to four', () => {

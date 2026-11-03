@@ -179,6 +179,8 @@ async function run(
       throw new TenzoError(`${command.type} works over the WebSocket only.`);
     case "thread.diff":
       return engine.diff(command.threadId);
+    case "thread.uncommitted":
+      return engine.uncommitted(command.threadId);
     case "project.list":
       return { projects: engine.projects() };
     case "snapshot":

@@ -252,6 +252,9 @@ async function thread(browser: Browser, base: string, id: string, direct: boolea
     await page.locator('[data-testid="timeline"][data-status="live"]').waitFor();
     const title = await page.getByTestId("thread-title").textContent();
     if (title?.trim() !== "Smoke thread") problems.push(`the title was "${title}"`);
+    // Nothing open, nothing running: it takes a message.
+    const hint = await page.getByTestId("message").getAttribute("placeholder");
+    if (hint !== "Message…") problems.push(`the message field's hint was "${hint}"`);
     await page.getByTestId("back").tap();
     await page.getByTestId(direct ? "pass" : "threads-list").waitFor();
   } catch (error) {
@@ -718,6 +721,321 @@ async function permissionCard(browser: Browser, base: string): Promise<string[]>
   return problems;
 }
 
+/** A command a stubbed daemon got, and how it answers: a result, or a refusal. */
+type Stub = (command: { type: string; [key: string]: unknown }) => unknown;
+
+/**
+ * Plays the daemon over a routed WebSocket: a snapshot of `threads` and `items`, then each
+ * command answered by `answer` (its result, or an `Error` to refuse it). Returns what it got and
+ * a way to send more frames.
+ */
+async function stubDaemon(page: Page, snapshot: { threads: object[]; items: object[] }, answer: Stub) {
+  const environmentId = "env_smoke000000000000000";
+  const at = new Date().toISOString();
+  const got: { type: string; [key: string]: unknown }[] = [];
+  let send: (frame: unknown) => void = () => {};
+  await page.routeWebSocket(/\/ws$/, (ws) => {
+    send = (frame) => ws.send(JSON.stringify(frame));
+    send({ type: "hello", environmentId, version: "smoke", serverTime: at });
+    send({ type: "snapshot", snapshot: { environmentId, ...snapshot, projects: [], live: null } });
+    ws.onMessage((data) => {
+      const frame = JSON.parse(String(data)) as { type: string; id?: string; command?: { type: string } };
+      if (frame.type === "ping") send({ type: "pong", at });
+      if (frame.type !== "command" || !frame.command) return;
+      got.push(frame.command);
+      const result = answer(frame.command);
+      if (result instanceof Error) send({ type: "error", id: frame.id ?? null, error: result.message });
+      else send({ type: "ok", id: frame.id, result });
+    });
+  });
+  return { got, send: (frame: unknown) => send(frame) };
+}
+
+/** An open item as the daemon sends it. */
+function stubItem(threadId: string, tag: string, fields: object) {
+  return {
+    id: `itm_${tag.repeat(20)}`,
+    environmentId: "env_smoke000000000000000",
+    threadId,
+    lane: "quick",
+    requestId: `req_${tag.repeat(20)}`,
+    context: "",
+    options: [],
+    suggested: null,
+    questions: [],
+    createdAt: new Date().toISOString(),
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+    ...fields,
+  };
+}
+
+/** Waits for the stubbed daemon to have got a command of `type`; the latest one. */
+async function received(got: { type: string }[], type: string) {
+  for (let i = 0; i < 100; i++) {
+    const found = got.findLast((c) => c.type === type);
+    if (found) return found as { type: string; [key: string]: unknown };
+    await sleep(30);
+  }
+  throw new Error(`the daemon never got ${type}`);
+}
+
+/**
+ * A reply card (#66): an answer is something that needs you. What you asked, small; the agent's
+ * words as markdown; the reply field first, then Got it (suggested); Archive thread and See the
+ * whole thread, quietly. Words go as the next prompt and the card lifts; Archive asks first in
+ * a sheet that says how many files would be lost, and archives with force.
+ */
+async function replyCard(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const at = new Date().toISOString();
+  const threadId = "thr_smokereply0000000000";
+  const thread = {
+    ...fakeThread("env_smoke000000000000000", threadId, at),
+    title: "Flaky checkout test",
+    branch: "tenzo/flaky-checkout-test",
+    phase: "discussing",
+    activity: "needs-you",
+    working: false,
+    openItems: 1,
+  };
+  const message =
+    "## It races the payment mock's timer\n\n`checkout.test.ts` waits 50 ms for the mock, which replies after 0–80 ms.\n\nFix: await the mock's promise. Want me to do it?";
+  const reply = (tag: string) =>
+    stubItem(threadId, tag, {
+      kind: "reply",
+      ask: "It races the payment mock's timer",
+      options: [{ label: "Got it", value: "done", description: "", recommended: true }],
+      suggested: "done",
+      reply: { message, prompt: "Why is the checkout test flaky?" },
+    });
+  const first = reply("a");
+  const second = reply("b");
+  const { got, send } = await stubDaemon(page, { threads: [thread], items: [first] }, (command) => {
+    if (command.type === "item.answer") {
+      const resolved = { ...first, status: "resolved", resolution: { kind: "continued" } };
+      send({ type: "item", change: "resolved", item: resolved });
+      return { item: resolved, delivery: "message", thread };
+    }
+    if (command.type === "thread.uncommitted") return { files: 2 };
+    if (command.type === "thread.archive") {
+      send({ type: "item", change: "resolved", item: { ...second, status: "resolved", resolution: { kind: "dismissed" } } });
+      return { thread: { ...thread, status: "archived" } };
+    }
+    return new Error(`no ${command.type} here`);
+  });
+  const shots = process.env.TENZO_SMOKE_SHOTS;
+  try {
+    await page.goto(`${base}/`);
+    const top = page.getByTestId("top");
+    await top.locator('[data-kind="reply"]').waitFor();
+    const asked = (await top.getByTestId("asked").innerText()).trim();
+    if (asked !== "Why is the checkout test flaky?") problems.push(`You asked read "${asked}"`);
+    if ((await top.getByTestId("ask").innerText()).trim() !== "It races the payment mock's timer") {
+      problems.push("the heading isn't the card's headline");
+    }
+    if ((await top.getByTestId("reply-message").locator("code").count()) === 0) problems.push("the answer isn't markdown");
+    if ((await top.getByTestId("more").count()) > 0) problems.push("a reply shows a More pill");
+    const suggested = await top.getByTestId("suggested").innerText();
+    if (!/Suggested/i.test(suggested) || !suggested.includes("Got it")) problems.push(`the filled button read "${suggested}"`);
+    const fieldY = (await top.getByTestId("free-text").boundingBox())?.y ?? Infinity;
+    const gotItY = (await top.getByTestId("suggested").boundingBox())?.y ?? 0;
+    if (fieldY > gotItY) problems.push("the reply field isn't above Got it");
+    if ((await top.getByTestId("card-archive").innerText()) !== "Archive thread") problems.push("no Archive thread");
+    const whole = top.getByTestId("whole-thread");
+    if ((await whole.getAttribute("href")) !== `/threads/${threadId}`) problems.push("See the whole thread goes elsewhere");
+    if (shots) await page.screenshot({ path: `${shots}/reply-card.png` });
+    // Words go on in the same thread, and the card lifts.
+    await sleep(400); // a new card ignores taps while it settles
+    await top.getByTestId("free-text").fill("Yes, fix it");
+    await top.getByTestId("send").tap();
+    const answered = await received(got, "item.answer");
+    const answer = answered.answer as { kind?: string; decision?: string; text?: string };
+    if (answer.kind !== "reply" || answer.decision !== "send" || answer.text !== "Yes, fix it") {
+      problems.push(`the card sent ${JSON.stringify(answer)}`);
+    }
+    await top.waitFor({ state: "detached" });
+    // A second reply: Archive thread asks first, with what would be lost.
+    send({ type: "item", change: "opened", item: second });
+    await top.locator(`[data-id="${second.id}"]`).waitFor();
+    await sleep(400); // a new card ignores taps while it settles
+    // As on a desktop, where the reply field has the focus: Archive thread clicked, it stays there.
+    await top.getByTestId("free-text").focus();
+    await top.getByTestId("card-archive").evaluate((el) => (el as unknown as { click(): void }).click());
+    await page.getByTestId("archive-sheet").waitFor();
+    await page.getByTestId("archive-warning").waitFor();
+    const warning = await page.getByTestId("archive-warning").innerText();
+    if (!warning.startsWith("2 files have changes")) problems.push(`the warning read "${warning}"`);
+    if ((await page.getByTestId("archive-confirm").innerText()) !== "Archive anyway") problems.push("no Archive anyway");
+    if (shots) {
+      await sleep(400); // the sheet has come up
+      await page.screenshot({ path: `${shots}/archive-sheet.png` });
+    }
+    // A modal sheet: the focus is in it, and typing can't reach the reply field behind it.
+    const focused = await page.evaluate(
+      () => (globalThis as unknown as { document: { activeElement: { dataset?: { testid?: string } } | null } })
+        .document.activeElement?.dataset?.testid,
+    );
+    if (focused !== "archive-keep") problems.push(`with the sheet up, the focus was on ${focused}`);
+    if (!(await page.locator("main").evaluate((el) => (el as unknown as { inert: boolean }).inert))) {
+      problems.push("the page behind the sheet isn't inert");
+    }
+    const answers = got.filter((c) => c.type === "item.answer").length;
+    await page.keyboard.type("oops");
+    if ((await top.getByTestId("free-text").inputValue()) !== "") problems.push("typing behind the sheet reached the reply field");
+    await page.getByTestId("archive-keep").tap();
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
+    if (got.some((c) => c.type === "thread.archive")) problems.push("Keep it archived the thread");
+    if (got.filter((c) => c.type === "item.answer").length !== answers) problems.push("typing behind the sheet sent a reply");
+    await top.getByTestId("card-archive").tap();
+    await page.getByTestId("archive-warning").waitFor();
+    await page.getByTestId("archive-confirm").tap();
+    const archive = await received(got, "thread.archive");
+    if (archive.threadId !== threadId || archive.force !== true) problems.push(`archived with ${JSON.stringify(archive)}`);
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
+/**
+ * The thread page takes messages (#66): a field with mic and send at the foot of So far while
+ * nothing is open for the thread; while it works, the hint says the message waits its turn and
+ * the message shows as queued. Something open puts the way to the Pass there instead.
+ */
+async function threadComposer(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const at = new Date().toISOString();
+  const threadId = "thr_smokecomposer0000000";
+  const thread = {
+    ...fakeThread("env_smoke000000000000000", threadId, at),
+    title: "Flaky checkout test",
+    lastSeq: 0,
+  };
+  const question = stubItem(thread.id, "q", {
+    kind: "question",
+    ask: "Which test?",
+    questions: [{ id: "Which test?", header: "", question: "Which test?", options: [], multiSelect: false }],
+  });
+  const { got, send } = await stubDaemon(page, { threads: [thread], items: [] }, (command) => {
+    if (command.type === "thread.watch") return { thread, events: [], older: false, reset: true };
+    if (command.type === "thread.unwatch") return { watching: false };
+    if (command.type === "thread.send") {
+      const queued = { ...thread, queued: 1 };
+      send({ type: "thread", thread: queued });
+      return { thread: queued };
+    }
+    // Its repo was moved: nothing to count, and only force archives it (as the daemon says).
+    if (command.type === "thread.uncommitted") return { files: 0 };
+    if (command.type === "thread.archive") {
+      return command.force
+        ? { thread: { ...thread, status: "archived" } }
+        : new Error(
+            "The repo /src/app is gone (moved or deleted). Archive with --force to forget this thread and delete /tmp/busy.",
+          );
+    }
+    return new Error(`no ${command.type} here`);
+  });
+  try {
+    await page.goto(`${base}/threads/${thread.id}`);
+    await page.locator('[data-testid="timeline"][data-status="live"]').waitFor();
+    const field = page.getByTestId("message");
+    await field.waitFor();
+    const hint = await field.getAttribute("placeholder");
+    if (hint !== "Message… (waits its turn)") problems.push(`a working thread's hint read "${hint}"`);
+    const listens = await page.evaluate(() => "webkitSpeechRecognition" in globalThis || "SpeechRecognition" in globalThis);
+    if (listens && (await page.getByTestId("composer").getByTestId("mic").count()) === 0) problems.push("no mic");
+    if ((await page.getByTestId("archive").count()) === 0) problems.push("no Archive in the header");
+    await field.fill("And check the other tests for the same sleep");
+    await page.getByTestId("message-send").tap();
+    const sent = await received(got, "thread.send");
+    if (sent.threadId !== thread.id || sent.prompt !== "And check the other tests for the same sleep") {
+      problems.push(`sent ${JSON.stringify(sent)}`);
+    }
+    await page.getByTestId("queued").filter({ hasText: "And check the other tests" }).waitFor();
+    if ((await field.inputValue()) !== "") problems.push("the field kept the sent message");
+    if (process.env.TENZO_SMOKE_SHOTS) await page.screenshot({ path: `${process.env.TENZO_SMOKE_SHOTS}/thread-page.png` });
+    // Archive with its repo gone: the daemon refuses, the sheet says why and offers Archive anyway.
+    await page.getByTestId("archive").tap();
+    await page.getByTestId("archive-sheet").waitFor();
+    if ((await page.getByTestId("archive-confirm").innerText()) !== "Archive") problems.push("a clean worktree asks for more than Archive");
+    await page.getByTestId("archive-confirm").tap();
+    await page.getByTestId("archive-warning").filter({ hasText: "repo is gone" }).waitFor();
+    if ((await page.getByTestId("archive-confirm").innerText()) !== "Archive anyway") problems.push("a gone repo offers no Archive anyway");
+    await page.getByTestId("archive-confirm").tap();
+    const forced = await received(got, "thread.archive");
+    if (forced.force !== true) problems.push(`a gone repo archived with ${JSON.stringify(forced)}`);
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
+    // Something open for it: its answer belongs on the Pass.
+    send({ type: "item", change: "opened", item: question });
+    await page.getByTestId("to-pass").waitFor();
+    if ((await page.getByTestId("composer").count()) > 0) problems.push("the field stayed with a question open");
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
+/**
+ * Archive by hand against the real daemon (#66): a thread with a file it never committed. The
+ * sheet says so (the daemon counted it), Archive anyway archives it with force, its worktree is
+ * gone, and the page shows it archived, with no field and no Archive left.
+ */
+async function archiveForReal(
+  browser: Browser,
+  base: string,
+  thread: { id: string; worktreePath: string },
+): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  try {
+    writeFileSync(join(thread.worktreePath, "notes.txt"), "never committed\n");
+    await page.goto(`${base}/threads/${thread.id}`);
+    await page.getByTestId("message").waitFor();
+    await page.getByTestId("archive").tap();
+    await page.getByTestId("archive-sheet").waitFor();
+    const warning = (await page.getByTestId("archive-warning").innerText()).trim();
+    if (warning !== "1 file has changes that aren't committed. It'll be lost.") problems.push(`the warning read "${warning}"`);
+    const branch = await page.getByTestId("archive-sheet").locator("code").innerText();
+    if (!branch.startsWith("tenzo/")) problems.push(`the sheet named the branch "${branch}"`);
+    await page.getByTestId("archive-confirm").tap();
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
+    await page.getByTestId("thread-view").getByText("· archived").waitFor();
+    if ((await page.getByTestId("composer").count()) > 0) problems.push("an archived thread still takes messages");
+    if ((await page.getByTestId("archive").count()) > 0) problems.push("an archived thread still offers Archive");
+    if (existsSync(thread.worktreePath)) problems.push("the worktree is still there");
+    const { threads } = await local<{ threads: { id: string; status: string }[] }>(base, {
+      type: "thread.list",
+      includeArchived: true,
+    });
+    if (threads.find((t) => t.id === thread.id)?.status !== "archived") problems.push("the daemon didn't archive it");
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 /** A command to the daemon from this Mac (no login), its result. */
 async function local<T>(base: string, command: unknown): Promise<T> {
   const answer = (await (
@@ -844,6 +1162,12 @@ async function main(): Promise<number> {
     ).json()) as { ok: boolean; result?: { thread: { id: string } }; error?: string };
     const threadId = created.result?.thread.id;
     if (!threadId) throw new Error(`couldn't create a thread: ${created.error}`);
+    // Another, to archive by hand.
+    const { thread: doomed } = await local<{ thread: { id: string; worktreePath: string } }>(base, {
+      type: "thread.create",
+      project: "app",
+      title: "Archive me",
+    });
     const checks: [string, () => Promise<string[]>][] = [
       ...["/", "/new", "/threads"].map((start): [string, () => Promise<string[]>] => [
         `start at ${start}`,
@@ -856,6 +1180,9 @@ async function main(): Promise<number> {
       ["the Pass moves: a card arrives, lifts, is swiped aside and comes back", () => passMotion(launched, base, false)],
       ["the Pass with reduced motion: the same, in place", () => passMotion(launched, base, true)],
       ["a permission card: words, the real command, Allow and Deny on screen", () => permissionCard(launched, base)],
+      ["a reply card: what you asked, the answer, reply or Got it, Archive asks first", () => replyCard(launched, base)],
+      ["a thread page takes messages: mic and send, queued while it works; a gone repo archives anyway", () => threadComposer(launched, base)],
+      ["Archive by hand: the sheet counts what would be lost, Archive anyway archives", () => archiveForReal(launched, base, doomed)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
       ["a page on another port (a live page) can't frame the Pass", () => framed(launched, base)],

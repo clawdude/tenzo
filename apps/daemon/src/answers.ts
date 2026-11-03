@@ -35,6 +35,7 @@ const KINDS: Record<QueueItem["kind"], { name: string; answer: string }> = {
   finished: { name: "finished work", answer: "merge, pr, done, or what needs changing" },
   ready: { name: "a PR ready to merge", answer: "merge, or what to do first" },
   error: { name: "an error", answer: "retry, archive, or what to tell the agent" },
+  reply: { name: "a reply", answer: "got it, or what to say next" },
 };
 
 /** The answer, tidied, if it fits the item; else a TenzoError saying what is wrong. */
@@ -54,6 +55,12 @@ export function checkAnswer(item: QueueItem, answer: ItemAnswer): ItemAnswer {
     const note = answer.note?.trim();
     if (!note) throw new TenzoError("Say what to do before merging.");
     return { kind: "ready", decision: "changes", note };
+  }
+  if (answer.kind === "reply") {
+    if (answer.decision === "done") return { kind: "reply", decision: "done" };
+    const text = answer.text?.trim();
+    if (!text) throw new TenzoError("Say what to send.");
+    return { kind: "reply", decision: "send", text };
   }
   if (answer.kind === "error") {
     const config = item.error?.cause === "config";
@@ -117,7 +124,8 @@ export function standingReply(item: QueueItem, answer: ItemAnswer): StandingRepl
       };
     case "finished":
     case "ready":
-      return null; // nothing waits on a report or a ready PR, so nothing is asked again
+    case "reply":
+      return null; // nothing waits on a report, a ready PR or a reply, so nothing is asked again
   }
 }
 
@@ -223,7 +231,7 @@ function oneLine(text: string, limit: number): string {
  */
 export function deliveryPrompt(
   item: QueueItem,
-  answer: Exclude<ItemAnswer, { kind: "finished" | "ready" }>,
+  answer: Exclude<ItemAnswer, { kind: "finished" | "ready" | "reply" }>,
 ): string {
   // The engine sends an error's answer as `errorPrompts`; here only for completeness.
   if (answer.kind === "error") return errorPrompts(item, answer).join("\n\n");
@@ -277,6 +285,14 @@ export function answerFromWords(item: QueueItem, words: readonly string[]): Item
       throw new TenzoError("Answer with merge, pr or done, or say what needs changing.");
     }
     return { kind: "finished", decision: "changes", note: text };
+  }
+  if (item.kind === "reply") {
+    // Got it, or anything else: what to say next, sent as the thread's next prompt. A reply often
+    // ends "Want me to do it?", so yes, y and ok are words for the agent, not Got it.
+    const text = words.join(" ").trim();
+    if (/^(1|done|got it)$/i.test(text)) return { kind: "reply", decision: "done" };
+    if (text === "") throw new TenzoError("Answer with got it, or say what to send it next.");
+    return { kind: "reply", decision: "send", text };
   }
   if (item.kind === "ready") {
     const text = words.join(" ").trim();

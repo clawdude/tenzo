@@ -24,6 +24,7 @@ import {
   type PushRequest,
   type PushResponse,
   pushEndpointAllowed,
+  pushes,
   pushMessageOf,
   pushRequest,
   retryAfterMs,
@@ -214,6 +215,20 @@ describe("what a push says", () => {
     expect(pushMessageOf(item({ kind: "error", ask: "Budget reached" }), "t", "short").body).toBe(
       "Budget reached",
     );
+    // A reply's first line only, never the rest of what it said.
+    const reply = item({
+      kind: "reply",
+      ask: "It races the mock's timer",
+      reply: { message: "It races the mock's timer\n\nsecret detail", prompt: "Why?" },
+    });
+    expect(pushes(reply)).toBe(true);
+    expect(pushMessageOf(reply, "Flaky checkout test", "short")).toMatchObject({
+      title: "Flaky checkout test",
+      body: "Answered: It races the mock's timer",
+    });
+    // An answer that is only code has no line to push (the fold leaves its ask empty).
+    const code = item({ kind: "reply", ask: "", reply: { message: "```\nexport TOKEN=x\n```", prompt: "" } });
+    expect(pushMessageOf(code, "t", "short").body).toBe("Answered.");
   });
 
   it("says nothing at all with preview none", () => {

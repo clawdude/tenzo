@@ -12,6 +12,7 @@ import {
   CONTEXT_LIMIT,
   ERROR_LIMIT,
   errorRequestId,
+  firstLine,
   type FoldState,
   foldEvent,
   foldEvents,
@@ -999,5 +1000,88 @@ describe("foldEvent: review actions and landing", () => {
       ev({ type: "thread.landed", payload: { url: PR } }),
     );
     expect(after.state).toEqual(before.state);
+  });
+});
+
+describe("foldEvent: replies", () => {
+  const REPLY = "req_cccccccccccccccccccc" as RequestId;
+  const replied = (requestId = REPLY, message = "**It races** the mock.\n\nFix: await it.", prompt?: string) =>
+    ev({
+      type: "reply.opened",
+      turnId: TURN,
+      requestId,
+      payload: { message, ...(prompt === undefined ? {} : { prompt }) },
+    });
+  const answer = (decision: "done" | "continued", requestId = REPLY) =>
+    ev({ type: "reply.resolved", turnId: TURN, requestId, payload: { decision } });
+
+  it("opens a quick-lane reply: the agent's words in full, the prompt, Got it suggested", () => {
+    const { state, items } = fold(started(), turnStarted(), said("Done."), completed(), replied(REPLY, undefined, "Why?"));
+    expect(state.open).toHaveLength(1);
+    expect(QueueItem.parse(items[0])).toEqual(items[0]);
+    expect(items[0]).toMatchObject({
+      id: itemIdFor(REPLY),
+      kind: "reply",
+      lane: "quick",
+      ask: "It races the mock.",
+      context: "",
+      suggested: "done",
+      options: [{ label: "Got it", value: "done", recommended: true }],
+      reply: { message: "**It races** the mock.\n\nFix: await it.", prompt: "Why?" },
+      detached: false,
+    });
+    // Nothing of the agent's waits on it: a session ending leaves it as it is.
+    expect(fold(started(), replied(), exited()).state.open).toMatchObject([{ kind: "reply", detached: false }]);
+  });
+
+  it("Got it and a prompt from anywhere close it; a prompt reaching the thread does by itself", () => {
+    expect(fold(started(), replied(), answer("done")).items[0]?.resolution).toEqual({ kind: "done" });
+    expect(fold(started(), replied(), answer("continued")).items[0]?.resolution).toEqual({ kind: "continued" });
+    // A wake, a retry: any turn of ours. A turn the agent starts by itself (no prompt) doesn't.
+    const prompted = fold(started(), replied(), turnStarted(TURN2));
+    expect(prompted.state.open).toEqual([]);
+    expect(prompted.items[0]?.resolution).toEqual({ kind: "continued" });
+    const own = fold(started(), replied(), ev({ type: "turn.started", turnId: TURN2, payload: {} }));
+    expect(own.state.open).toMatchObject([{ kind: "reply" }]);
+  });
+
+  it("another item for the thread supersedes it, and so does a newer reply", () => {
+    const { state, items } = fold(started(), replied(), asked());
+    expect(state.open.map((i) => i.kind)).toEqual(["question"]);
+    expect(items.find((i) => i.kind === "reply")?.resolution).toEqual({ kind: "superseded" });
+    const failed = fold(
+      started(),
+      replied(),
+      ev({ type: "turn.completed", turnId: TURN, payload: { state: "failed" } }),
+    );
+    expect(failed.state.open.map((i) => i.kind)).toEqual(["error"]);
+    const newer = fold(started(), replied(), replied(REQ2, "Second."));
+    expect(newer.state.open).toMatchObject([{ kind: "reply", ask: "Second." }]);
+    expect(newer.items[0]?.resolution).toEqual({ kind: "superseded" });
+    // Seen before: never opened again.
+    expect(fold(started(), replied(), answer("done"), replied()).state.open).toEqual([]);
+  });
+
+  it("an archive dismisses it; an old archive event without a reason still folds", () => {
+    const archived = fold(started(), replied(), ev({ type: "thread.archived", payload: { reason: "manual" } }));
+    expect(archived.items[0]?.resolution).toEqual({ kind: "dismissed" });
+    const old = fold(started(), replied(), ev({ type: "thread.archived", payload: {} }));
+    expect(old.state.open).toEqual([]);
+  });
+
+  it("its ask is the first line with words, as plain words", () => {
+    expect(firstLine("\n\n## It races the **mock**\n\nmore")).toBe("It races the mock");
+    // Never code, which a push mustn't carry: the words after it, or nothing.
+    expect(firstLine("```ts\nrm -rf build\n```")).toBe("");
+    expect(firstLine("```sh\nexport TOKEN=x\n```\n\nThat sets it.")).toBe("That sets it.");
+    expect(firstLine("~~~\na\n```\nb\n~~~\nAfter.")).toBe("After.");
+    expect(firstLine("- `a.ts` is the one\n- b")).toBe("a.ts is the one");
+    expect(firstLine("  \n---\n> Quoted   words")).toBe("Quoted words");
+    expect(firstLine("x".repeat(300))).toHaveLength(200);
+    expect(firstLine("")).toBe("");
+    const blank = fold(started(), replied(REPLY, "   "));
+    expect(blank.state.open[0]?.ask).toBe("");
+    const code = fold(started(), replied(REPLY, "```\nsecret\n```"));
+    expect(code.state.open[0]).toMatchObject({ ask: "", reply: { message: "```\nsecret\n```" } });
   });
 });

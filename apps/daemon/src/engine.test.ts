@@ -117,9 +117,11 @@ describe("Engine: running threads", () => {
       "turn.started",
       "item.completed",
       "turn.completed",
+      // Its answer, and nothing else to come: a reply card.
+      "reply.opened",
     ]);
     expect(events.every((e) => e.environmentId === d.store.environmentId)).toBe(true);
-    expect(after).toMatchObject({ activity: "idle", working: false, lastSeq: events.at(-1)?.seq });
+    expect(after).toMatchObject({ activity: "needs-you", working: false, lastSeq: events.at(-1)?.seq });
     expect(getThread(d.store, thread.id).sessionId).toBe(session.sessionId);
     // The session stays up after the turn: background work may still report.
     expect(session.stopped).toBe(false);
@@ -794,7 +796,11 @@ describe("Engine: restarts", () => {
     resumed.say("Blue it is.");
     resumed.complete();
     await settle();
-    expect(second.engine.view(thread.id).activity).toBe("idle");
+    // What it said once it had the answer is all that is left: a reply. The delivered answer is
+    // Tenzo's message, not your words, so it asks nothing in your name.
+    expect(second.engine.snapshot().items).toMatchObject([
+      { kind: "reply", reply: { message: "Blue it is.", prompt: "" } },
+    ]);
   });
 
   it("a graceful stop leaves open items for the next daemon too", async () => {
@@ -835,6 +841,26 @@ describe("Engine: archive", () => {
     expect(() => d.engine.send(thread.id, "x")).toThrow(/archived/);
     const types = d.engine.events(thread.id).events.map((e) => e.event.type);
     expect(types.at(-1)).toBe("thread.archived");
+    expect(d.engine.events(thread.id).events.at(-1)?.event).toMatchObject({ payload: { reason: "manual" } });
+  });
+
+  it("counts the uncommitted files Archive would discard; force discards them", async () => {
+    const d = daemon();
+    const thread = await threadAsking(d);
+    expect(await d.engine.uncommitted(thread.id)).toEqual({ files: 0 });
+    writeFileSync(join(thread.worktreePath, "a.txt"), "unsaved");
+    mkdirSync(join(thread.worktreePath, "notes"));
+    writeFileSync(join(thread.worktreePath, "notes", "b.txt"), "unsaved");
+    writeFileSync(join(thread.worktreePath, "README.md"), "changed");
+    // a.txt, notes/ (untracked, once) and README.md.
+    expect(await d.engine.uncommitted(thread.id)).toEqual({ files: 3 });
+    const outcome = await executeCommand(d.engine, { type: "thread.uncommitted", threadId: thread.id });
+    if (!outcome.ok) throw new Error(outcome.error);
+    expect(CommandResults["thread.uncommitted"].parse(outcome.result)).toEqual({ files: 3 });
+    await expect(d.engine.archive(thread.id)).rejects.toThrow(/uncommitted changes/);
+    await d.engine.archive(thread.id, { force: true });
+    expect(existsSync(thread.worktreePath)).toBe(false);
+    expect(await d.engine.uncommitted(thread.id)).toEqual({ files: 0 });
   });
 
   it("a refused archive leaves the running turn alone", async () => {
@@ -845,6 +871,246 @@ describe("Engine: archive", () => {
     expect(d.adapter.last.stopped).toBe(false);
     expect(d.engine.snapshot().items).toMatchObject([{ detached: false }]);
     expect(d.engine.view(thread.id).status).toBe("active");
+  });
+});
+
+describe("Engine: replies", () => {
+  const ANSWER = "## It races the payment mock's timer\n\nThe test waits 50 ms; the mock replies after 0–80 ms.";
+
+  /** A thread asked a question; its agent answers in words and ends its turn. */
+  async function threadAnswering(d: ReturnType<typeof daemon>, prompt = "Why is the checkout test flaky?") {
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        if (session.prompts.length > 1) return;
+        session.say("Let me look.");
+        session.say(ANSWER);
+        session.complete();
+      };
+    };
+    const thread = await d.engine.createThread({ project: "app", prompt });
+    await settle();
+    d.adapter.onStart = undefined;
+    const session = d.adapter.last;
+    session.onPrompt = undefined;
+    return { thread, session };
+  }
+
+  it("a turn that ends with the agent's words and nothing to come opens a reply (quick lane)", async () => {
+    const d = daemon();
+    const { thread } = await threadAnswering(d);
+    const [item] = d.engine.snapshot().items;
+    expect(QueueItem.parse(item)).toEqual(item);
+    expect(item).toMatchObject({
+      kind: "reply",
+      lane: "quick",
+      ask: "It races the payment mock's timer",
+      context: "",
+      suggested: "done",
+      // Its last message in full, and what it answered.
+      reply: { message: ANSWER, prompt: "Why is the checkout test flaky?" },
+    });
+    expect(d.engine.view(thread.id)).toMatchObject({ activity: "needs-you", working: false });
+    const opened = d.changes.filter((c) => c.type === "item" && c.change.type === "opened");
+    expect(opened).toHaveLength(1);
+  });
+
+  it("takes Claude's final answer when no message of its own came", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => session.complete("completed", { result: "Yes: it's in src/pay.ts." });
+    };
+    await d.engine.createThread({ project: "app", prompt: "Is there a payment module?" });
+    await settle();
+    expect(d.engine.snapshot().items).toMatchObject([
+      { kind: "reply", ask: "Yes: it's in src/pay.ts.", reply: { message: "Yes: it's in src/pay.ts." } },
+    ]);
+  });
+
+  it("words on the card go on in the same session, and the card lifts in the same transaction", async () => {
+    const d = daemon();
+    const { thread, session } = await threadAnswering(d);
+    const [item] = d.engine.snapshot().items;
+    const result = await d.engine.answer(item?.id ?? "", {
+      kind: "reply",
+      decision: "send",
+      text: "  Yes, fix it  ",
+    });
+    expect(result).toMatchObject({
+      delivery: "message",
+      item: { status: "resolved", resolution: { kind: "continued" } },
+      thread: { activity: "working" },
+    });
+    expect(d.adapter.sessions).toHaveLength(1);
+    expect(session.prompts).toEqual(["Why is the checkout test flaky?", "Yes, fix it"]);
+    await settle();
+    const types = d.engine.events(thread.id).events.map((e) => e.event.type);
+    expect(types.slice(-3)).toEqual(["reply.opened", "reply.resolved", "turn.started"]);
+    expect(d.engine.snapshot().items).toEqual([]);
+    await expect(
+      d.engine.answer(item?.id ?? "", { kind: "reply", decision: "done" }),
+    ).rejects.toThrow(/no longer open \(continued\)/);
+  });
+
+  it("Got it puts it away and sends nothing: the thread is done", async () => {
+    const d = daemon();
+    const { thread, session } = await threadAnswering(d);
+    const [item] = d.engine.snapshot().items;
+    const result = await d.engine.answer(item?.id ?? "", { kind: "reply", decision: "done" });
+    expect(result).toMatchObject({ delivery: "none", item: { resolution: { kind: "done" } } });
+    expect(session.prompts).toHaveLength(1);
+    expect(d.engine.view(thread.id)).toMatchObject({ activity: "idle", openItems: 0 });
+    await expect(d.engine.answer(item?.id ?? "", { kind: "reply", decision: "send" })).rejects.toThrow(
+      /no longer open/,
+    );
+  });
+
+  it("a prompt from anywhere else (the thread page, the CLI) closes it", async () => {
+    const d = daemon();
+    const { thread, session } = await threadAnswering(d);
+    const [item] = d.engine.snapshot().items;
+    d.engine.send(thread.id, "And the other tests?");
+    expect(d.engine.snapshot().items).toEqual([]);
+    expect(d.changes.at(-1)).toMatchObject({ type: "thread", thread: { activity: "working" } });
+    const resolved = d.changes.find((c) => c.type === "item" && c.change.type === "resolved");
+    expect(resolved).toMatchObject({ change: { item: { id: item?.id, resolution: { kind: "continued" } } } });
+    expect(session.prompts.at(-1)).toBe("And the other tests?");
+    // Its answer is a reply again: one card per thread, the newest.
+    session.say("The same sleep is in two more.");
+    session.complete();
+    await settle();
+    expect(d.engine.snapshot().items).toMatchObject([
+      { kind: "reply", reply: { message: "The same sleep is in two more.", prompt: "And the other tests?" } },
+    ]);
+  });
+
+  it("shows only your own words as You asked: never a retry's, a wake's or another agent's", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = (prompt) => {
+        if (prompt === "fail first") {
+          session.complete("failed");
+          return;
+        }
+        if (prompt === "nap") {
+          session.wakeMe(30, "Look again");
+          session.complete();
+          return;
+        }
+        session.say(`Done: ${prompt.split("\n")[0]}`);
+        session.complete();
+      };
+    };
+    const replyOf = (threadId: string) =>
+      d.engine.snapshot().items.find((i) => i.threadId === threadId && i.kind === "reply")?.reply;
+    const errorOf = (threadId: string) =>
+      d.engine.snapshot().items.find((i) => i.threadId === threadId && i.kind === "error");
+
+    // An error card's words to tell it are yours; what Retry sends is Tenzo's.
+    const told = await d.engine.createThread({ project: "app", prompt: "fail first" });
+    await settle();
+    await d.engine.answer(errorOf(told.id)?.id ?? "", { kind: "error", action: "tell", text: "Use pnpm" });
+    await settle();
+    expect(replyOf(told.id)).toEqual({ message: "Done: Use pnpm", prompt: "Use pnpm" });
+    const retried = await d.engine.createThread({ project: "app", prompt: "fail first" });
+    await settle();
+    await d.engine.answer(errorOf(retried.id)?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(replyOf(retried.id)).toMatchObject({ message: expect.stringMatching(/^Done: Your last turn didn't finish/), prompt: "" });
+
+    // A wake's turn is Tenzo's prompt too.
+    const napping = await d.engine.createThread({ project: "app", prompt: "nap" });
+    await expect.poll(() => replyOf(napping.id)?.message).toBe("Done: You asked to be woken: Look again");
+    expect(replyOf(napping.id)?.prompt).toBe("");
+
+    // A thread another thread's agent started: its words aren't yours.
+    const child = await d.engine.createThread({ project: "app", prompt: "child work", parent: told.id });
+    await settle();
+    expect(replyOf(child.id)).toEqual({ message: "Done: child work", prompt: "" });
+  });
+
+  it("an empty, failed or cut-short turn, an open item, a queued prompt or a wake is no reply", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = (prompt) => {
+        if (prompt === "silent") session.complete();
+        if (prompt === "failing") {
+          session.say("Trying.");
+          session.complete("failed");
+        }
+        if (prompt === "asking") {
+          session.say("One thing first.");
+          session.ask([color]);
+        }
+        if (prompt === "waking") {
+          session.say("I'll look again in ten minutes.");
+          session.wakeMe(10 * 60_000, "Look again");
+          session.complete();
+        }
+      };
+    };
+    const silent = await d.engine.createThread({ project: "app", prompt: "silent" });
+    const failing = await d.engine.createThread({ project: "app", prompt: "failing" });
+    const asking = await d.engine.createThread({ project: "app", prompt: "asking" });
+    const waking = await d.engine.createThread({ project: "app", prompt: "waking" });
+    await settle();
+    const kinds = (id: string) => d.engine.snapshot().items.filter((i) => i.threadId === id).map((i) => i.kind);
+    expect(kinds(silent.id)).toEqual([]);
+    expect(kinds(failing.id)).toEqual(["error"]);
+    expect(kinds(asking.id)).toEqual(["question"]);
+    expect(kinds(waking.id)).toEqual([]);
+
+    // A prompt waiting behind the turn: only the last turn's answer is the reply.
+    d.adapter.onStart = undefined;
+    const queued = await d.engine.createThread({ project: "app", prompt: "one" });
+    const session = d.adapter.last;
+    d.engine.send(queued.id, "two");
+    session.say("First answer.");
+    session.complete();
+    await settle();
+    expect(kinds(queued.id)).toEqual([]);
+    expect(session.prompts).toEqual(["one", "two"]);
+    session.say("Second answer.");
+    session.complete();
+    await settle();
+    expect(d.engine.snapshot().items.filter((i) => i.threadId === queued.id)).toMatchObject([
+      { kind: "reply", reply: { message: "Second answer.", prompt: "two" } },
+    ]);
+  });
+
+  it("another item for its thread puts it away", async () => {
+    const d = daemon();
+    const { session } = await threadAnswering(d);
+    const [reply] = d.engine.snapshot().items;
+    // A turn the agent starts by itself (a background task reporting) that asks something.
+    session.emit({ type: "turn.started", turnId: "00000000-0000-4000-8000-000000000001", payload: {} });
+    session.turnId = "00000000-0000-4000-8000-000000000001";
+    session.ask([color]);
+    await settle();
+    expect(d.engine.snapshot().items.map((i) => i.kind)).toEqual(["question"]);
+    const resolved = d.changes.find((c) => c.type === "item" && c.change.item.id === reply?.id && c.change.type === "resolved");
+    expect(resolved).toMatchObject({ change: { item: { resolution: { kind: "superseded" } } } });
+  });
+
+  it("a landing turn gets the stalled card, never a reply", async () => {
+    const d = daemon(new FakeAdapter(), { prompts: () => PROMPTS });
+    d.adapter.onStart = (session) => {
+      session.onPrompt = () => {
+        if (session.prompts.length > 1) {
+          session.say("Should I merge it?");
+          session.complete();
+          return;
+        }
+        session.respondToProposal(session.propose("Add a counter page."), "build");
+        session.report("Added a counter page.");
+        session.complete();
+      };
+    };
+    await d.engine.createThread({ project: "app", prompt: "Add a counter" });
+    await settle();
+    const [finished] = d.engine.snapshot().items;
+    await d.engine.answer(finished?.id ?? "", { kind: "finished", decision: "pr" });
+    await settle();
+    expect(d.engine.snapshot().items).toMatchObject([{ kind: "error", error: { cause: "stalled" } }]);
   });
 });
 
@@ -1049,6 +1315,8 @@ describe("Engine: review actions and landing", () => {
       "session.exited",
       "thread.archived",
     ]);
+    // The log says why: it landed, not by hand.
+    expect(d.engine.events(thread.id).events.at(-1)?.event).toMatchObject({ payload: { reason: "landed" } });
   });
 
   it("Merge after the agent stopped resumes it landing, with the landing prompt", async () => {

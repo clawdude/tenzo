@@ -107,12 +107,13 @@ const ASKS: Record<QueueItem['kind'], string> = {
 	proposal: 'build?',
 	finished: 'review',
 	error: 'failed',
-	ready: 'merge?'
+	ready: 'merge?',
+	reply: 'replied'
 };
 
 /**
  * The thread's dot and word: what it waits for (asking, allow?, build?, review, failed,
- * merge?), snoozed, what it is doing (discussing, building, landing), when a landing thread
+ * merge?, replied), snoozed, what it is doing (discussing, building, landing), when a landing thread
  * looks again (in 12m), done, or new (never started). A failed turn is an error item, so a
  * thread whose last turn failed never reads "done".
  */
