@@ -1,0 +1,114 @@
+<!doctype html><html><head><meta charset="utf-8"><style>
+body{margin:0;background:#111;font-family:-apple-system,BlinkMacSystemFont,system-ui,"Helvetica Neue",sans-serif;-webkit-font-smoothing:antialiased;color:#F5F5F7;font-size:17px;line-height:1.4}
+.frame{width:390px;height:844px;box-sizing:border-box;background:#000;position:relative;overflow:hidden}
+.caps{font-size:13px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.btn{display:flex;flex-direction:column;align-items:flex-start;gap:3px;min-height:64px;padding:13px 16px;border-radius:18px;background:#D97757;color:#1A0F0A;box-sizing:border-box;width:100%}
+.free{display:flex;align-items:center;gap:8px;min-height:52px;box-sizing:border-box;padding:6px 6px 6px 16px;border-radius:18px;background:#2C2C2E}
+.mic{width:40px;height:40px;border-radius:50%;background:#3A3A3C;display:flex;align-items:center;justify-content:center;flex-shrink:0}
+.circle{display:flex;align-items:center;justify-content:center;width:40px;height:40px;border-radius:50%;background:#1C1C1E}
+code{font-family:ui-monospace,Menlo,monospace;font-size:14px;background:#2C2C2E;padding:1px 6px;border-radius:6px}
+.note{position:absolute;left:0;right:0;bottom:0;padding:10px 16px;background:#D97757;color:#1A0F0A;font-size:13px;font-weight:600;text-align:center}
+</style></head><body>
+<svg width="0" height="0" style="position:absolute"><defs>
+<symbol id="mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0"/><path d="M12 18v3"/></g></symbol>
+<symbol id="send" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 19V5M6 11l6-6 6 6"/></g></symbol>
+</defs></svg>
+
+<!-- 1. Lock screen push -->
+<div class="frame" id="f1" style="background:linear-gradient(#1b2433,#0b0d12)">
+  <div style="text-align:center;margin-top:90px;font-size:20px;color:#C7C7CC">Tuesday 3 November</div>
+  <div style="text-align:center;font-size:88px;font-weight:600;letter-spacing:-2px;line-height:1">14:07</div>
+  <div style="margin:60px 12px 0;padding:14px 16px;border-radius:22px;background:rgba(60,60,67,.55);backdrop-filter:blur(20px)">
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div style="width:22px;height:22px;border-radius:6px;background:#D97757"></div>
+      <span style="font-size:13px;color:#C7C7CC;text-transform:uppercase;letter-spacing:.04em">Tenzo</span><span style="margin-left:auto;font-size:13px;color:#AEAEB2">now</span>
+    </div>
+    <div style="font-weight:600;font-size:16px">Why is the checkout test flaky?</div>
+    <div style="font-size:15px;color:#E5E5EA">Answered: the test races the payment mock's timer…</div>
+  </div>
+  <div style="margin:10px 12px 0;padding:12px 16px;border-radius:22px;background:rgba(60,60,67,.35);font-size:14px;color:#AEAEB2">Before: no notification at all, the thread just read "done".</div>
+  <div class="note">1 · An answer pushes like a question does</div>
+</div>
+
+<!-- 2. Reply card on the Pass -->
+<div class="frame" id="f2">
+  <div style="position:absolute;top:54px;right:20px;display:flex;gap:8px">
+    <div class="circle"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5F5F7" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg></div>
+    <div class="circle"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#F5F5F7" stroke-width="2" stroke-linecap="round"><path d="M4 7h16M4 12h16M4 17h10"/></svg></div>
+  </div>
+  <div style="position:absolute;left:16px;right:16px;top:118px;bottom:44px">
+    <div style="position:absolute;left:24px;right:24px;top:0;height:40px;border-radius:24px;background:#141416"></div>
+    <div style="position:absolute;left:12px;right:12px;top:12px;height:40px;border-radius:26px;background:#18181A"></div>
+    <div style="position:absolute;left:0;right:0;top:24px;bottom:0;border-radius:28px;background:#1C1C1E;box-shadow:0 24px 60px rgba(0,0,0,.6);display:flex;flex-direction:column">
+      <div style="display:flex;justify-content:space-between;padding:20px 22px 0"><span class="caps" style="color:#D97757">Flaky checkout test</span><span style="font-size:13px;color:#6E6E73">now</span></div>
+      <div style="flex-grow:1;min-height:0;overflow:hidden;padding:14px 22px 0">
+        <div class="caps" style="color:#8E8E93;font-size:12px;margin-bottom:8px">You asked</div>
+        <p style="margin:0 0 14px;font-size:16px;color:#AEAEB2">Why is the checkout test flaky?</p>
+        <h2 style="margin:0 0 10px;font-size:24px;line-height:1.2;font-weight:700;letter-spacing:-.02em">It races the payment mock's timer</h2>
+        <p style="margin:0 0 10px;font-size:17px;line-height:1.45;color:#C7C7CC"><code>checkout.test.ts</code> waits 50 ms for the mock to resolve, but the mock schedules its reply with a 0–80 ms random delay. On a busy CI runner it loses about one run in eight.</p>
+        <p style="margin:0;font-size:17px;line-height:1.45;color:#C7C7CC">Fix: await the mock's promise instead of a fixed sleep. Want me to do it?</p>
+      </div>
+      <div style="padding:12px 16px 16px;display:flex;flex-direction:column;gap:10px">
+        <div class="free" style="outline:2px solid #D97757"><span style="flex-grow:1;color:#8E8E93;font-size:16px">Reply to keep going…</span><div class="mic"><svg width="18" height="18" color="#F5F5F7"><use href="#mic"/></svg></div></div>
+        <div class="btn"><span class="caps" style="font-size:12px;opacity:.7">Suggested</span><span style="font-size:17px;font-weight:600">Got it</span></div>
+        <div style="display:flex;justify-content:center;gap:28px;font-size:14px;color:#8E8E93;min-height:30px;align-items:center"><span>Archive thread</span><span>See the whole thread</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="note">2 · A reply card: the answer, a reply field, Got it, Archive</div>
+</div>
+
+<!-- 3. Thread page with composer -->
+<div class="frame" id="f3">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:54px 16px 0">
+    <span style="color:#D97757;font-size:17px;display:flex;align-items:center;gap:4px;padding:0 8px">‹ Back</span>
+    <span class="caps" style="color:#8E8E93">So far</span>
+    <span style="display:flex;gap:8px"><span style="font-size:15px;color:#8E8E93;padding:6px 10px;border-radius:999px;background:#1C1C1E">Archive</span></span>
+  </div>
+  <div style="padding:10px 24px 12px"><div style="font-size:24px;font-weight:700;letter-spacing:-.02em">Flaky checkout test</div><div style="font-size:14px;color:#8E8E93">shop · tenzo/flaky-checkout-test</div></div>
+  <div style="padding:0 20px;display:flex;flex-direction:column;gap:14px;font-size:16px">
+    <div style="align-self:flex-end;max-width:80%;padding:10px 14px;border-radius:18px;background:#2C2C2E">Why is the checkout test flaky?</div>
+    <div style="font-size:13px;color:#6E6E73">Read checkout.test.ts · Read mocks/payment.ts · Ran pnpm test ×20</div>
+    <div style="color:#C7C7CC;line-height:1.45">It races the payment mock's timer. The test waits 50 ms; the mock replies after 0–80 ms…</div>
+    <div style="align-self:flex-end;max-width:80%;padding:10px 14px;border-radius:18px;background:#2C2C2E">Yes, fix it, and check the other tests for the same sleep</div>
+    <div style="display:flex;align-items:center;gap:8px;font-size:14px;color:#0A84FF"><span style="width:8px;height:8px;border-radius:50%;background:#0A84FF"></span>Working · discussing</div>
+  </div>
+  <div style="position:absolute;left:16px;right:16px;bottom:50px">
+    <div class="free"><span style="flex-grow:1;color:#8E8E93;font-size:16px">Message… (waits its turn)</span><div class="mic"><svg width="18" height="18" color="#F5F5F7"><use href="#mic"/></svg></div><div class="mic" style="background:#D97757"><svg width="18" height="18" color="#1A0F0A"><use href="#send"/></svg></div></div>
+  </div>
+  <div class="note">3 · The thread page gets a message field and Archive</div>
+</div>
+
+<!-- 4. Archive confirm -->
+<div class="frame" id="f4">
+  <div style="position:absolute;inset:0;background:rgba(0,0,0,.6)"></div>
+  <div style="position:absolute;left:0;right:0;top:120px;padding:0 24px;opacity:.35"><div style="font-size:24px;font-weight:700">Flaky checkout test</div></div>
+  <div style="position:absolute;left:12px;right:12px;bottom:56px;padding:22px;border-radius:28px;background:#1C1C1E;display:flex;flex-direction:column;gap:12px">
+    <div style="font-size:22px;font-weight:700;letter-spacing:-.02em">Archive this thread?</div>
+    <div style="font-size:16px;color:#C7C7CC;line-height:1.45">Its agent stops and its worktree is removed. The branch <code>tenzo/flaky-checkout-test</code> is kept.</div>
+    <div style="font-size:16px;color:#FF6B61;line-height:1.45">2 files have changes that aren't committed. They'll be lost.</div>
+    <div class="btn" style="min-height:54px;justify-content:center"><span style="font-size:17px;font-weight:600">Archive anyway</span></div>
+    <div style="text-align:center;font-size:16px;color:#8E8E93;min-height:36px;display:flex;align-items:center;justify-content:center">Keep it</div>
+  </div>
+  <div class="note">4 · Archiving by hand; a dirty worktree asks first</div>
+</div>
+
+<!-- 5. Merged outside Tenzo -->
+<div class="frame" id="f5">
+  <div style="display:flex;align-items:center;justify-content:space-between;padding:54px 16px 0">
+    <span style="color:#D97757;font-size:17px;padding:0 8px">‹ Back</span><span class="caps" style="color:#8E8E93">Threads</span><span style="width:60px"></span>
+  </div>
+  <div style="padding:18px 16px;display:flex;flex-direction:column;gap:6px">
+    <div class="caps" style="color:#6E6E73;padding:0 8px 6px">Needs you</div>
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:#1C1C1E"><span style="width:8px;height:8px;border-radius:50%;background:#D97757"></span><span style="flex-grow:1">Flaky checkout test</span><span style="color:#D97757;font-size:15px">replied</span></div>
+    <div class="caps" style="color:#6E6E73;padding:16px 8px 6px">Landing</div>
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:#1C1C1E;opacity:.45"><span style="width:8px;height:8px;border-radius:50%;background:#6CCB8C"></span><span style="flex-grow:1;text-decoration:line-through">Refresh tokens</span><span style="color:#6CCB8C;font-size:15px">merged</span></div>
+    <div class="caps" style="color:#6E6E73;padding:16px 8px 6px">Today</div>
+    <div style="display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:16px;background:#0E0E10"><span style="width:8px;height:8px;border-radius:50%;background:#6CCB8C"></span><span style="flex-grow:1;color:#C7C7CC">Dark mode toggle</span><span style="color:#808085;font-size:15px">done</span></div>
+  </div>
+  <div style="position:absolute;left:16px;right:16px;bottom:56px;padding:14px 16px;border-radius:18px;background:#2C2C2E;display:flex;align-items:center;gap:10px;font-size:15px">
+    <span style="flex-grow:1">Refresh tokens is in main now · archived, branch kept</span>
+  </div>
+  <div class="note">5 · Merged anywhere → archived on its own</div>
+</div>
+</body></html>
