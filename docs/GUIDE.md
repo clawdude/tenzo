@@ -34,7 +34,7 @@ The daemon reads these once at start (`apps/daemon/src/config.ts`, which refuses
 | `TENZO_PUSH_PREVIEW` | `short` | what a notification says: `short` (thread name and a short line) or `none` ("A thread needs you.") |
 | `TENZO_PUSH_CONTACT` | the project's GitHub page | the `mailto:` or `https:` contact push services see (VAPID `sub`) |
 | `TENZO_SMOKE_CHROMIUM` | Playwright's cache | the Chromium `pnpm smoke` drives (not read by the daemon) |
-| `TENZO_SMOKE_SHOTS` | none | a folder where `pnpm smoke` saves the permission card's screenshots (not read by the daemon) |
+| `TENZO_SMOKE_SHOTS` | none | a folder where `pnpm smoke` saves screenshots of the cards it checks (not read by the daemon) |
 
 Each thread's environment also gets `TENZO_LIVE_BASE=/live/<thread>/`, the base path its dev server must serve under to be exposed.
 
@@ -141,7 +141,7 @@ A running service keeps its own copy of this setting, so add it to the plist and
 
 When a build is done the agent calls `report` (summary, how to test, checks) and the thread goes to review with a finished card. On it:
 
-- **Screenshots** the agent `attach`ed: PNG, JPEG, GIF or WebP files from inside the thread's worktree, up to 10 MB each and 8 per report.
+- **Screenshots** the agent `attach`ed: PNG, JPEG, GIF or WebP files from inside the thread's worktree, up to 10 MB each and 8 per card. `attach` works in any phase: what's attached goes on the agent's next card, so a question or proposal can show mockups too.
 - **Open live**, after the agent `expose`d a port: its dev server at `/live/<thread>/` on the live listener. Paths are forwarded unchanged, so the server must serve under that base (Vite: `--base $TENZO_LIVE_BASE`). The port must answer, not be Tenzo, and belong to a process running in the thread's worktree (checked with `lsof` where there is one). The link works while the dev server runs, and answers 502 otherwise.
 
 Answer with **Merge** (the filled button; the project's `landing` rule can make it **Open PR**), **Open PR**, **Done** (nothing to land), or words: **Needs changes**. From the CLI, only the word `merge` merges. While landing, the agent does the PR work itself with `gh` under the rules in `apps/daemon/prompts/landing.md`, wakes itself to check (`wake_me`), and comes to you only with a question or, after *Open PR*, a card when the PR is ready to merge. The thread archives once its work is in the default branch on origin. Landing threads have their own group in the Threads list, showing when they look again ("in 12m").

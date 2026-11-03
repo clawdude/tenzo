@@ -55,7 +55,7 @@ export interface StartSessionInput {
   phase: ThreadPhase;
   /** Where `attach` keeps its copies (`<home>/attachments/<thread>`). None: attach refuses. */
   attachmentsDir?: string;
-  /** Screenshots the thread already holds for its next report: they count against the cap. */
+  /** Screenshots the thread already holds for its next card: they count against the cap. */
   pendingAttachments?: number;
   /**
    * Tenzo's thread prompts: the one for `phase` is appended to the agent's own system prompt,
@@ -93,6 +93,11 @@ export interface SessionHost {
    * the finished card makes it landing), so the session asks instead of keeping its own.
    */
   phase(): ThreadPhase;
+  /**
+   * Screenshots the thread holds for its next card, by the daemon's log: a reply card the
+   * daemon opened after a turn took them. Read as each turn starts.
+   */
+  pendingAttachments?(): number;
   /**
    * Checks, with git alone, that the thread's work has landed before `landed` is believed:
    * nothing uncommitted, and everything its branch changes is in the default branch on origin.

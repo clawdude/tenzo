@@ -787,6 +787,37 @@ describe("foldEvent: finished work", () => {
     expect(state.runtime.preview).toBeNull();
   });
 
+  it("a question, a proposal or a reply shows what was attached since the last card; a permission waits", () => {
+    const { items, state } = fold(
+      started(),
+      turnStarted(),
+      attached(1),
+      permission(REQ2),
+      asked(REQ1),
+      attached(2),
+      attached(3),
+      proposed(REQ3),
+    );
+    const byKind = (kind: string) => items.find((i) => i.kind === kind);
+    expect(byKind("permission")?.attachments).toBeUndefined();
+    expect(byKind("question")?.attachments?.map((a) => a.name)).toEqual(["shot1.png"]);
+    expect(byKind("proposal")?.attachments?.map((a) => a.name)).toEqual(["shot2.png", "shot3.png"]);
+    expect(QueueItem.parse(byKind("proposal"))).toEqual(byKind("proposal"));
+    expect(state.runtime.attachments).toEqual([]);
+
+    const replied = fold(
+      started(),
+      turnStarted(),
+      attached(4),
+      completed(),
+      ev({ type: "reply.opened", turnId: TURN, requestId: REQ1, payload: { message: "Here's a mockup." } }),
+    );
+    expect(replied.items[0]?.attachments?.map((a) => a.name)).toEqual(["shot4.png"]);
+    expect(replied.state.runtime.attachments).toEqual([]);
+    // Nothing attached: no list at all.
+    expect(fold(started(), turnStarted(), asked()).items[0]).not.toHaveProperty("attachments");
+  });
+
   it("replays to the same state", () => {
     const log = [started(), turnStarted(), attached(1), exposed(), reported(), done(), attached(2)];
     const whole = fold(...log);

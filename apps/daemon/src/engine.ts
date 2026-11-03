@@ -1897,13 +1897,14 @@ export class Engine {
       ...(budget ? { budget } : {}),
       ...(() => {
         const runtime = loadFoldState(this.store, thread.id).runtime;
-        // The attach cap counts what this thread already holds for its next report.
+        // The attach cap counts what this thread already holds for its next card.
         return { phase: runtime.phase, pendingAttachments: runtime.attachments.length };
       })(),
       prompts: this.#prompts(),
       attachmentsDir: attachmentsDir(this.store.home, thread.id),
       host: {
         phase: () => loadFoldState(this.store, thread.id).runtime.phase,
+        pendingAttachments: () => loadFoldState(this.store, thread.id).runtime.attachments.length,
         checkLanded: () => this.#checkLanded(thread.id),
         startThread: async (input) => {
           const started = await this.#startChild(thread.id, input);
@@ -2066,9 +2067,9 @@ export class Engine {
     if (announced) this.#changed(event.threadId);
   }
 
-  /** A replaced report's screenshots: nothing shows them any more, so their copies go. */
+  /** A replaced card's screenshots (a report's, a reply's): nothing shows them now, so their copies go. */
   #dropCopies(item: QueueItem): void {
-    const files = item.finished?.attachments.map((a) => a.file) ?? [];
+    const files = [...(item.finished?.attachments ?? []), ...(item.attachments ?? [])].map((a) => a.file);
     if (files.length === 0) return;
     void removeCopies(this.store.home, item.threadId, files).catch((error: unknown) => {
       this.#log(`couldn't remove the screenshots of ${item.id}: ${String(error)}`);

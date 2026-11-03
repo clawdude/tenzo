@@ -38,7 +38,7 @@ export interface ThreadRuntime {
    * landing after Merge or Open PR, building again after Needs changes.
    */
   readonly phase: ThreadPhase;
-  /** Screenshots attached since the last report: they go on the next one. */
+  /** Screenshots attached since the last card that shows them: they go on the next one. */
   readonly attachments: readonly Attachment[];
   /** The dev server the agent exposed last; the daemon forwards the thread's live base to it. */
   readonly preview: Preview | null;
@@ -352,10 +352,14 @@ function foldOne(state: FoldState, event: RuntimeEvent, environmentId: Environme
     case "proposal.requested": {
       // Seen before, even if long resolved: never a second item for it.
       if (state.known.has(event.requestId)) return same(state);
-      const item = openItem(event, runtime.context, environmentId);
+      // A question or a proposal shows what was attached since the last card; a permission
+      // prompt doesn't take them, so they wait for the next one.
+      const shows = event.type !== "request.opened" && runtime.attachments.length > 0;
+      const item = openItem(event, runtime.context, environmentId, shows ? runtime.attachments : []);
       return {
         state: {
           ...state,
+          ...(shows ? { runtime: { ...runtime, attachments: [] } } : {}),
           open: [...state.open, item],
           known: new Set([...state.known, event.requestId]),
         },
@@ -469,10 +473,11 @@ function foldOne(state: FoldState, event: RuntimeEvent, environmentId: Environme
       if (state.known.has(event.requestId)) return same(state);
       // One reply per thread: a newer one replaces it.
       const superseded = supersede(state, "reply", event.createdAt);
-      const item = replyItem(event, environmentId);
+      const item = replyItem(event, environmentId, runtime.attachments);
       return {
         state: {
           ...state,
+          runtime: { ...runtime, attachments: [] },
           open: [...state.open.filter((open) => open.kind !== "reply"), item],
           known: new Set([...state.known, event.requestId]),
         },
@@ -663,6 +668,7 @@ function openItem(
   event: Asking,
   context: string,
   environmentId: EnvironmentId,
+  attachments: readonly Attachment[],
 ): QueueItem {
   const common = {
     id: itemIdFor(event.requestId),
@@ -672,6 +678,7 @@ function openItem(
     requestId: event.requestId,
     ...(event.turnId ? { turnId: event.turnId } : {}),
     context,
+    ...(attachments.length > 0 ? { attachments: [...attachments] } : {}),
     ...(event.payload.fingerprint ? { fingerprint: event.payload.fingerprint } : {}),
     createdAt: event.createdAt,
     status: "open" as const,
@@ -794,7 +801,11 @@ function readyItem(
  * A reply: the agent's final words and the prompt they answer. Quick lane: the agent is done and
  * waits on you as much as with a question.
  */
-function replyItem(event: RuntimeEventOf<"reply.opened">, environmentId: EnvironmentId): QueueItem {
+function replyItem(
+  event: RuntimeEventOf<"reply.opened">,
+  environmentId: EnvironmentId,
+  attachments: readonly Attachment[],
+): QueueItem {
   const message = cutMessage(event.payload.message.trim(), REPLY_LIMIT);
   return {
     id: itemIdFor(event.requestId),
@@ -811,6 +822,7 @@ function replyItem(event: RuntimeEventOf<"reply.opened">, environmentId: Environ
     suggested: "done",
     questions: [],
     reply: { message, prompt: cutMessage((event.payload.prompt ?? "").trim(), REPLY_PROMPT_LIMIT) },
+    ...(attachments.length > 0 ? { attachments: [...attachments] } : {}),
     createdAt: event.createdAt,
     status: "open",
     detached: false,

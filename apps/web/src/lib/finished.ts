@@ -1,4 +1,4 @@
-import { attachmentUrl, type CheckStatus, liveUrl, type QueueItem } from '@tenzo/client-runtime';
+import { type Attachment, attachmentUrl, type CheckStatus, liveUrl, type QueueItem } from '@tenzo/client-runtime';
 import { renderMarkdown } from './markdown.ts';
 
 /**
@@ -53,11 +53,21 @@ export function finishedView(
 			status: c.status,
 			detail: c.detail ?? ''
 		})),
-		shots: f.attachments.map((a) => ({
-			url: attachmentUrl(item.threadId, a),
-			alt: a.caption || a.name,
-			caption: a.caption ?? ''
-		})),
+		shots: toShots(item.threadId, f.attachments),
 		live: f.live && liveOrigin ? liveUrl(liveOrigin, item.threadId, f.live, liveGrant) : null
 	};
+}
+
+/** A question's, a proposal's or a reply's images: what the agent attached before it. */
+export function shotsOf(item: QueueItem): Shot[] {
+	if (item.kind === 'finished' || !item.attachments) return [];
+	return toShots(item.threadId, item.attachments);
+}
+
+function toShots(threadId: string, attachments: readonly Attachment[]): Shot[] {
+	return attachments.map((a) => ({
+		url: attachmentUrl(threadId, a),
+		alt: a.caption || a.name,
+		caption: a.caption ?? ''
+	}));
 }

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { LandingRule, ThinkingLevel } from "./config.ts";
-import { Finished } from "./finished.ts";
+import { Attachment, Finished } from "./finished.ts";
 import { EnvironmentId, ProjectId, ThreadId } from "./ids.ts";
 import {
   AgentKind,
@@ -145,6 +145,11 @@ export const QueueItem = z.object({
   proposal: z.object({ headline: z.string(), summary: z.string() }).optional(),
   /** A finished item (review lane): the handoff note, checks, screenshots and live URL. */
   finished: Finished.optional(),
+  /**
+   * A question, proposal or reply item: the screenshots the agent attached since its last card,
+   * in order (a finished item keeps its own, in `finished`). None: nothing was attached.
+   */
+  attachments: z.array(Attachment).optional(),
   /** A ready item (quick lane): the PR and its state. `ask` is the headline. */
   ready: z.object({ url: WebUrl, summary: z.string() }).optional(),
   /**

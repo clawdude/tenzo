@@ -3,6 +3,7 @@
 	import { onDestroy } from 'svelte';
 	import { placeholderOf } from '#lib/composer.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
+	import { autogrow, onEnter } from '#lib/textarea.ts';
 	import { command, tenzo } from '#lib/tenzo.svelte.ts';
 
 	// The thread page's message field (the mock-up's replies/3): a prompt for the thread, sent
@@ -66,21 +67,22 @@
 		<p class="mb-2 px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="composer-error">{error}</p>
 	{/if}
 	<form
-		class="flex min-h-[56px] items-center gap-2 rounded-[22px] bg-card py-1.5 pr-1.5 pl-4 outline-2 outline-offset-2 outline-transparent focus-within:outline-mute"
+		class="flex min-h-[56px] items-end gap-2 rounded-[22px] bg-card py-1.5 pr-1.5 pl-4 outline-2 outline-offset-2 outline-transparent focus-within:outline-mute"
 		onsubmit={submit}
 		data-testid="composer"
 	>
 		<label for="message" class="sr-only">Message</label>
-		<input
+		<textarea
 			id="message"
-			type="text"
+			rows="1"
 			bind:value={text}
 			placeholder={placeholderOf(thread)}
-			enterkeyhint="send"
 			autocomplete="off"
-			class="min-w-0 grow bg-transparent text-[16px] outline-none placeholder:text-faint"
+			class="max-h-[calc(5*1.4em+18px)] min-w-0 grow resize-none self-center bg-transparent py-[9px] text-[16px] leading-[1.4] outline-none placeholder:text-faint"
+			onkeydown={onEnter}
+			use:autogrow={text}
 			data-testid="message"
-		/>
+		></textarea>
 		{#if dictation}
 			<button
 				type="button"

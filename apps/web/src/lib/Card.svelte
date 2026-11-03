@@ -13,12 +13,13 @@
 	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
 	import { backLabels } from '#lib/back.ts';
 	import CardBack from '#lib/CardBack.svelte';
-	import { finishedView, type Shot } from '#lib/finished.ts';
+	import { finishedView, type Shot, shotsOf } from '#lib/finished.ts';
 	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { ageLabel, asidesOf, othersLabel, type Pick, requestedCode, stepsOf } from '#lib/pass.ts';
 	import { replyView } from '#lib/reply.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
+	import { autogrow, onEnter } from '#lib/textarea.ts';
 
 	interface Props {
 		item: QueueItem;
@@ -83,6 +84,8 @@
 	const said = $derived(replyView(item));
 	/** Quiet ways out under the answers: Archive thread, See the whole thread. */
 	const asides = $derived(asidesOf(item));
+	/** What a question, proposal or reply shows: the images attached before it. */
+	const shots = $derived(shotsOf(item));
 	/** The screenshot shown full screen, if one was tapped. */
 	let enlarged = $state.raw<Shot | null>(null);
 	// Which question the card is on, whether its answer has gone, and which taps to ignore.
@@ -150,7 +153,7 @@
 
 	// A reply's field is where the conversation goes on: it takes the focus where that doesn't
 	// bring a keyboard up over the card (a mouse or trackpad, not a phone).
-	let field = $state<HTMLInputElement | null>(null);
+	let field = $state<HTMLTextAreaElement | null>(null);
 	$effect(() => {
 		if (!said || !field || typeof matchMedia !== 'function') return;
 		if (matchMedia('(pointer: fine)').matches) field.focus({ preventScroll: true });
@@ -290,6 +293,17 @@
 				class="rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft"
 				data-testid="error-message">{item.error.message}</pre>
 		{/if}
+		{#if shots.length > 0 && !compact}
+			<!-- What the agent attached before asking: a mockup, a screenshot. -->
+			<div
+				class={['scroll -mx-[22px] mb-4 flex gap-2.5 overflow-x-auto px-[22px]', (item.proposal || said) && 'mt-4']}
+				data-testid="media"
+			>
+				{#each shots as shot (shot.url)}
+					{@render thumb(shot)}
+				{/each}
+			</div>
+		{/if}
 
 		{#if view}
 			{#if view.badges.length > 0}
@@ -323,15 +337,7 @@
 			{#if view.shots.length > 0 || view.live}
 				<div class="scroll -mx-[22px] mb-4 flex gap-2.5 overflow-x-auto px-[22px]" data-testid="media">
 					{#each view.shots as shot (shot.url)}
-						<button
-							type="button"
-							class="opt h-[150px] w-24 shrink-0 overflow-hidden rounded-[14px] bg-fill"
-							aria-label={`Enlarge: ${shot.alt}`}
-							onclick={() => (enlarged = shot)}
-							data-testid="shot"
-						>
-							<img src={shot.url} alt={shot.alt} class="size-full object-cover object-top" loading="lazy" />
-						</button>
+						{@render thumb(shot)}
 					{/each}
 					{#if view.live}
 						<a
@@ -455,23 +461,24 @@
 		{#if step?.placeholder !== null}
 		<form
 			class={[
-				'flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2',
+				'flex min-h-[52px] items-end gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2',
 				said ? '-outline-offset-2 outline-clay' : 'outline-offset-2 outline-transparent focus-within:outline-mute'
 			]}
 			onsubmit={submit}
 		>
 			<label for={fieldId} class="sr-only">Your answer</label>
-			<input
+			<textarea
 				id={fieldId}
-				type="text"
+				rows="1"
 				bind:value={text}
 				placeholder={step?.placeholder ?? "Or say what you'd prefer"}
-				enterkeyhint="send"
 				autocomplete="off"
-				class="min-w-0 grow bg-transparent text-[16px] outline-none placeholder:text-faint"
+				class="max-h-[calc(5*1.4em+18px)] min-w-0 grow resize-none self-center bg-transparent py-[9px] text-[16px] leading-[1.4] outline-none placeholder:text-faint"
+				onkeydown={onEnter}
+				use:autogrow={text}
 				bind:this={field}
 				data-testid="free-text"
-			/>
+			></textarea>
 			{#if text.trim() && !stopListening}
 				<button
 					type="submit"
@@ -543,6 +550,18 @@
 		{/if}
 	</div>
 </article>
+
+{#snippet thumb(shot: Shot)}
+	<button
+		type="button"
+		class="opt h-[150px] w-24 shrink-0 overflow-hidden rounded-[14px] bg-fill"
+		aria-label={`Enlarge: ${shot.alt}`}
+		onclick={() => (enlarged = shot)}
+		data-testid="shot"
+	>
+		<img src={shot.url} alt={shot.alt} class="size-full object-cover object-top" loading="lazy" />
+	</button>
+{/snippet}
 
 {#if enlarged}
 	<!-- A screenshot, full screen: tap anywhere (or Escape) to put it back. -->
