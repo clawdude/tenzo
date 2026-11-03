@@ -13,13 +13,14 @@
 	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
 	import { backLabels } from '#lib/back.ts';
 	import CardBack from '#lib/CardBack.svelte';
+	import { blurLeaves, foldedLine } from '#lib/editor.ts';
 	import { finishedView, type Shot, shotsOf } from '#lib/finished.ts';
 	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
 	import { ageLabel, asidesOf, othersLabel, type Pick, requestedCode, stepsOf } from '#lib/pass.ts';
 	import { replyView } from '#lib/reply.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
-	import { autogrow, onEnter } from '#lib/textarea.ts';
+	import { autogrow, finePointer, onEnter } from '#lib/textarea.ts';
 
 	interface Props {
 		item: QueueItem;
@@ -39,6 +40,8 @@
 		onanswer: (answer: ItemAnswer) => boolean;
 		/** Archive thread was tapped: the Pass asks first (ArchiveSheet.svelte). */
 		onarchive?: () => void;
+		/** The card became the editor, or went back: the Pass holds swipes meanwhile. */
+		onedit?: (editing: boolean) => void;
 	}
 	let {
 		item,
@@ -50,7 +53,8 @@
 		liveGrant = null,
 		threadView = undefined,
 		onanswer,
-		onarchive
+		onarchive,
+		onedit
 	}: Props = $props();
 
 	/** What the More pill and the back's header say. */
@@ -130,7 +134,11 @@
 	function submit(event: SubmitEvent) {
 		event.preventDefault();
 		const words = text.trim();
-		if (words) pick({ text: words });
+		if (!words) return;
+		const before = answering;
+		pick({ text: words });
+		// Sent: the editor goes with it (a card with more to ask shows the next question).
+		if (answering !== before) leave(true);
 	}
 
 	function toggleMic() {
@@ -149,14 +157,75 @@
 		);
 	}
 
-	onDestroy(() => stopListening?.());
+	onDestroy(() => {
+		stopListening?.();
+		if (editing) onedit?.(false);
+	});
 
 	// A reply's field is where the conversation goes on: it takes the focus where that doesn't
 	// bring a keyboard up over the card (a mouse or trackpad, not a phone).
 	let field = $state<HTMLTextAreaElement | null>(null);
 	$effect(() => {
-		if (!said || !field || typeof matchMedia !== 'function') return;
-		if (matchMedia('(pointer: fine)').matches) field.focus({ preventScroll: true });
+		if (said && field && finePointer()) field.focus({ preventScroll: true });
+	});
+
+	// The card as the editor (editor.ts): on a touch screen, while the field has the focus.
+	let editing = $state(false);
+	/** While editing, what is being answered is shown in full instead of on one line. */
+	let unfolded = $state(false);
+	/** Little room and not editing: the question and the answers only. */
+	const lean = $derived(compact && !editing);
+	/** What the card asks: its headline, else the current step's question. */
+	const headline = $derived(view?.headline ?? step?.ask ?? item.ask);
+	const folded = $derived(foldedLine(said?.asked, headline));
+	let tappedAt = -Infinity;
+
+	function edit() {
+		// With a mouse or trackpad the field stays inline.
+		if (editing || finePointer()) return;
+		editing = true;
+		unfolded = false;
+		onedit?.(true);
+	}
+
+	/** The card as it was, the draft still in the field. */
+	function leave(blur: boolean) {
+		if (!editing) return;
+		editing = false;
+		onedit?.(false);
+		if (blur) field?.blur();
+	}
+
+	function blurred(event: FocusEvent) {
+		const to = event.relatedTarget;
+		const inCard = to instanceof Node && card?.contains(to) === true;
+		if (blurLeaves(inCard, performance.now() - tappedAt)) leave(false);
+	}
+
+	/** A tap on this button leaves the focus (and the keyboard) in the field. */
+	function keepFocus(event: MouseEvent) {
+		event.preventDefault();
+	}
+
+	/** Should the tap have taken the focus anyway, it goes back while the tap still counts. */
+	function refocus() {
+		if (editing && document.activeElement !== field) field?.focus({ preventScroll: true });
+	}
+
+	// Taps in the card, for blurred(): iOS doesn't focus a tapped button, the field just blurs.
+	$effect(() => {
+		const el = card;
+		if (!el) return;
+		const tapped = () => (tappedAt = performance.now());
+		el.addEventListener('pointerdown', tapped);
+		return () => el.removeEventListener('pointerdown', tapped);
+	});
+
+	// The keyboard went down with the field still focused (Android's back button): put it back.
+	let hadKeyboard = false;
+	$effect(() => {
+		if (hadKeyboard && !compact) leave(true);
+		hadKeyboard = compact;
 	});
 </script>
 
@@ -166,9 +235,39 @@
 	data-id={item.id}
 	data-kind={item.kind}
 	data-side={flipped ? 'back' : 'front'}
+	data-editing={editing}
 	bind:this={card}
 >
-	{#if flipped}
+	{#if editing}
+		<!-- The editor's header: whose card, and one line of what is being answered; ⌄ shows it all. -->
+		<header class="shrink-0 px-[22px] pt-3.5">
+			<div class="flex items-center justify-between gap-4">
+				<span
+					class={[
+						'truncate text-[13px] font-semibold tracking-[0.06em] uppercase',
+						view ? 'text-done' : 'text-clay'
+					]}>{thread}</span
+				>
+				<button
+					type="button"
+					aria-label={unfolded ? 'Show less' : 'Show all of it'}
+					aria-expanded={unfolded}
+					class="opt -mr-2.5 flex size-10 shrink-0 items-center justify-center rounded-full text-mute"
+					onmousedown={keepFocus}
+					onclick={() => {
+						unfolded = !unfolded;
+						refocus();
+					}}
+					data-testid="editor-unfold"
+				>
+					<svg class={['transition-transform motion-reduce:transition-none', unfolded && 'rotate-180']} width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 9l6 6 6-6"></path></svg>
+				</button>
+			</div>
+			{#if !unfolded}
+				<p class="-mt-0.5 truncate text-[16px] text-ink-soft" data-testid="editor-line">{folded}</p>
+			{/if}
+		</header>
+	{:else if flipped}
 		<!-- The back: Back turns it to the front again; the answers below stay where they are. -->
 		<header class="flex shrink-0 items-center justify-between gap-4 pt-3.5 pr-[22px] pl-3">
 			<button
@@ -195,9 +294,16 @@
 	</header>
 	{/if}
 
-	<!-- Text scrolls in here and fades out above the answers, which never move. -->
+	<!--
+		Text scrolls in here and fades out above the answers, which never move. In the editor it is
+		folded away, or unfolded above the field, scrolling there.
+	-->
 	<div
-		class="scroll min-h-0 grow touch-pan-y overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]"
+		class={[
+			'scroll min-h-0 touch-pan-y overflow-y-auto px-[22px] pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]',
+			!editing ? 'grow pt-4' : unfolded ? 'max-h-[45%] shrink-0 pt-2' : 'hidden'
+		]}
+		data-testid="card-text"
 	>
 		{#if flipped}
 			<CardBack
@@ -209,7 +315,7 @@
 				ondeeper={() => (returnTo = item.id)}
 			/>
 		{:else}
-		{#if item.context && !compact && !view && !item.permission}
+		{#if item.context && !lean && !view && !item.permission}
 			<!--
 				Three lines, one while the options are out; all of it is on the back. The end is what
 				leads into the question (the daemon keeps the end too), so a long context shows its last
@@ -260,7 +366,7 @@
 			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', code && 'line-clamp-3']}
 			data-testid="ask"
 		>
-			{view?.headline ?? step?.ask ?? item.ask}
+			{headline}
 		</h2>
 		{/if}
 		{#if code}
@@ -293,7 +399,7 @@
 				class="rounded-2xl bg-fill px-4 py-3 font-mono text-[14px] leading-snug break-words whitespace-pre-wrap text-ink-soft"
 				data-testid="error-message">{item.error.message}</pre>
 		{/if}
-		{#if shots.length > 0 && !compact}
+		{#if shots.length > 0 && !lean}
 			<!-- What the agent attached before asking: a mockup, a screenshot. -->
 			<div
 				class={['scroll -mx-[22px] mb-4 flex gap-2.5 overflow-x-auto px-[22px]', (item.proposal || said) && 'mt-4']}
@@ -382,7 +488,7 @@
 			{/if}
 		{/if}
 
-		{#if !said}
+		{#if !said && !editing}
 		<!-- More: turns the card over to its back (CardBack.svelte). A reply has See the whole thread. -->
 		<button
 			type="button"
@@ -397,14 +503,23 @@
 		{/if}
 	</div>
 
-	<div class="scroll flex max-h-[58%] shrink-0 touch-pan-y flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4">
+	<!--
+		The answers. Each keeps its height (shrunk, the field's text ran out of its box): past 58% of
+		the card they scroll. In the editor, only the field, taking the rest of the card.
+	-->
+	<div
+		class={[
+			'scroll flex touch-pan-y flex-col gap-2.5 overflow-y-auto px-4 pt-3 pb-4',
+			editing ? 'min-h-0 grow' : 'max-h-[58%] shrink-0 *:shrink-0'
+		]}
+	>
 		{#if failure}
-			<p class="px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">
+			<p class="shrink-0 px-1 text-[14px] leading-snug text-clay" role="alert" data-testid="error">
 				{failure.message}
 			</p>
 		{/if}
 
-		{#if step && showOthers && !step.sideBySide}
+		{#if !editing && step && showOthers && !step.sideBySide}
 			{#each step.others as choice (choice.value)}
 				<button
 					type="button"
@@ -420,7 +535,7 @@
 			{@render freeText()}
 		{/if}
 
-		{#if step?.sideBySide && step.suggested}
+		{#if !editing && step?.sideBySide && step.suggested}
 			{@const suggested = step.suggested}
 			<div class="flex gap-2.5" data-testid="decide">
 				{#each step.others as choice (choice.value)}
@@ -438,7 +553,7 @@
 					data-testid="suggested">{suggested.label}</button
 				>
 			</div>
-		{:else if step?.suggested}
+		{:else if !editing && step?.suggested}
 			{@const suggested = step.suggested}
 			<button
 				type="button"
@@ -459,12 +574,22 @@
 
 		{#snippet freeText()}
 		{#if step?.placeholder !== null}
+		<!--
+			Inline: a box that grows with its text, mic or send at its end. The editor: the same field
+			(it keeps the focus and the keyboard) filling the card, Cancel, mic and Send under it.
+		-->
 		<form
 			class={[
-				'flex min-h-[52px] items-end gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2',
-				said ? '-outline-offset-2 outline-clay' : 'outline-offset-2 outline-transparent focus-within:outline-mute'
+				'flex rounded-[18px] outline-2',
+				editing
+					? 'min-h-0 grow flex-col gap-2'
+					: 'min-h-[52px] items-end gap-2 bg-fill py-1.5 pr-1.5 pl-4',
+				editing && 'outline-transparent',
+				!editing && said && '-outline-offset-2 outline-clay',
+				!editing && !said && 'outline-offset-2 outline-transparent focus-within:outline-mute'
 			]}
 			onsubmit={submit}
+			data-testid="answer-form"
 		>
 			<label for={fieldId} class="sr-only">Your answer</label>
 			<textarea
@@ -473,43 +598,77 @@
 				bind:value={text}
 				placeholder={step?.placeholder ?? "Or say what you'd prefer"}
 				autocomplete="off"
-				class="max-h-[calc(5*1.4em+18px)] min-w-0 grow resize-none self-center bg-transparent py-[9px] text-[16px] leading-[1.4] outline-none placeholder:text-faint"
+				class={[
+					'resize-none text-[16px] leading-[1.4] outline-none placeholder:text-faint',
+					editing
+						? 'scroll min-h-0 grow basis-0 rounded-[18px] bg-fill px-4 py-3'
+						: 'max-h-[calc(5*1.4em+18px)] min-w-0 grow self-center bg-transparent py-[9px]'
+				]}
 				onkeydown={onEnter}
-				use:autogrow={text}
+				onfocus={edit}
+				onblur={blurred}
+				use:autogrow={{ text, fill: editing }}
 				bind:this={field}
 				data-testid="free-text"
 			></textarea>
-			{#if text.trim() && !stopListening}
-				<button
-					type="submit"
-					aria-label="Send"
-					class="opt flex size-10 shrink-0 items-center justify-center rounded-full bg-ink text-black"
-					data-testid="send"
-				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
-				</button>
+			{#if editing}
+				<div class="flex shrink-0 items-center justify-between gap-2" data-testid="editor-bar">
+					<button
+						type="button"
+						class="opt min-h-11 px-2 text-[17px] text-ink-soft"
+						onclick={() => leave(true)}
+						data-testid="editor-cancel">Cancel</button
+					>
+					<div class="flex gap-2">
+						{#if dictation}{@render mic()}{/if}
+						{@render send(!text.trim())}
+					</div>
+				</div>
+			{:else if text.trim() && !stopListening}
+				{@render send(false)}
 			{:else if dictation}
-				<button
-					type="button"
-					aria-label={stopListening ? 'Stop dictating' : 'Dictate'}
-					aria-pressed={stopListening !== null}
-					class={[
-						'opt flex size-10 shrink-0 items-center justify-center rounded-full',
-						stopListening
-							? 'animate-pulse bg-ink text-black motion-reduce:animate-none'
-							: 'bg-fill-strong'
-					]}
-					onclick={toggleMic}
-					data-testid="mic"
-				>
-					<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
-				</button>
+				{@render mic()}
 			{/if}
 		</form>
 		{/if}
 		{/snippet}
 
-		{#if (step && step.row.length > 0) || asides.length > 0}
+		{#snippet send(disabled: boolean)}
+			<button
+				type="submit"
+				aria-label="Send"
+				aria-disabled={disabled}
+				class="opt flex size-10 shrink-0 items-center justify-center rounded-full bg-ink text-black aria-disabled:bg-fill-strong aria-disabled:text-faint"
+				onmousedown={keepFocus}
+				data-testid="send"
+			>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 19V5M5 12l7-7 7 7"></path></svg>
+			</button>
+		{/snippet}
+
+		{#snippet mic()}
+			<button
+				type="button"
+				aria-label={stopListening ? 'Stop dictating' : 'Dictate'}
+				aria-pressed={stopListening !== null}
+				class={[
+					'opt flex size-10 shrink-0 items-center justify-center rounded-full',
+					stopListening
+						? 'animate-pulse bg-ink text-black motion-reduce:animate-none'
+						: 'bg-fill-strong'
+				]}
+				onmousedown={keepFocus}
+				onclick={() => {
+					toggleMic();
+					refocus();
+				}}
+				data-testid="mic"
+			>
+				<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="3" width="6" height="11" rx="3"></rect><path d="M5 11a7 7 0 0 0 14 0"></path><path d="M12 18v3"></path></svg>
+			</button>
+		{/snippet}
+
+		{#if !editing && ((step && step.row.length > 0) || asides.length > 0)}
 			<div class="flex flex-wrap justify-center gap-x-7" data-testid="row">
 				{#each step?.row ?? [] as choice (choice.value)}
 					<button
@@ -539,7 +698,7 @@
 			</div>
 		{/if}
 
-		{#if step && step.others.length > 0 && !step.sideBySide}
+		{#if !editing && step && step.others.length > 0 && !step.sideBySide}
 			<button
 				type="button"
 				class="min-h-9 text-[14px] text-mute"

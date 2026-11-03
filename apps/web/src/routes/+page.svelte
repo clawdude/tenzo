@@ -47,6 +47,8 @@
 	let toastTimer: ReturnType<typeof setTimeout> | undefined;
 	/** The thread whose Archive was tapped on its card: the sheet asks first. */
 	let archiving = $state<string | null>(null);
+	/** The card that is the editor just now (editor.ts): it can't be swiped aside meanwhile. */
+	let editing = $state<string | null>(null);
 	const archivingThread = $derived(live.threads.find((t) => t.id === archiving));
 
 	const pile = $derived(pileOf(live.items, { leaving, front: bringing ?? front }));
@@ -293,7 +295,7 @@
 					in:arrive={{ side: arrivals.get(item.id) ?? null }}
 					out:leave={departures.get(item.id) ?? { kind: 'lift' }}
 					use:swipeable={{
-						enabled: !leaving.has(item.id),
+						enabled: !leaving.has(item.id) && editing !== item.id,
 						ondrag: (dx) => {
 							dragging = true;
 							drag = dx;
@@ -317,6 +319,10 @@
 						threadView={live.threads.find((t) => t.id === item.threadId)}
 						onanswer={(a) => answer(item, a)}
 						onarchive={() => (archiving = item.threadId)}
+						onedit={(on) => {
+							if (on) editing = item.id;
+							else if (editing === item.id) editing = null;
+						}}
 					/>
 				</div>
 			{/each}

@@ -70,7 +70,7 @@ After changing any of those settings, moving the checkout or upgrading Node, run
 
 1. `git pull` in the checkout the daemon runs from, then `pnpm install` if the lockfile changed.
 2. `pnpm build` (the daemon's own TypeScript runs from source).
-3. Restart the daemon: `tenzo service install` again, or stop and start `tenzo serve`. Running turns resume with a "Tenzo restarted" prompt; open questions stay on the Pass.
+3. Restart the daemon: `launchctl kickstart -k gui/$(id -u)/dev.tenzo.daemon` restarts the service with the settings it was installed with (`tenzo service install` again would take this shell's), or stop and start `tenzo serve`. Running turns resume with a "Tenzo restarted" prompt; open questions stay on the Pass.
 4. Migrations run at start. A database newer than the code refuses to open: update rather than roll back.
 
 Prompt edits (`apps/daemon/prompts/*.md`) and project config edits need no restart: they apply from the next session or turn.
