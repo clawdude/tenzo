@@ -91,8 +91,12 @@ describe("replies", () => {
   };
 
   it("take got it, or words to send next, from the CLI too", () => {
-    for (const done of ["got it", "ok", "y", "1", "Done"]) {
+    for (const done of ["got it", "Got It", "1", "Done"]) {
       expect(answerFromWords(reply, done.split(" "))).toEqual({ kind: "reply", decision: "done" });
+    }
+    // "Want me to do it?" "yes": words for the agent, never a silent Got it.
+    for (const words of ["yes", "y", "ok"]) {
+      expect(answerFromWords(reply, [words])).toEqual({ kind: "reply", decision: "send", text: words });
     }
     expect(answerFromWords(reply, ["yes,", "fix", "it"])).toEqual({
       kind: "reply",

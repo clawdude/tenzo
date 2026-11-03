@@ -14,8 +14,18 @@ export interface ArchiveSheetView {
 	force: boolean;
 }
 
-/** The sheet for a worktree with `files` uncommitted (null: not counted yet). */
-export function archiveSheet(files: number | null): ArchiveSheetView {
+/**
+ * The sheet for a worktree with `files` uncommitted (null: not counted yet), or for a thread
+ * whose repo is `gone` (moved or deleted: the daemon said so when it refused).
+ */
+export function archiveSheet(files: number | null, gone = false): ArchiveSheetView {
+	if (gone) {
+		return {
+			warning: 'Its repo is gone (moved or deleted). Archiving forgets the thread and deletes its worktree.',
+			confirm: 'Archive anyway',
+			force: true
+		};
+	}
 	if (!files) return { warning: null, confirm: 'Archive', force: false };
 	const what =
 		files === 1
@@ -25,9 +35,12 @@ export function archiveSheet(files: number | null): ArchiveSheetView {
 }
 
 /**
- * The daemon refused an archive for uncommitted work that came after the count (the agent wrote
- * a file meanwhile): count again and warn, rather than show git's words.
+ * Why the daemon refused an archive that `force` would do: uncommitted work that came after the
+ * count (the agent wrote a file meanwhile: count again and warn), or a repo that is gone (warn,
+ * and offer Archive anyway). Null: some other refusal, shown in its own words.
  */
-export function refusedForChanges(message: string): boolean {
-	return /uncommitted changes/i.test(message);
+export function refusalOf(message: string): 'changes' | 'gone' | null {
+	if (/uncommitted changes/i.test(message)) return 'changes';
+	if (/is gone \(moved or deleted\)/i.test(message)) return 'gone';
+	return null;
 }

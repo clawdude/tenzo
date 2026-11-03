@@ -91,7 +91,7 @@ pnpm tenzo thread list [app] [--all]
 pnpm tenzo thread log <thread-id> [--follow]
 pnpm tenzo items                               # what the threads need from you, oldest first
 pnpm tenzo answer <item-id> 2                  # an option's number or label, or your own words
-                                               # (a reply: `got it`, or what to say next)
+                                               # (a reply: `got it`; anything else, `yes` too, goes to it)
 pnpm tenzo thread archive <thread-id>          # refuses a dirty worktree; --force discards it (and
                                                # lets go of a thread whose repo was moved or deleted)
 ```
@@ -104,7 +104,7 @@ A thread without a title is named by its prompt's first words, then a few second
 
 A turn that ends with the agent's words and nothing else to come (no card, nothing queued, no wake, not landing) leaves a **reply** card: an answer to a question, say. It pushes like a question. Typing on it (or on the thread page, or `thread send`) carries on in the same session and puts the card away; *Got it* puts it away. Automation runs never get one.
 
-**Archive by hand** from the thread page's header, or *Archive thread* on a reply or finished card. A sheet always asks first; when the worktree has uncommitted changes it says how many files and offers *Archive anyway* (`--force`). The branch is kept either way.
+**Archive by hand** from the thread page's header, or *Archive thread* on a reply or finished card. A sheet always asks first; when the worktree has uncommitted changes it says how many files and offers *Archive anyway* (`--force`), and so it does when the thread's repo was moved or deleted. The branch is kept either way.
 
 To try it without touching your real state:
 

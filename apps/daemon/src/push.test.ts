@@ -226,6 +226,9 @@ describe("what a push says", () => {
       title: "Flaky checkout test",
       body: "Answered: It races the mock's timer",
     });
+    // An answer that is only code has no line to push (the fold leaves its ask empty).
+    const code = item({ kind: "reply", ask: "", reply: { message: "```\nexport TOKEN=x\n```", prompt: "" } });
+    expect(pushMessageOf(code, "t", "short").body).toBe("Answered.");
   });
 
   it("says nothing at all with preview none", () => {

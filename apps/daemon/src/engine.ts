@@ -250,6 +250,8 @@ interface Live {
   clock: TurnClock;
   /** The agent's latest message of its own (not a subagent's) in the current turn, in full. */
   said: string;
+  /** The prompt of ours running now, when it is your own words (`QueuedPrompt.yours`). */
+  asked: string | null;
 }
 
 /** A session's running figures, to give each `turn.completed` what that turn alone took. */
@@ -508,7 +510,8 @@ export class Engine {
           budget: run.budget,
         });
       }
-      if (prompt) enqueuePrompt(this.store, thread.id, prompt);
+      // Yours when you started it: not an automation's, nor another thread's agent's.
+      if (prompt) enqueuePrompt(this.store, thread.id, prompt, null, { yours: !run && !input.parent });
     });
     this.#pump(thread.id);
     if (run) this.#armBudget(thread.id);
@@ -556,7 +559,7 @@ export class Engine {
     // Both or neither: the card goes only with the prompt that answers it.
     const appended = transaction(this.store, () => {
       const results = resolutions.map((event) => appendEvent(this.store, event));
-      enqueuePrompt(this.store, thread.id, text);
+      enqueuePrompt(this.store, thread.id, text, null, { yours: true });
       return results;
     });
     resolutions.forEach((event, i) => {
@@ -1085,7 +1088,9 @@ export class Engine {
     const appended = transaction(this.store, () => {
       const result = appendEvent(this.store, resolution);
       if (run) grantMore(this.store, run);
-      for (const prompt of errorPrompts(item, answer)) enqueuePrompt(this.store, thread.id, prompt);
+      // Words to tell it are yours; what Retry sends again is Tenzo's.
+      const yours = answer.action === "tell";
+      for (const prompt of errorPrompts(item, answer)) enqueuePrompt(this.store, thread.id, prompt, null, { yours });
       return result;
     });
     this.#publish(resolution, appended);
@@ -1499,8 +1504,10 @@ export class Engine {
    * on the Pass as a reply card (`reply.opened`), and pushes like a question. Not for an
    * automation's run (a card every run; its last words feed the next one), nor while landing
    * (`#checkStalled` has those), nor when a turn, a prompt, an item or a wake is to come.
+   * `asked`: the turn's prompt when it was your own words; Tenzo's own (a wake, a retry, an
+   * answer it delivered, a restart's resume) never shows as "You asked".
    */
-  #checkReply(live: Live, event: RuntimeEventOf<"turn.completed">): void {
+  #checkReply(live: Live, event: RuntimeEventOf<"turn.completed">, asked: string | null): void {
     if (this.#closing || live.landed || live.turnId || event.payload.state !== "completed") return;
     const message = (live.said || event.payload.result || "").trim();
     if (message === "") return;
@@ -1510,8 +1517,6 @@ export class Engine {
     const { runtime, open } = loadFoldState(this.store, thread.id);
     if (runtime.phase === "landing" || runtime.wake !== null || runtime.turnId !== null) return;
     if (open.length > 0 || queuedCount(this.store, thread.id) > 0) return;
-    // What the turn answered: its prompt, unless that was only Tenzo picking a turn up again.
-    const asked = runtime.prompt === RESTART_PROMPT ? null : runtime.prompt;
     try {
       this.#append(
         draft(thread, {
@@ -1780,6 +1785,7 @@ export class Engine {
     removePrompt(this.store, prompt.seq);
     live.turnId = turnId;
     live.standing = prompt.reply ? [prompt.reply] : [];
+    live.asked = prompt.yours ? prompt.text : null;
   }
 
   /**
@@ -1924,6 +1930,7 @@ export class Engine {
       asIs: false,
       clock: { spentUsd: 0, asking: new Set(), waitingSince: null, waitedMs: 0 },
       said: "",
+      asked: null,
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -1984,9 +1991,12 @@ export class Engine {
     switch (event.type) {
       case "turn.completed": {
         const ours = event.turnId === live.turnId;
+        // Your words that began it, if they were yours; a turn Claude began itself answers none.
+        const asked = ours ? live.asked : null;
         if (ours) {
           live.turnId = null;
           live.standing = [];
+          live.asked = null;
         }
         // An automation run: what it spent, and whether that pauses it (before anything goes).
         this.#budgetTurnEnded(live, event);
@@ -1996,7 +2006,7 @@ export class Engine {
           if (ours) this.#pump(live.threadId);
           // Nothing to come after it: landing stalled, or the agent's words wait on you.
           if (ours && event.payload.state === "completed") this.#checkStalled(live);
-          this.#checkReply(live, event);
+          this.#checkReply(live, event, asked);
         }
         live.said = "";
         this.#finishRunIfDone(live.threadId);

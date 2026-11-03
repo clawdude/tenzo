@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { archiveSheet, refusedForChanges } from './archive.ts';
+import { archiveSheet, refusalOf } from './archive.ts';
 import { asShown, footOf, placeholderOf, stillWaiting, takesMessages } from './composer.ts';
 import { failure, item, reply, stored, thread } from './fixtures.ts';
 import { replyView } from './reply.ts';
@@ -17,7 +17,9 @@ describe('the thread page message field', () => {
 		expect(footOf(t, [{ ...item('q'), threadId: t.id }])).toBe('pass');
 		expect(footOf(t, [{ ...failure('e'), threadId: t.id }])).toBe('pass');
 		const snoozed = { ...item('q'), threadId: t.id, snoozedUntil: '2026-10-03T11:00:00.000Z' };
-		expect(footOf(t, [snoozed])).toBe('none');
+		// Only snoozed cards: put off, so the thread takes a message meanwhile.
+		expect(footOf(t, [snoozed])).toBe('field');
+		expect(footOf(t, [snoozed, { ...failure('e'), threadId: t.id }])).toBe('pass');
 		// Another thread's item is no reason.
 		expect(footOf(t, [{ ...item('q'), threadId: 'thr_bbbbbbbbbbbbbbbbbbbb' }])).toBe('field');
 		expect(footOf({ ...t, status: 'archived' }, [])).toBe('none');
@@ -69,9 +71,19 @@ describe('the archive sheet', () => {
 		expect(archiveSheet(2).warning).toBe("2 files have changes that aren't committed. They'll be lost.");
 	});
 
-	it("knows the daemon's refusal for changes that came after the count", () => {
-		expect(refusedForChanges('/x has uncommitted changes. Commit them to tenzo/x, or archive with --force')).toBe(true);
-		expect(refusedForChanges('thr_x is archived.')).toBe(false);
+	it("knows the daemon's refusals that force gets past: changes since the count, a gone repo", () => {
+		expect(refusalOf('/x has uncommitted changes. Commit them to tenzo/x, or archive with --force to discard them.')).toBe(
+			'changes'
+		);
+		expect(
+			refusalOf('The repo /src/app is gone (moved or deleted). Archive with --force to forget this thread and delete /w.')
+		).toBe('gone');
+		expect(refusalOf('thr_x is archived.')).toBeNull();
+		expect(archiveSheet(0, true)).toEqual({
+			warning: 'Its repo is gone (moved or deleted). Archiving forgets the thread and deletes its worktree.',
+			confirm: 'Archive anyway',
+			force: true
+		});
 	});
 });
 

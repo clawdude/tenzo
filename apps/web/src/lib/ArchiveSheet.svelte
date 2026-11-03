@@ -2,7 +2,7 @@
 	import type { ThreadView } from '@tenzo/client-runtime';
 	import { onMount } from 'svelte';
 	import { fade, fly } from 'svelte/transition';
-	import { archiveSheet, refusedForChanges } from '#lib/archive.ts';
+	import { archiveSheet, refusalOf } from '#lib/archive.ts';
 	import { command, tenzo } from '#lib/tenzo.svelte.ts';
 
 	// Archive by hand (the mock-up's replies/4): always asks first. Its agent stops, its worktree
@@ -20,9 +20,12 @@
 	let files = $state<number | null>(null);
 	let busy = $state(false);
 	let error = $state<string | null>(null);
-	const view = $derived(archiveSheet(files));
+	/** The daemon refused for a repo that is gone: only `force` archives it. */
+	let gone = $state(false);
+	const view = $derived(archiveSheet(files, gone));
 	const reduce =
 		typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches;
+	let keep = $state<HTMLButtonElement | null>(null);
 
 	async function count() {
 		try {
@@ -32,7 +35,19 @@
 		}
 	}
 
-	onMount(() => void count());
+	// A modal sheet: the page behind it takes no focus or taps (a reply field there must not
+	// send what you type now), and the focus starts on Keep it; it goes back where it was after.
+	onMount(() => {
+		void count();
+		const before = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const behind = [...document.querySelectorAll('main')];
+		for (const el of behind) el.inert = true;
+		keep?.focus();
+		return () => {
+			for (const el of behind) el.inert = false;
+			before?.focus({ preventScroll: true });
+		};
+	});
 
 	async function archive() {
 		if (busy) return;
@@ -52,8 +67,11 @@
 			onclose();
 		} catch (e) {
 			const message = e instanceof Error ? e.message : String(e);
-			// Something was written since the count: count again, and the sheet warns.
-			if (refusedForChanges(message)) await count();
+			// Something was written since the count: count again, and the sheet warns. A repo that
+			// is gone: the sheet says so, and offers Archive anyway. Anything else in its own words.
+			const why = refusalOf(message);
+			if (why === 'changes') await count();
+			else if (why === 'gone') gone = true;
 			else error = message;
 		} finally {
 			busy = false;
@@ -104,6 +122,7 @@
 			class="mt-1 min-h-11 w-full text-[15px] text-mute"
 			onclick={onclose}
 			disabled={busy}
+			bind:this={keep}
 			data-testid="archive-keep">Keep it</button
 		>
 	</div>

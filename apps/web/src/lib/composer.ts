@@ -6,23 +6,22 @@ import { isSnoozed, type QueueItem, type StoredEvent, type ThreadView } from '@t
  */
 
 /**
- * Whether the thread takes a message here: it is active, and nothing open for it but a reply
- * (whose answer this is too). Anything else open is answered on its card, on the Pass.
+ * Whether the thread takes a message here: it is active, and nothing awake is open for it but a
+ * reply (whose answer this is too). Anything else waiting is answered on its card, on the Pass;
+ * a card you snoozed is put off, so the field is back meanwhile.
  */
 export function takesMessages(thread: ThreadView | undefined, items: readonly QueueItem[]): boolean {
 	if (!thread || thread.status !== 'active') return false;
-	return !items.some((i) => i.threadId === thread.id && i.kind !== 'reply');
+	return !items.some((i) => i.threadId === thread.id && i.kind !== 'reply' && !isSnoozed(i));
 }
 
-/** What the thread page shows at its foot: the field, the way to the Pass, or nothing. */
+/** What the thread page shows at its foot: the field, the way to the Pass, or nothing (archived). */
 export function footOf(
 	thread: ThreadView | undefined,
 	items: readonly QueueItem[]
 ): 'field' | 'pass' | 'none' {
 	if (!thread || thread.status !== 'active') return 'none';
-	if (takesMessages(thread, items)) return 'field';
-	// Something waits on you: on the Pass. Only snoozed ones: the field is no answer to them.
-	return items.some((i) => i.threadId === thread.id && !isSnoozed(i)) ? 'pass' : 'none';
+	return takesMessages(thread, items) ? 'field' : 'pass';
 }
 
 /**

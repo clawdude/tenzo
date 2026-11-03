@@ -796,8 +796,11 @@ describe("Engine: restarts", () => {
     resumed.say("Blue it is.");
     resumed.complete();
     await settle();
-    // What it said once it had the answer is all that is left: a reply.
-    expect(second.engine.snapshot().items.map((i) => i.kind)).toEqual(["reply"]);
+    // What it said once it had the answer is all that is left: a reply. The delivered answer is
+    // Tenzo's message, not your words, so it asks nothing in your name.
+    expect(second.engine.snapshot().items).toMatchObject([
+      { kind: "reply", reply: { message: "Blue it is.", prompt: "" } },
+    ]);
   });
 
   it("a graceful stop leaves open items for the next daemon too", async () => {
@@ -978,6 +981,51 @@ describe("Engine: replies", () => {
     expect(d.engine.snapshot().items).toMatchObject([
       { kind: "reply", reply: { message: "The same sleep is in two more.", prompt: "And the other tests?" } },
     ]);
+  });
+
+  it("shows only your own words as You asked: never a retry's, a wake's or another agent's", async () => {
+    const d = daemon();
+    d.adapter.onStart = (session) => {
+      session.onPrompt = (prompt) => {
+        if (prompt === "fail first") {
+          session.complete("failed");
+          return;
+        }
+        if (prompt === "nap") {
+          session.wakeMe(30, "Look again");
+          session.complete();
+          return;
+        }
+        session.say(`Done: ${prompt.split("\n")[0]}`);
+        session.complete();
+      };
+    };
+    const replyOf = (threadId: string) =>
+      d.engine.snapshot().items.find((i) => i.threadId === threadId && i.kind === "reply")?.reply;
+    const errorOf = (threadId: string) =>
+      d.engine.snapshot().items.find((i) => i.threadId === threadId && i.kind === "error");
+
+    // An error card's words to tell it are yours; what Retry sends is Tenzo's.
+    const told = await d.engine.createThread({ project: "app", prompt: "fail first" });
+    await settle();
+    await d.engine.answer(errorOf(told.id)?.id ?? "", { kind: "error", action: "tell", text: "Use pnpm" });
+    await settle();
+    expect(replyOf(told.id)).toEqual({ message: "Done: Use pnpm", prompt: "Use pnpm" });
+    const retried = await d.engine.createThread({ project: "app", prompt: "fail first" });
+    await settle();
+    await d.engine.answer(errorOf(retried.id)?.id ?? "", { kind: "error", action: "retry" });
+    await settle();
+    expect(replyOf(retried.id)).toMatchObject({ message: expect.stringMatching(/^Done: Your last turn didn't finish/), prompt: "" });
+
+    // A wake's turn is Tenzo's prompt too.
+    const napping = await d.engine.createThread({ project: "app", prompt: "nap" });
+    await expect.poll(() => replyOf(napping.id)?.message).toBe("Done: You asked to be woken: Look again");
+    expect(replyOf(napping.id)?.prompt).toBe("");
+
+    // A thread another thread's agent started: its words aren't yours.
+    const child = await d.engine.createThread({ project: "app", prompt: "child work", parent: told.id });
+    await settle();
+    expect(replyOf(child.id)).toEqual({ message: "Done: child work", prompt: "" });
   });
 
   it("an empty, failed or cut-short turn, an open item, a queued prompt or a wake is no reply", async () => {

@@ -320,16 +320,21 @@ export interface QueuedPrompt {
   text: string;
   /** For a turn that delivers an answer: what to answer if the agent asks the same again. */
   reply: StandingReply | null;
+  /** Your own words, as you sent them, not Tenzo's: what a reply card shows as "You asked". */
+  yours: boolean;
   createdAt: string;
 }
 
-/** Queues a prompt for the thread, last; `first` puts it before every prompt waiting. */
+/**
+ * Queues a prompt for the thread, last; `first` puts it before every prompt waiting. `yours`:
+ * it is your own words (not a message Tenzo wrote).
+ */
 export function enqueuePrompt(
   store: Store,
   threadId: ThreadId,
   text: string,
   reply: StandingReply | null = null,
-  { first = false }: { first?: boolean } = {},
+  { first = false, yours = false }: { first?: boolean; yours?: boolean } = {},
 ): void {
   // The queue is ordered by seq; one below the lowest waiting goes before them all.
   const lowest = first
@@ -338,7 +343,7 @@ export function enqueuePrompt(
   const seq = typeof lowest === "number" ? lowest - 1 : null;
   store.db
     .prepare(
-      "INSERT INTO prompts (seq, environment_id, thread_id, text, reply, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+      "INSERT INTO prompts (seq, environment_id, thread_id, text, reply, yours, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
     .run(
       seq,
@@ -346,6 +351,7 @@ export function enqueuePrompt(
       threadId,
       text,
       reply === null ? null : JSON.stringify(reply),
+      yours ? 1 : 0,
       new Date().toISOString(),
     );
 }
@@ -360,6 +366,7 @@ export function nextPrompt(store: Store, threadId: ThreadId): QueuedPrompt | und
     threadId,
     text: String(row.text),
     reply: row.reply === null ? null : (JSON.parse(String(row.reply)) as StandingReply),
+    yours: row.yours === 1,
     createdAt: String(row.created_at),
   };
 }

@@ -271,6 +271,14 @@ export const MIGRATIONS: readonly Migration[] = [
       ) STRICT;
     `,
   },
+  {
+    name: "prompts say whose they are",
+    sql: `
+      -- 1: your own words (thread.send, a new thread's prompt, an error card's "tell it"), which
+      -- a reply card shows as "You asked"; 0: Tenzo's (a wake, a retry, an answer it delivers).
+      ALTER TABLE prompts ADD COLUMN yours INTEGER NOT NULL DEFAULT 0;
+    `,
+  },
 ];
 
 /** Opens (creating if needed) Tenzo's SQLite database and brings its schema up to date. */

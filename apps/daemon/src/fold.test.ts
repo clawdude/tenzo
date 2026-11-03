@@ -1071,12 +1071,17 @@ describe("foldEvent: replies", () => {
 
   it("its ask is the first line with words, as plain words", () => {
     expect(firstLine("\n\n## It races the **mock**\n\nmore")).toBe("It races the mock");
-    expect(firstLine("```ts\ncode\n```")).toBe("code");
+    // Never code, which a push mustn't carry: the words after it, or nothing.
+    expect(firstLine("```ts\nrm -rf build\n```")).toBe("");
+    expect(firstLine("```sh\nexport TOKEN=x\n```\n\nThat sets it.")).toBe("That sets it.");
+    expect(firstLine("~~~\na\n```\nb\n~~~\nAfter.")).toBe("After.");
     expect(firstLine("- `a.ts` is the one\n- b")).toBe("a.ts is the one");
     expect(firstLine("  \n---\n> Quoted   words")).toBe("Quoted words");
     expect(firstLine("x".repeat(300))).toHaveLength(200);
     expect(firstLine("")).toBe("");
     const blank = fold(started(), replied(REPLY, "   "));
-    expect(blank.state.open[0]?.ask).toBe("Answered");
+    expect(blank.state.open[0]?.ask).toBe("");
+    const code = fold(started(), replied(REPLY, "```\nsecret\n```"));
+    expect(code.state.open[0]).toMatchObject({ ask: "", reply: { message: "```\nsecret\n```" } });
   });
 });

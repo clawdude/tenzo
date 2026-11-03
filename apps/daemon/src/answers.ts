@@ -287,9 +287,10 @@ export function answerFromWords(item: QueueItem, words: readonly string[]): Item
     return { kind: "finished", decision: "changes", note: text };
   }
   if (item.kind === "reply") {
-    // Got it, or anything else: what to say next, sent as the thread's next prompt.
+    // Got it, or anything else: what to say next, sent as the thread's next prompt. A reply often
+    // ends "Want me to do it?", so yes, y and ok are words for the agent, not Got it.
     const text = words.join(" ").trim();
-    if (/^(1|y|yes|ok|done|got it)$/i.test(text)) return { kind: "reply", decision: "done" };
+    if (/^(1|done|got it)$/i.test(text)) return { kind: "reply", decision: "done" };
     if (text === "") throw new TenzoError("Answer with got it, or say what to send it next.");
     return { kind: "reply", decision: "send", text };
   }

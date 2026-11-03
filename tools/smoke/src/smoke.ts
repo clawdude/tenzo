@@ -865,7 +865,9 @@ async function replyCard(browser: Browser, base: string): Promise<string[]> {
     send({ type: "item", change: "opened", item: second });
     await top.locator(`[data-id="${second.id}"]`).waitFor();
     await sleep(400); // a new card ignores taps while it settles
-    await top.getByTestId("card-archive").tap();
+    // As on a desktop, where the reply field has the focus: Archive thread clicked, it stays there.
+    await top.getByTestId("free-text").focus();
+    await top.getByTestId("card-archive").evaluate((el) => (el as unknown as { click(): void }).click());
     await page.getByTestId("archive-sheet").waitFor();
     await page.getByTestId("archive-warning").waitFor();
     const warning = await page.getByTestId("archive-warning").innerText();
@@ -875,9 +877,22 @@ async function replyCard(browser: Browser, base: string): Promise<string[]> {
       await sleep(400); // the sheet has come up
       await page.screenshot({ path: `${shots}/archive-sheet.png` });
     }
+    // A modal sheet: the focus is in it, and typing can't reach the reply field behind it.
+    const focused = await page.evaluate(
+      () => (globalThis as unknown as { document: { activeElement: { dataset?: { testid?: string } } | null } })
+        .document.activeElement?.dataset?.testid,
+    );
+    if (focused !== "archive-keep") problems.push(`with the sheet up, the focus was on ${focused}`);
+    if (!(await page.locator("main").evaluate((el) => (el as unknown as { inert: boolean }).inert))) {
+      problems.push("the page behind the sheet isn't inert");
+    }
+    const answers = got.filter((c) => c.type === "item.answer").length;
+    await page.keyboard.type("oops");
+    if ((await top.getByTestId("free-text").inputValue()) !== "") problems.push("typing behind the sheet reached the reply field");
     await page.getByTestId("archive-keep").tap();
     await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
     if (got.some((c) => c.type === "thread.archive")) problems.push("Keep it archived the thread");
+    if (got.filter((c) => c.type === "item.answer").length !== answers) problems.push("typing behind the sheet sent a reply");
     await top.getByTestId("card-archive").tap();
     await page.getByTestId("archive-warning").waitFor();
     await page.getByTestId("archive-confirm").tap();
@@ -923,6 +938,15 @@ async function threadComposer(browser: Browser, base: string): Promise<string[]>
       send({ type: "thread", thread: queued });
       return { thread: queued };
     }
+    // Its repo was moved: nothing to count, and only force archives it (as the daemon says).
+    if (command.type === "thread.uncommitted") return { files: 0 };
+    if (command.type === "thread.archive") {
+      return command.force
+        ? { thread: { ...thread, status: "archived" } }
+        : new Error(
+            "The repo /src/app is gone (moved or deleted). Archive with --force to forget this thread and delete /tmp/busy.",
+          );
+    }
     return new Error(`no ${command.type} here`);
   });
   try {
@@ -944,6 +968,17 @@ async function threadComposer(browser: Browser, base: string): Promise<string[]>
     await page.getByTestId("queued").filter({ hasText: "And check the other tests" }).waitFor();
     if ((await field.inputValue()) !== "") problems.push("the field kept the sent message");
     if (process.env.TENZO_SMOKE_SHOTS) await page.screenshot({ path: `${process.env.TENZO_SMOKE_SHOTS}/thread-page.png` });
+    // Archive with its repo gone: the daemon refuses, the sheet says why and offers Archive anyway.
+    await page.getByTestId("archive").tap();
+    await page.getByTestId("archive-sheet").waitFor();
+    if ((await page.getByTestId("archive-confirm").innerText()) !== "Archive") problems.push("a clean worktree asks for more than Archive");
+    await page.getByTestId("archive-confirm").tap();
+    await page.getByTestId("archive-warning").filter({ hasText: "repo is gone" }).waitFor();
+    if ((await page.getByTestId("archive-confirm").innerText()) !== "Archive anyway") problems.push("a gone repo offers no Archive anyway");
+    await page.getByTestId("archive-confirm").tap();
+    const forced = await received(got, "thread.archive");
+    if (forced.force !== true) problems.push(`a gone repo archived with ${JSON.stringify(forced)}`);
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
     // Something open for it: its answer belongs on the Pass.
     send({ type: "item", change: "opened", item: question });
     await page.getByTestId("to-pass").waitFor();
@@ -1146,7 +1181,7 @@ async function main(): Promise<number> {
       ["the Pass with reduced motion: the same, in place", () => passMotion(launched, base, true)],
       ["a permission card: words, the real command, Allow and Deny on screen", () => permissionCard(launched, base)],
       ["a reply card: what you asked, the answer, reply or Got it, Archive asks first", () => replyCard(launched, base)],
-      ["a thread page takes messages: mic and send, queued while it works", () => threadComposer(launched, base)],
+      ["a thread page takes messages: mic and send, queued while it works; a gone repo archives anyway", () => threadComposer(launched, base)],
       ["Archive by hand: the sheet counts what would be lost, Archive anyway archives", () => archiveForReal(launched, base, doomed)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],

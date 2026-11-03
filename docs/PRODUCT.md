@@ -82,7 +82,7 @@ Chosen after four rounds of mock-ups (see `docs/mockups`):
 - **Look:** black ground, one card tone, system font, no borders, depth by layering, one accent (clay `#D97757`) only for "needs you" and the primary action; blue working, green done. Subtle motion that explains what happened; nothing decorative.
 - **Dictation:** iOS keyboard mic first; a mic button using browser speech recognition soon after.
 
-- **A thread's page** (*So far*): its timeline, *Archive* in the header, and at the foot a message field with mic and send whenever nothing is open for it but a reply; a message sent while it works waits its turn (the field says so) and shows as queued. With anything else open, *It needs you: on the Pass* instead.
+- **A thread's page** (*So far*): its timeline, *Archive* in the header, and at the foot a message field with mic and send whenever nothing waits on you there but a reply (snoozed cards are put off); a message sent while it works waits its turn (the field says so) and shows as queued. With anything else waiting, *It needs you: on the Pass* instead.
 - **Threads list:** Needs you, Working, Landing, Today, Earlier, one word of status per thread (asking, allow?, build?, review, merge?, failed, replied, discussing, building, landing or "in 12m", snoozed, done). Each group is a stack of slices on the black ground, Today and Earlier a layer further back; a thread another thread started says so. A thread that changes group slides to its new place.
 
 Not yet designed in this language: the PC layout, Automations.

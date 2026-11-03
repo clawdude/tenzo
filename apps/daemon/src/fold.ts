@@ -790,9 +790,6 @@ function readyItem(
   };
 }
 
-/** What a reply item asks when the agent's words have no line to show. */
-export const REPLY_ASK = "Answered";
-
 /**
  * A reply: the agent's final words and the prompt they answer. Quick lane: the agent is done and
  * waits on you as much as with a question.
@@ -808,7 +805,8 @@ function replyItem(event: RuntimeEventOf<"reply.opened">, environmentId: Environ
     requestId: event.requestId,
     ...(event.turnId ? { turnId: event.turnId } : {}),
     context: "",
-    ask: firstLine(message) || REPLY_ASK,
+    // Empty when its words have no line outside code: its push says only "Answered."
+    ask: firstLine(message),
     options: [...REPLY_OPTIONS],
     suggested: "done",
     questions: [],
@@ -824,12 +822,23 @@ function replyItem(event: RuntimeEventOf<"reply.opened">, environmentId: Environ
 
 /**
  * The first line of markdown with words in it, as plain words: its heading, list or quote marks
- * and emphasis gone, cut to a headline's length. What a reply's push and the CLI say.
+ * and emphasis gone, cut to a headline's length. What a reply's push says. Code is never it
+ * (a push carries no code): fenced blocks are skipped, and with nothing else it is "".
  */
 export function firstLine(markdown: string, limit = 200): string {
+  let fence: string | null = null;
   for (const raw of markdown.split("\n")) {
-    // A fence or a rule says nothing; a code block's first line will do.
-    if (/^\s*(```|~~~|([-*_]\s*){3,}$)/.test(raw)) continue;
+    const marker = /^\s*(`{3,}|~{3,})/.exec(raw)?.[1];
+    if (fence !== null) {
+      if (marker?.startsWith(fence)) fence = null;
+      continue;
+    }
+    if (marker) {
+      fence = marker;
+      continue;
+    }
+    // A rule says nothing.
+    if (/^\s*([-*_]\s*){3,}$/.test(raw)) continue;
     const line = raw
       .replace(/^\s*(#{1,6}\s+|[-*+>]\s+|\d+[.)]\s+)/, "")
       .replaceAll(/\*\*|__|`/g, "")
