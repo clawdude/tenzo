@@ -17,6 +17,7 @@ Read [docs/PRODUCT.md](docs/PRODUCT.md) first: what Tenzo is, the opinions it en
 4. **The docs always describe `main`.** A change to the architecture or to a decision updates `docs/ARCHITECTURE.md` in the same PR (a new decision gets an entry); env vars, CLI, config keys and how-tos update `docs/GUIDE.md` or `docs/REMOTE.md`; the README stays a short introduction. Reviewers check it; a PR that skips it is not done. When code and docs disagree, the code wins and the docs get fixed.
 5. Never force-push. To catch up with `main`, merge `origin/main` into the branch.
 6. Build, test, commit, push and open PRs without asking (`.claude/settings.json` allows them); ask before anything destructive.
+7. After a merge, whoever merged it updates the checkout the local service runs from, so the maintainer sees the change: pull `main`, run `pnpm install && pnpm build`, and restart the service with `launchctl kickstart -k gui/$(id -u)/dev.tenzo.daemon`.
 
 ## Develop
 
@@ -32,7 +33,7 @@ pnpm parity   # one real Claude thread proves the user's config still works
 
 In `pnpm dev`, Vite proxies `/ws` and `/health` to the daemon, so the page talks to its own origin; the daemon's dev script sets `TENZO_DEV_ORIGIN` to Vite's origins, the only others it accepts pages from.
 
-**`pnpm smoke`** drives the app in iPhone emulation, for what unit tests can't see: each screen loaded directly, navigation and Close, a thread's timeline and its message field, the Pass's motion (with and without reduced motion), permission and reply cards, Archive's sheet, Automations, framing protection, pairing from elsewhere. Any page error, a second WebSocket or page load fails it; the checks are listed in `tools/smoke/src/smoke.ts`. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium`). CI runs it beside `pnpm check`; run it locally after changing routes or navigation.
+**`pnpm smoke`** drives the app in iPhone emulation, for what unit tests can't see: each screen loaded directly, navigation and Close, a thread's timeline and its message field, the Pass's motion (with and without reduced motion), permission and reply cards, the card as the editor (and the inline field with a mouse), Archive's sheet, Automations, framing protection, pairing from elsewhere. Any page error, a second WebSocket or page load fails it; the checks are listed in `tools/smoke/src/smoke.ts`. It needs no `claude` and leaves `~/.tenzo` and port 4780 alone. It uses `TENZO_SMOKE_CHROMIUM`, else Playwright's Chromium (`pnpm --filter @tenzo/smoke exec playwright-core install --only-shell chromium`). CI runs it beside `pnpm check`; run it locally after changing routes or navigation.
 
 **`pnpm parity`** runs after every change to the agent adapter, the thread runner or the Agent SDK version; see [tools/parity/README.md](tools/parity/README.md). It uses your `claude` login and is not part of CI.
 

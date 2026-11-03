@@ -48,6 +48,7 @@ The first time Tenzo is Tenzo. A Claude Code thread runs in its own worktree, as
 - [x] #66 Answers come back as reply cards, the thread page takes messages, Archive by hand
 - [ ] #67 A thread archives on its own once its branch is merged
 - [x] #69 Images while discussing (attached images go on the next question, proposal or reply), and a multi-line answer field
+- [x] #72 Writing a long answer on a phone: the card becomes the editor; the inline field's box grows with its text
 
 ## M5 · Codex
 

@@ -12,7 +12,8 @@ export function entersSend(
 	return finePointer && event.key === 'Enter' && !event.shiftKey && !event.altKey && !event.isComposing;
 }
 
-function finePointer(): boolean {
+/** A mouse or trackpad: a hardware keyboard is likely, and none comes up over the page. */
+export function finePointer(): boolean {
 	return typeof matchMedia === 'function' && matchMedia('(pointer: fine)').matches;
 }
 
@@ -26,17 +27,22 @@ export function onEnter(event: KeyboardEvent): void {
 
 /**
  * A Svelte action: the textarea's height follows its text. The parameter is the text, so a value
- * set from code (dictation, a cleared field) resizes it too; past its max-height it scrolls.
+ * set from code (dictation, a cleared field) resizes it too; past its max-height it scrolls. With
+ * `fill`, its height is left to the layout: it fills its box (the card as an editor, editor.ts).
  */
-export function autogrow(node: HTMLTextAreaElement, _text: string) {
+export function autogrow(node: HTMLTextAreaElement, param: string | { text: string; fill: boolean }) {
+	let fill = typeof param === 'object' && param.fill;
 	const fit = () => {
 		node.style.height = 'auto';
-		node.style.height = `${node.scrollHeight}px`;
+		node.style.height = fill ? '' : `${node.scrollHeight}px`;
 	};
 	fit();
 	node.addEventListener('input', fit);
 	return {
-		update: fit,
+		update(next: string | { text: string; fill: boolean }) {
+			fill = typeof next === 'object' && next.fill;
+			fit();
+		},
 		destroy: () => node.removeEventListener('input', fit)
 	};
 }

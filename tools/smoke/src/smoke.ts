@@ -783,6 +783,110 @@ async function received(got: { type: string }[], type: string) {
   throw new Error(`the daemon never got ${type}`);
 }
 
+type Box = { x: number; y: number; width: number; height: number };
+
+/** Whether `inner` lies inside `outer`, give or take a pixel. */
+function within(inner: Box | null, outer: Box | null): boolean {
+  if (!inner || !outer) return false;
+  return (
+    inner.x >= outer.x - 1 &&
+    inner.y >= outer.y - 1 &&
+    inner.x + inner.width <= outer.x + outer.width + 1 &&
+    inner.y + inner.height <= outer.y + outer.height + 1
+  );
+}
+
+/**
+ * The card as the editor (#72), on a phone: focusing the answer field turns the card into it,
+ * with one line of what is being answered (`line`) and ⌄ for all of it. Typed lines stay in the
+ * field's box, which scrolls; Enter is a new line; with the keyboard up (a short window) Send is
+ * on screen, and the keyboard going down puts the card back. Swipes are off. Cancel puts the card
+ * back with the draft, in a box that holds it; focusing again reopens the editor, ready to Send.
+ * Returns the lines typed. `shot`: where to save the editor with the keyboard up.
+ */
+async function writeInEditor(
+  page: Page,
+  line: string,
+  got: { type: string }[],
+  problems: string[],
+  shot?: string,
+): Promise<string[]> {
+  const top = page.getByTestId("top");
+  const card = top.getByTestId("card");
+  const field = top.getByTestId("free-text");
+  const editing = top.locator('[data-testid="card"][data-editing="true"]');
+  await field.tap();
+  await editing.waitFor();
+  const folded = (await top.getByTestId("editor-line").innerText()).trim();
+  if (folded !== line) problems.push(`the editor's line read "${folded}"`);
+  if ((await top.getByTestId("suggested").count()) > 0) problems.push("the editor still shows the suggested answer");
+  if (!(await top.getByTestId("card-text").isHidden())) problems.push("the editor didn't fold the card's text");
+  const lines = Array.from({ length: 20 }, (_, i) => `Line ${i + 1} of what I think about it.`);
+  for (const [i, text] of lines.entries()) {
+    if (i > 0) await page.keyboard.press("Enter");
+    await page.keyboard.type(text);
+  }
+  if (got.some((c) => c.type === "item.answer")) problems.push("Enter sent the answer on a phone");
+  const cardBox = await card.boundingBox();
+  const fieldBox = await field.boundingBox();
+  const barBox = await top.getByTestId("editor-bar").boundingBox();
+  if (!within(fieldBox, cardBox)) problems.push("the editor's field isn't inside the card");
+  if (!fieldBox || !barBox || fieldBox.y + fieldBox.height > barBox.y + 1) problems.push("the field runs under Cancel and Send");
+  if (!fieldBox || !cardBox || fieldBox.height < cardBox.height * 0.5) {
+    problems.push(`the field doesn't fill the card (${fieldBox?.height} of ${cardBox?.height} px)`);
+  }
+  const { scrollHeight, clientHeight } = await field.evaluate((el) => {
+    const area = el as unknown as { scrollHeight: number; clientHeight: number };
+    return { scrollHeight: area.scrollHeight, clientHeight: area.clientHeight };
+  });
+  if (scrollHeight <= clientHeight) problems.push("20 lines didn't scroll inside the field");
+  // As with the keyboard up: the card in what is left of the screen, Send still in it.
+  const phone = page.viewportSize();
+  await page.setViewportSize({ width: phone?.width ?? 393, height: 380 });
+  await page.locator('main[data-compact="true"]').waitFor();
+  const sendBox = await top.getByTestId("send").boundingBox();
+  if (!sendBox || sendBox.y + sendBox.height > 380) problems.push("with the keyboard up, Send is off screen");
+  if (!within(await field.boundingBox(), await card.boundingBox())) problems.push("with the keyboard up, the field leaves the card");
+  if (shot) await page.screenshot({ path: shot });
+  // The keyboard goes down (the field still focused, as Android's back button leaves it): the
+  // card is back, the draft kept. Focused again, it is the editor again.
+  if (phone) await page.setViewportSize(phone);
+  await top.locator('[data-testid="card"][data-editing="false"]').waitFor();
+  if ((await field.inputValue()) !== lines.join("\n")) problems.push("the keyboard going down lost the draft");
+  await field.tap();
+  await editing.waitFor();
+  // ⌄ shows all of what is being answered, and the draft stays.
+  await top.getByTestId("editor-unfold").tap();
+  await top.getByTestId("card-text").waitFor();
+  if ((await top.getByTestId("editor-line").count()) > 0) problems.push("unfolded, the one line stayed");
+  await top.getByTestId("editor-unfold").tap();
+  await top.getByTestId("editor-line").waitFor();
+  // No swiping the editor aside: a drag across its header does nothing.
+  const head = await top.getByTestId("editor-unfold").boundingBox();
+  if (head && cardBox) {
+    const x = cardBox.x + cardBox.width * 0.3;
+    const y = head.y + head.height / 2;
+    await page.mouse.move(x, y);
+    await page.mouse.down();
+    for (let step = 1; step <= 10; step++) await page.mouse.move(x + step * 20, y);
+    await page.mouse.up();
+    await sleep(300);
+    if (got.some((c) => c.type === "item.snooze")) problems.push("the editor was swiped aside");
+  }
+  // Cancel: the card as it was, the draft in a box that holds it.
+  await top.getByTestId("editor-cancel").tap();
+  await top.locator('[data-testid="card"][data-editing="false"]').waitFor();
+  if ((await field.inputValue()) !== lines.join("\n")) problems.push("Cancel lost the draft");
+  if ((await top.getByTestId("suggested").count()) === 0) problems.push("after Cancel, the answers aren't back");
+  if (!within(await field.boundingBox(), await top.getByTestId("answer-form").boundingBox())) {
+    problems.push("after Cancel, the draft runs out of its box");
+  }
+  // Focused again, it is the editor again, the draft still there.
+  await field.tap();
+  await editing.waitFor();
+  return lines;
+}
+
 /**
  * A reply card (#66): an answer is something that needs you. What you asked, small; the agent's
  * words as markdown; the reply field first, then Got it (suggested); Archive thread and See the
@@ -851,23 +955,21 @@ async function replyCard(browser: Browser, base: string): Promise<string[]> {
     const whole = top.getByTestId("whole-thread");
     if ((await whole.getAttribute("href")) !== `/threads/${threadId}`) problems.push("See the whole thread goes elsewhere");
     if (shots) await page.screenshot({ path: `${shots}/reply-card.png` });
-    // Words go on in the same thread, and the card lifts.
+    // Words go on in the same thread, written in the card as the editor (#72), and the card lifts.
     await sleep(400); // a new card ignores taps while it settles
-    await top.getByTestId("free-text").fill("Yes, fix it");
+    const lines = await writeInEditor(page, "You asked: Why is the checkout test flaky?", got, problems);
     await top.getByTestId("send").tap();
     const answered = await received(got, "item.answer");
     const answer = answered.answer as { kind?: string; decision?: string; text?: string };
-    if (answer.kind !== "reply" || answer.decision !== "send" || answer.text !== "Yes, fix it") {
-      problems.push(`the card sent ${JSON.stringify(answer)}`);
+    if (answer.kind !== "reply" || answer.decision !== "send" || answer.text !== lines.join("\n")) {
+      problems.push(`the card sent ${JSON.stringify(answer).slice(0, 120)}`);
     }
     await top.waitFor({ state: "detached" });
     // A second reply: Archive thread asks first, with what would be lost.
     send({ type: "item", change: "opened", item: second });
     await top.locator(`[data-id="${second.id}"]`).waitFor();
     await sleep(400); // a new card ignores taps while it settles
-    // As on a desktop, where the reply field has the focus: Archive thread clicked, it stays there.
-    await top.getByTestId("free-text").focus();
-    await top.getByTestId("card-archive").evaluate((el) => (el as unknown as { click(): void }).click());
+    await top.getByTestId("card-archive").tap();
     await page.getByTestId("archive-sheet").waitFor();
     await page.getByTestId("archive-warning").waitFor();
     const warning = await page.getByTestId("archive-warning").innerText();
@@ -908,6 +1010,72 @@ async function replyCard(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/**
+ * With a mouse (#72), in a short desktop window: no editor; the reply field has the focus, and
+ * eight lines (Shift+Enter) stay in its box, which never runs over Got it. Archive thread clicked
+ * with the focus there, typing behind the sheet can't reach the field.
+ */
+async function inlineField(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ viewport: { width: 1280, height: 640 } });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const at = new Date().toISOString();
+  const threadId = "thr_smokeinline000000000";
+  const thread = {
+    ...fakeThread("env_smoke000000000000000", threadId, at),
+    title: "Desktop field",
+    phase: "discussing",
+    activity: "needs-you",
+    working: false,
+    openItems: 1,
+  };
+  const item = stubItem(threadId, "i", {
+    kind: "reply",
+    ask: "Done",
+    options: [{ label: "Got it", value: "done", description: "", recommended: true }],
+    suggested: "done",
+    reply: { message: "Done. The test waits for the mock now.", prompt: "Fix the flaky test" },
+  });
+  const { got } = await stubDaemon(page, { threads: [thread], items: [item] }, (command) =>
+    command.type === "thread.uncommitted" ? { files: 0 } : new Error(`no ${command.type} here`),
+  );
+  try {
+    await page.goto(`${base}/`);
+    const top = page.getByTestId("top");
+    const field = top.getByTestId("free-text");
+    await top.locator('[data-kind="reply"]').waitFor();
+    await sleep(400); // a new card ignores taps while it settles
+    const focused = await field.evaluate(
+      (el) => (globalThis as unknown as { document: { activeElement: unknown } }).document.activeElement === el,
+    );
+    if (!focused) problems.push("the reply field doesn't have the focus");
+    for (let i = 0; i < 8; i++) {
+      if (i > 0) await page.keyboard.press("Shift+Enter");
+      await page.keyboard.type(`Line ${i + 1}`);
+    }
+    if ((await top.getByTestId("card").getAttribute("data-editing")) !== "false") problems.push("a mouse opened the editor");
+    if (got.some((c) => c.type === "item.answer")) problems.push("Shift+Enter sent the answer");
+    const form = await top.getByTestId("answer-form").boundingBox();
+    if (!within(await field.boundingBox(), form)) problems.push("eight lines ran out of the field's box");
+    const gotIt = await top.getByTestId("suggested").boundingBox();
+    if (!form || !gotIt || form.y + form.height > gotIt.y) problems.push("the field runs over Got it");
+    await top.getByTestId("card-archive").evaluate((el) => (el as unknown as { click(): void }).click());
+    await page.getByTestId("archive-sheet").waitFor();
+    const before = await field.inputValue();
+    await page.keyboard.type("oops");
+    if ((await field.inputValue()) !== before) problems.push("typing behind the sheet reached the reply field");
+    await page.getByTestId("archive-keep").click();
+    await page.getByTestId("archive-sheet").waitFor({ state: "detached" });
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 /** A 1×1 PNG: what an attached image's URL serves here. */
 const PNG_1PX = Buffer.from(
   "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
@@ -916,8 +1084,8 @@ const PNG_1PX = Buffer.from(
 
 /**
  * Images while discussing, and a multi-line answer (#69): a proposal shows what the agent
- * attached before it, a tap enlarges one; the answer field takes several lines (Enter is a new
- * line on a phone), grows without pushing Build it off screen, and sends every line.
+ * attached before it, a tap enlarges one; the answer takes several lines, written in the card as
+ * the editor on a phone (#72), and sends every line.
  */
 async function mockupCard(browser: Browser, base: string): Promise<string[]> {
   const context = await browser.newContext({ ...devices["iPhone 15"] });
@@ -976,34 +1144,13 @@ async function mockupCard(browser: Browser, base: string): Promise<string[]> {
     await page.getByTestId("enlarged").tap();
     await page.getByTestId("enlarged").waitFor({ state: "detached" });
 
-    // Several lines: Enter is a new line on a phone, never a send.
-    const field = top.getByTestId("free-text");
-    const before = (await field.boundingBox())?.height ?? 0;
-    await field.tap();
-    await page.keyboard.type("Keep the Pass narrow.");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("Put the thread on the right,");
-    await page.keyboard.press("Enter");
-    await page.keyboard.type("and the composer under it.");
-    if (got.some((c) => c.type === "item.answer")) problems.push("Enter sent the answer on a phone");
-    const after = (await field.boundingBox())?.height ?? 0;
-    if (after <= before + 20) problems.push(`the field didn't grow with three lines (${before} → ${after} px)`);
-    for (let i = 0; i < 6; i++) {
-      await page.keyboard.press("Enter");
-      await page.keyboard.type(`more ${i}`);
-    }
-    const capped = (await field.boundingBox())?.height ?? 0;
-    if (capped > 160) problems.push(`the field grew to ${capped} px instead of scrolling`);
-    const viewport = page.viewportSize()?.height ?? 0;
-    const build = await top.getByTestId("suggested").boundingBox();
-    if (!build || build.y < 0 || build.y + build.height > viewport) problems.push("Build it was pushed off screen");
-    if (shots) await page.screenshot({ path: `${shots}/multi-line-answer.png` });
+    // Several lines, written in the card as the editor (#72): Enter is a new line, never a send.
+    const lines = await writeInEditor(page, "Two columns on a wide screen", got, problems, shots && `${shots}/editor.png`);
     await top.getByTestId("send").tap();
     const answered = await received(got, "item.answer");
     const answer = answered.answer as { kind?: string; note?: string };
-    const lines = answer.note?.split("\n") ?? [];
-    if (answer.kind !== "proposal" || lines.length !== 9 || lines[1] !== "Put the thread on the right,") {
-      problems.push(`the card sent ${JSON.stringify(answer)}`);
+    if (answer.kind !== "proposal" || answer.note !== lines.join("\n")) {
+      problems.push(`the card sent ${JSON.stringify(answer).slice(0, 120)}`);
     }
   } catch (error) {
     problems.push(String(error));
@@ -1286,9 +1433,10 @@ async function main(): Promise<number> {
       ["the Pass moves: a card arrives, lifts, is swiped aside and comes back", () => passMotion(launched, base, false)],
       ["the Pass with reduced motion: the same, in place", () => passMotion(launched, base, true)],
       ["a permission card: words, the real command, Allow and Deny on screen", () => permissionCard(launched, base)],
-      ["a reply card: what you asked, the answer, reply or Got it, Archive asks first", () => replyCard(launched, base)],
+      ["a reply card: what you asked, the answer, reply in the editor or Got it, Archive asks first", () => replyCard(launched, base)],
+      ["with a mouse, the inline field grows with its text and keeps the focus behind a sheet", () => inlineField(launched, base)],
       ["a thread page takes messages: mic and send, queued while it works; a gone repo archives anyway", () => threadComposer(launched, base)],
-      ["a proposal shows the images attached before it; the answer takes several lines", () => mockupCard(launched, base)],
+      ["a proposal shows the images attached before it; several lines in the card as the editor", () => mockupCard(launched, base)],
       ["Archive by hand: the sheet counts what would be lost, Archive anyway archives", () => archiveForReal(launched, base, doomed)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],
