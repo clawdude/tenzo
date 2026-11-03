@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { finished, item } from './fixtures.ts';
-import { finishedView } from './finished.ts';
+import { finished, item, proposal } from './fixtures.ts';
+import { finishedView, shotsOf } from './finished.ts';
 
 describe('finishedView', () => {
 	it('has the headline, the rendered note, a badge per check, the screenshots and the live link', () => {
@@ -66,5 +66,17 @@ describe('finishedView', () => {
 		const view = finishedView(card, 'T', null);
 		expect(view?.summaryHtml).toBe('<p>&lt;img src=x onerror=alert(1)&gt;</p>');
 		expect(view?.howToTestHtml).toBe('<p>x</p>');
+	});
+});
+
+describe('shotsOf', () => {
+	it("is a question's, proposal's or reply's images; a finished card keeps its own", () => {
+		const shot = finished('f').finished!.attachments[0]!;
+		const card = { ...proposal('p'), attachments: [shot] };
+		expect(shotsOf(card)).toEqual([
+			{ url: `/api/attachments/${card.threadId}/${shot.file}`, alt: 'The counter', caption: 'The counter' }
+		]);
+		expect(shotsOf(proposal('p'))).toEqual([]);
+		expect(shotsOf({ ...finished('f'), attachments: [shot] })).toEqual([]);
 	});
 });

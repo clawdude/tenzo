@@ -207,6 +207,9 @@ function startSession(
       if (signal.aborted) onAbort();
     });
 
+  /** Images attached since the thread's last card: `attach` takes a few per card. */
+  let attached = input.pendingAttachments ?? 0;
+
   const askUser = async (
     toolInput: Record<string, unknown>,
     signal: AbortSignal,
@@ -224,6 +227,8 @@ function startSession(
         fingerprint: fingerprintOf("AskUserQuestion", toolInput),
       },
     });
+    // The question's card shows what was attached since the last card.
+    attached = 0;
     const outcome = await waitFor(requestId, "user-input", signal);
     if (outcome.ended) return { behavior: "deny", message: "The session ended." };
     const answers = outcome.kind === "user-input" ? outcome.answers : null;
@@ -256,6 +261,7 @@ function startSession(
       ...inTurn(),
       payload: { ...proposalOf(raw), fingerprint: fingerprintOf(tenzoToolName(PROPOSE), raw) },
     });
+    attached = 0;
     const outcome = await waitFor(requestId, "proposal", signal ?? new AbortController().signal);
     if (outcome.ended) return { text: "The session ended.", isError: true };
     const decision = outcome.kind === "proposal" ? outcome.decision : "cancel";
@@ -294,7 +300,6 @@ function startSession(
    * before it. Nothing waits for you: a review can take hours, and your answer comes back to the
    * thread as a message (#21), as any follow-up does.
    */
-  let attached = input.pendingAttachments ?? 0;
   const report = async (raw: ReportInput): Promise<ToolReply> => {
     const now = phaseNow();
     if (now === "discussing") {
@@ -316,11 +321,14 @@ function startSession(
     };
   };
 
-  /** `attach`: a copy of a screenshot from the worktree, for the next report (attachments.ts). */
+  /**
+   * `attach`: a copy of an image from the worktree, for the thread's next card: a question, a
+   * proposal, the reply its turn ends with, or a report (attachments.ts).
+   */
   const attach = async (raw: AttachInput): Promise<ToolReply> => {
     if (!input.attachmentsDir) return { text: "This thread takes no attachments.", isError: true };
     if (attached >= MAX_ATTACHMENTS) {
-      return { text: `A report carries at most ${MAX_ATTACHMENTS} screenshots.`, isError: true };
+      return { text: `A card carries at most ${MAX_ATTACHMENTS} images.`, isError: true };
     }
     return toolCall(async () => {
       const attachment = await takeAttachment({
@@ -331,7 +339,7 @@ function startSession(
       });
       attached++;
       emit({ type: "attachment.added", ...inTurn(), payload: { attachment } });
-      return `Attached ${attachment.name}. It goes on your report.`;
+      return `Attached ${attachment.name}. It goes on your next card: a question, a proposal, your final reply, or a report.`;
     });
   };
 
@@ -656,6 +664,8 @@ function startSession(
         throw new TenzoError("A turn is already running.");
       }
       const turnId: TurnId = randomUUID();
+      // A reply card the daemon opened after the last turn took what was attached then.
+      attached = input.host?.pendingAttachments?.() ?? attached;
       apply(startTurn(state, turnId, prompt));
       // The prompt's uuid is the turn id: Claude echoes it on the turn's replies and result.
       prompts.push({

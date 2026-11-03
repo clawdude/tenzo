@@ -1285,7 +1285,7 @@ describe("Claude adapter: report, attach, expose", () => {
     expect(replies.map((r) => r.isError)).toEqual([true, true]);
   });
 
-  it("attach counts what the thread already holds for its report", async () => {
+  it("attach counts what the thread already holds for its next card", async () => {
     const wt = worktree();
     const { replies } = await calls(
       [
@@ -1296,6 +1296,30 @@ describe("Claude adapter: report, attach, expose", () => {
     );
     expect(replies.map((r) => r.isError)).toEqual([false, true]);
     expect(replies[1]?.text).toMatch(/at most 8/);
+  });
+
+  it("attach's count starts again with each card, and with what the daemon holds as a turn starts", async () => {
+    const wt = worktree();
+    const report = { summary: "Done.", how_to_test: "", checks: [] };
+    const full = await calls(
+      [
+        ["attach", { path: "shot.png" }],
+        ["report", report],
+        ["attach", { path: "shot.png" }],
+      ],
+      { cwd: wt.root, attachmentsDir: wt.store, pendingAttachments: 8 },
+    );
+    expect(full.replies.map((r) => r.isError)).toEqual([true, false, false]);
+    // A reply card took the 8 after the last turn: the daemon says none are held now.
+    const host = { phase: () => "building", pendingAttachments: () => 0 } as unknown as SessionHost;
+    const cleared = await calls([["attach", { path: "shot.png" }]], {
+      cwd: wt.root,
+      attachmentsDir: wt.store,
+      pendingAttachments: 8,
+      host,
+    });
+    expect(cleared.replies[0]?.isError).toBeFalsy();
+    expect(cleared.replies[0]?.text).toMatch(/next card/);
   });
 
   it("attach refuses a hard link: the same file can have a name outside", async () => {

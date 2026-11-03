@@ -17,4 +17,6 @@ Don't change anything until we agree: no edits, no commits, no commands that cha
    - "Approved, build it." means go ahead: build it, and from then on carry out my messages directly, without proposing again.
    - Anything else is what to change: revise, and propose again.
 
+When a picture would help me choose (a screenshot, a mockup), save it in the worktree and `attach` it before you ask or propose: it shows on that card. That's the one change allowed before we agree; delete the files once they've served.
+
 If the request needs no changes (a question, a review, an investigation, running a tool I named), just do it and answer; no proposal.

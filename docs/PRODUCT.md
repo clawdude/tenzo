@@ -70,9 +70,10 @@ Landing works the same way: *Merge* and *Open PR* reach the agent as a message c
 Chosen after four rounds of mock-ups (see `docs/mockups`):
 
 - **A pile of cards.** The current item is a card; the ones behind it stick out above, darker and narrower, up to four edges. The pile's height is the only status display. No title, no counts.
-- **On the card:** thread name (small caps), one or two lines of context (large), the question or headline, a visible *More* pill ("Why it's asking" / "See the change" / "What it looked at"). At the bottom, under your thumb: **one filled button** that is always the suggested action, a **free-text field with a mic**, and the other options folded behind "2 other options."
+- **On the card:** thread name (small caps), one or two lines of context (large), the question or headline, a visible *More* pill ("Why it's asking" / "See the change" / "What it looked at"). At the bottom, under your thumb: **one filled button** that is always the suggested action, a **free-text field with a mic**, and the other options folded behind "2 other options." The field takes several lines: it grows to about five, then scrolls. On a phone Enter is a new line and the send button sends; with a hardware keyboard Enter sends and Shift+Enter is a new line. The thread page's message field works the same.
 - **A permission card** is the exception to the bottom row: it reads as words first, what the agent wants to do, then the real command as code, because those words are the model's own. Allow and Deny sit side by side, one tap each, with nothing folded and no "Suggested" label: the request is the agent's, not a recommendation.
 - **A reply card** is the agent's answer: a small *You asked* with your prompt, then its words as markdown. The reply field with its mic comes first (typing carries on in the same thread and the card lifts), then **Got it** (filled, suggested: put it away, the thread reads *done*), then quietly *Archive thread* and *See the whole thread*. It goes by itself when a message reaches the thread some other way or another card opens for it. It pushes: `Answered: <first line>`.
+- **Images on any card.** What the agent `attach`ed since its last card goes on the next one: a question, a proposal, a reply or finished work. A mockup made while discussing can help you choose before anything is built. Tap one to see it full screen.
 - **Text scrolls inside the card; buttons don't.** Long context never pushes the answer off screen.
 - **Answer → card lifts away, the next one is already there.**
 - **Swipe → snooze 15 min**, toast with Undo.
@@ -92,7 +93,7 @@ Not yet designed in this language: the PC layout, Automations.
 Every finished item carries, via Tenzo's injected MCP server:
 
 - `report(summary, how_to_test, checks)`: the handoff note and agent-reported check results (tests, typecheck, lint) shown as badges.
-- `attach(file)`: screenshots the agent took (Playwright/Chromium are on the machine).
+- `attach(file)`: screenshots the agent took (Playwright/Chromium are on the machine). They go on the agent's next card, so mockups made while discussing reach you on a question or proposal too (§5).
 - `expose(port)`: a live URL to the dev server in that thread's worktree, reachable from your phone over the tailnet.
 
 `report` doesn't wait for you: the card goes on the Pass, the agent ends its turn, and your answer reaches it as a message. `attach` takes images from the thread's worktree only. `expose` serves the dev server at `/live/<thread>/` on a **live origin** of its own, never Tenzo's, where a live page could drive Tenzo (ARCHITECTURE.md D10).

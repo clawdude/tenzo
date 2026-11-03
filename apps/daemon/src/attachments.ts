@@ -12,7 +12,7 @@ import { TenzoError } from "./errors.ts";
 import { randomId } from "./ids.ts";
 
 /**
- * Screenshots an agent attaches to its report (Tenzo's `attach`). Only images inside the
+ * Images an agent attaches to its next card (Tenzo's `attach`). Only images inside the
  * thread's own worktree, after symlinks are resolved, recognised by their bytes. The daemon
  * keeps a copy under `<home>/attachments/<thread>/`, so what the card shows is what was attached
  * even if the worktree changes later, and it serves only those copies (app.ts).
@@ -20,7 +20,7 @@ import { randomId } from "./ids.ts";
 
 /** The largest file `attach` takes. */
 export const MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024;
-/** How many screenshots one report carries at most. */
+/** How many images one card carries at most. */
 export const MAX_ATTACHMENTS = 8;
 const CAPTION_LIMIT = 200;
 

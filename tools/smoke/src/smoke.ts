@@ -908,6 +908,112 @@ async function replyCard(browser: Browser, base: string): Promise<string[]> {
   return problems;
 }
 
+/** A 1×1 PNG: what an attached image's URL serves here. */
+const PNG_1PX = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64",
+);
+
+/**
+ * Images while discussing, and a multi-line answer (#69): a proposal shows what the agent
+ * attached before it, a tap enlarges one; the answer field takes several lines (Enter is a new
+ * line on a phone), grows without pushing Build it off screen, and sends every line.
+ */
+async function mockupCard(browser: Browser, base: string): Promise<string[]> {
+  const context = await browser.newContext({ ...devices["iPhone 15"] });
+  const page = await context.newPage();
+  const seen = watch(page);
+  const problems: string[] = [];
+  const at = new Date().toISOString();
+  const threadId = "thr_smokemockup000000000";
+  const thread = {
+    ...fakeThread("env_smoke000000000000000", threadId, at),
+    title: "Desktop layout",
+    phase: "discussing",
+    activity: "needs-you",
+    working: false,
+    openItems: 1,
+  };
+  const image = (n: number) => ({
+    id: `att_${String(n).repeat(20)}`,
+    file: `att_${String(n).repeat(20)}.png`,
+    name: `layout-${n}.png`,
+    caption: `Layout ${n}`,
+    mediaType: "image/png",
+    bytes: PNG_1PX.length,
+  });
+  const item = stubItem(threadId, "m", {
+    kind: "proposal",
+    ask: "Two columns on a wide screen",
+    options: [{ label: "Build it", value: "build", description: "", recommended: true }],
+    suggested: "build",
+    proposal: { headline: "Two columns on a wide screen", summary: "The Pass on the left, the thread on the right." },
+    attachments: [image(1), image(2), image(3)],
+  });
+  const { got } = await stubDaemon(page, { threads: [thread], items: [item] }, (command) => {
+    if (command.type === "item.answer") {
+      return { item: { ...item, status: "resolved", resolution: { kind: "revise", note: "" } }, delivery: "live", thread };
+    }
+    return new Error(`no ${command.type} here`);
+  });
+  await page.route(/\/api\/attachments\//, (route) =>
+    route.fulfill({ status: 200, contentType: "image/png", body: PNG_1PX }),
+  );
+  const shots = process.env.TENZO_SMOKE_SHOTS;
+  try {
+    await page.goto(`${base}/`);
+    const top = page.getByTestId("top");
+    await top.locator('[data-kind="proposal"]').waitFor();
+    const thumbs = top.getByTestId("media").getByTestId("shot");
+    if ((await thumbs.count()) !== 3) problems.push(`the proposal showed ${await thumbs.count()} images, not 3`);
+    const src = await thumbs.first().locator("img").getAttribute("src");
+    if (src !== `/api/attachments/${threadId}/${image(1).file}`) problems.push(`the first image is ${src}`);
+    if (shots) await page.screenshot({ path: `${shots}/proposal-images.png` });
+    await sleep(400); // a new card ignores taps while it settles
+    await thumbs.nth(1).tap();
+    await page.getByTestId("enlarged").waitFor();
+    if (!(await page.getByTestId("enlarged").innerText()).includes("Layout 2")) problems.push("the enlarged image has no caption");
+    await page.getByTestId("enlarged").tap();
+    await page.getByTestId("enlarged").waitFor({ state: "detached" });
+
+    // Several lines: Enter is a new line on a phone, never a send.
+    const field = top.getByTestId("free-text");
+    const before = (await field.boundingBox())?.height ?? 0;
+    await field.tap();
+    await page.keyboard.type("Keep the Pass narrow.");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("Put the thread on the right,");
+    await page.keyboard.press("Enter");
+    await page.keyboard.type("and the composer under it.");
+    if (got.some((c) => c.type === "item.answer")) problems.push("Enter sent the answer on a phone");
+    const after = (await field.boundingBox())?.height ?? 0;
+    if (after <= before + 20) problems.push(`the field didn't grow with three lines (${before} → ${after} px)`);
+    for (let i = 0; i < 6; i++) {
+      await page.keyboard.press("Enter");
+      await page.keyboard.type(`more ${i}`);
+    }
+    const capped = (await field.boundingBox())?.height ?? 0;
+    if (capped > 160) problems.push(`the field grew to ${capped} px instead of scrolling`);
+    const viewport = page.viewportSize()?.height ?? 0;
+    const build = await top.getByTestId("suggested").boundingBox();
+    if (!build || build.y < 0 || build.y + build.height > viewport) problems.push("Build it was pushed off screen");
+    if (shots) await page.screenshot({ path: `${shots}/multi-line-answer.png` });
+    await top.getByTestId("send").tap();
+    const answered = await received(got, "item.answer");
+    const answer = answered.answer as { kind?: string; note?: string };
+    const lines = answer.note?.split("\n") ?? [];
+    if (answer.kind !== "proposal" || lines.length !== 9 || lines[1] !== "Put the thread on the right,") {
+      problems.push(`the card sent ${JSON.stringify(answer)}`);
+    }
+  } catch (error) {
+    problems.push(String(error));
+  } finally {
+    await context.close();
+  }
+  if (seen.errors.length > 0) problems.push(`page errors: ${seen.errors.join("; ")}`);
+  return problems;
+}
+
 /**
  * The thread page takes messages (#66): a field with mic and send at the foot of So far while
  * nothing is open for the thread; while it works, the hint says the message waits its turn and
@@ -1182,6 +1288,7 @@ async function main(): Promise<number> {
       ["a permission card: words, the real command, Allow and Deny on screen", () => permissionCard(launched, base)],
       ["a reply card: what you asked, the answer, reply or Got it, Archive asks first", () => replyCard(launched, base)],
       ["a thread page takes messages: mic and send, queued while it works; a gone repo archives anyway", () => threadComposer(launched, base)],
+      ["a proposal shows the images attached before it; the answer takes several lines", () => mockupCard(launched, base)],
       ["Archive by hand: the sheet counts what would be lost, Archive anyway archives", () => archiveForReal(launched, base, doomed)],
       ["start at Automations: next run, the off switch both ways, Close to the Pass", () => automations(launched, base, true)],
       ["Threads opens Automations, and Close goes back", () => automations(launched, base, false)],

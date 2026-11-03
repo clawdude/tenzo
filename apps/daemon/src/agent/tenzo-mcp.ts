@@ -138,7 +138,8 @@ const REPORT_DESCRIPTION = [
 ].join(" ");
 
 const ATTACH_DESCRIPTION = [
-  "Attach a screenshot to your next report: a PNG, JPEG, GIF or WebP file inside this worktree, up to 10 MB.",
+  "Attach an image to your next card: a PNG, JPEG, GIF or WebP file inside this worktree, up to 10 MB.",
+  "It shows on whichever card comes next: a question (AskUserQuestion), a proposal, the reply your turn ends with, or a report. So mockups or screenshots made while discussing reach the person too: attach them, then ask or propose.",
   "When the change has something to see, take one with what the machine already has (an installed Chrome: `--headless --screenshot=shot.png --window-size=390,844 <url>`; or the project's own Playwright), save it in the worktree, and attach it before you report.",
 ].join(" ");
 
