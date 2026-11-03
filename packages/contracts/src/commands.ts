@@ -87,6 +87,11 @@ export const Command = z.discriminatedUnion("type", [
   }),
   /** What the thread changed against the project's default branch: files with +/−. */
   z.object({ type: z.literal("thread.diff"), threadId: z.string().min(1) }),
+  /**
+   * How many files in the thread's worktree have changes that aren't committed: what archiving
+   * would discard (only with `force`). Archive asks it first, so its sheet can say so.
+   */
+  z.object({ type: z.literal("thread.uncommitted"), threadId: z.string().min(1) }),
   /** The projects a thread can start in, by name. */
   z.object({ type: z.literal("project.list") }),
   /** Projects, active threads and open items: everything the Pass needs to draw. */
@@ -202,6 +207,10 @@ export const CommandResults = {
   }),
   "thread.unwatch": z.object({ watching: z.literal(false) }),
   "thread.diff": ThreadDiff,
+  "thread.uncommitted": z.object({
+    /** Paths `git status` lists (an untracked folder counts once); 0 with no worktree left. */
+    files: z.number().int().nonnegative(),
+  }),
   "project.list": z.object({ projects: z.array(ProjectView) }),
   snapshot: Snapshot,
   "item.answer": z.object({
@@ -210,7 +219,8 @@ export const CommandResults = {
      * `live`: the agent was still waiting and got the answer directly. `message`: the agent that
      * asked had stopped, or nothing waits on the item (an error, finished work, a ready PR), so
      * the answer goes to it as its next prompt.
-     * `none`: nothing goes to the agent (finished work marked done, a config card retried).
+     * `none`: nothing goes to the agent (finished work marked done, a reply put away, a config
+     * card retried).
      * `archived`: an error item answered with Archive; the thread is gone.
      */
     delivery: z.enum(["live", "message", "none", "archived"]),

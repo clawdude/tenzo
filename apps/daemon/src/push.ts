@@ -21,7 +21,7 @@ import { TenzoError } from "./errors.ts";
  * the only outbound connection it needs.
  *
  * What pushes: a quick-lane card (a question, a permission, a proposal, an error or budget
- * pause, a PR ready to merge) that opened or came back from a snooze, never finished work (the
+ * pause, a PR ready to merge, a reply) that opened or came back from a snooze, never finished work (the
  * review lane) and never a card already answered. One notification per thread: its tag is the
  * thread's id, so a newer card replaces it, and a burst of cards within `DEBOUNCE_MS` makes one
  * push. Not to a muted device, nor to one that has Tenzo open and in view right now: it sees the
@@ -217,6 +217,9 @@ function lineOf(item: QueueItem): string {
       return item.ask ? `Ready to merge: ${item.ask}` : "Ready to merge.";
     case "error":
       return item.ask || "Stopped with an error.";
+    case "reply":
+      // Its first line only, as a question's ask: never the rest of what it said.
+      return item.ask ? `Answered: ${item.ask}` : "Answered.";
     case "finished":
       return "Finished.";
   }

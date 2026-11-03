@@ -230,6 +230,22 @@ export function ready(tag: string, url = 'https://github.com/o/r/pull/12'): Queu
 	});
 }
 
+export function reply(
+	tag: string,
+	message = "## It races the payment mock's timer\n\n`checkout.test.ts` waits 50 ms.",
+	prompt = 'Why is the checkout test flaky?'
+): QueueItem {
+	return item(tag, {
+		kind: 'reply',
+		ask: "It races the payment mock's timer",
+		context: '',
+		options: [{ label: 'Got it', value: 'done', description: '', recommended: true }],
+		suggested: 'done',
+		questions: [],
+		reply: { message, prompt }
+	});
+}
+
 export function finished(
 	tag: string,
 	overrides: Partial<NonNullable<QueueItem['finished']>> = {}

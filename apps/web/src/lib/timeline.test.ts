@@ -100,7 +100,12 @@ describe('timelineOf', () => {
 			stored(7, { type: 'turn.completed', payload: { state: 'failed', errorMessage: 'Rate limited' } }),
 			stored(8, { type: 'turn.completed', turnId: '22222222-2222-4222-8222-222222222222', payload: { state: 'interrupted' } }),
 			stored(9, { type: 'session.exited', payload: { exitKind: 'error', reason: 'boom' } }),
-			stored(10, { type: 'thread.archived', turnId: undefined, payload: {} })
+			stored(10, { type: 'thread.archived', turnId: undefined, payload: {} }),
+			// A reply opening and going says nothing more: what it said is already a row.
+			stored(11, { type: 'reply.opened', requestId: 'req_eeeeeeeeeeeeeeeeeeee', payload: { message: 'Hi.' } }),
+			stored(12, { type: 'reply.resolved', requestId: 'req_eeeeeeeeeeeeeeeeeeee', payload: { decision: 'done' } }),
+			stored(13, { type: 'thread.archived', turnId: undefined, payload: { reason: 'manual' } }),
+			stored(14, { type: 'thread.archived', turnId: undefined, payload: { reason: 'landed' } })
 		]);
 		expect(rows.map((r) => [r.kind, 'answer' in r ? r.answer : 'text' in r ? r.text : ''])).toEqual([
 			['permission', 'Denied: not that'],
@@ -109,7 +114,9 @@ describe('timelineOf', () => {
 			['note', 'Rate limited'], // once: the failed turn says the same
 			['note', 'Stopped'],
 			['note', 'The agent stopped: boom'],
-			['note', 'Archived']
+			['note', 'Archived'],
+			['note', 'Archived by hand'],
+			['note', 'Archived: it landed']
 		]);
 		expect(rows[2]).toMatchObject({ headline: 'Ready for review', checks: [{ name: 'Tests' }] });
 	});

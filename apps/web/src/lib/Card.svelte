@@ -16,7 +16,8 @@
 	import { finishedView, type Shot } from '#lib/finished.ts';
 	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
-	import { ageLabel, othersLabel, type Pick, requestedCode, stepsOf } from '#lib/pass.ts';
+	import { ageLabel, asidesOf, othersLabel, type Pick, requestedCode, stepsOf } from '#lib/pass.ts';
+	import { replyView } from '#lib/reply.ts';
 	import { canDictate, dictate } from '#lib/speech.ts';
 
 	interface Props {
@@ -35,6 +36,8 @@
 		threadView?: ThreadView | undefined;
 		/** Sends the answer; false when it couldn't go (offline), and the card stays. */
 		onanswer: (answer: ItemAnswer) => boolean;
+		/** Archive thread was tapped: the Pass asks first (ArchiveSheet.svelte). */
+		onarchive?: () => void;
 	}
 	let {
 		item,
@@ -45,7 +48,8 @@
 		liveOrigin = null,
 		liveGrant = null,
 		threadView = undefined,
-		onanswer
+		onanswer,
+		onarchive
 	}: Props = $props();
 
 	/** What the More pill and the back's header say. */
@@ -75,6 +79,10 @@
 	const codeIsCut = $derived(codeHeight + 24 > codeBox + 1);
 	/** Finished work's content; null on every other card. */
 	const view = $derived(finishedView(item, thread, liveOrigin, liveGrant));
+	/** A reply's: what you asked, and what it said. Null on every other card. */
+	const said = $derived(replyView(item));
+	/** Quiet ways out under the answers: Archive thread, See the whole thread. */
+	const asides = $derived(asidesOf(item));
 	/** The screenshot shown full screen, if one was tapped. */
 	let enlarged = $state.raw<Shot | null>(null);
 	// Which question the card is on, whether its answer has gone, and which taps to ignore.
@@ -139,6 +147,14 @@
 	}
 
 	onDestroy(() => stopListening?.());
+
+	// A reply's field is where the conversation goes on: it takes the focus where that doesn't
+	// bring a keyboard up over the card (a mouse or trackpad, not a phone).
+	let field = $state<HTMLInputElement | null>(null);
+	$effect(() => {
+		if (!said || !field || typeof matchMedia !== 'function') return;
+		if (matchMedia('(pointer: fine)').matches) field.focus({ preventScroll: true });
+	});
 </script>
 
 <article
@@ -219,12 +235,31 @@
 				{a.ask} <span class="text-ink-soft">{a.said}</span>
 			</p>
 		{/each}
+		{#if said}
+			<!-- A reply: what you asked, small, then what it said, all of it, scrolling in here. -->
+			{#if said.asked}
+				<h3 class="mb-1 text-[13px] font-semibold tracking-[0.06em] text-faint uppercase">You asked</h3>
+				<p class="mb-4 line-clamp-3 text-[17px] leading-[1.4] break-words text-ink-soft" data-testid="asked">
+					{said.asked}
+				</p>
+			{/if}
+			{#if said.headline}
+				<h2 class="mb-3 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]" data-testid="ask">
+					{said.headline}
+				</h2>
+			{/if}
+			<div class="md text-[18px] leading-[1.5] text-ink-soft" data-testid="reply-message">
+				<!-- Escaped and limited to a few tags by markdown.ts: nothing in it can run. -->
+				{@html said.bodyHtml}
+			</div>
+		{:else}
 		<h2
 			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', code && 'line-clamp-3']}
 			data-testid="ask"
 		>
 			{view?.headline ?? step?.ask ?? item.ask}
 		</h2>
+		{/if}
 		{#if code}
 			<pre
 				class={[
@@ -341,7 +376,8 @@
 			{/if}
 		{/if}
 
-		<!-- More: turns the card over to its back (CardBack.svelte). -->
+		{#if !said}
+		<!-- More: turns the card over to its back (CardBack.svelte). A reply has See the whole thread. -->
 		<button
 			type="button"
 			class={['opt inline-flex min-h-9 items-center gap-1.5 rounded-full bg-fill pr-3.5 pl-3 text-[14px] font-medium', view && 'mt-4']}
@@ -351,6 +387,7 @@
 			<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 11v6M12 7v.5"></path></svg>
 			{labels.pill}
 		</button>
+		{/if}
 		{/if}
 	</div>
 
@@ -370,6 +407,11 @@
 					data-testid="option">{choice.label}</button
 				>
 			{/each}
+		{/if}
+
+		{#if said}
+			<!-- A reply: going on is the first thing under the thumb, putting it away the filled one. -->
+			{@render freeText()}
 		{/if}
 
 		{#if step?.sideBySide && step.suggested}
@@ -405,9 +447,17 @@
 			</button>
 		{/if}
 
+		{#if !said}
+			{@render freeText()}
+		{/if}
+
+		{#snippet freeText()}
 		{#if step?.placeholder !== null}
 		<form
-			class="flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2 outline-offset-2 outline-transparent focus-within:outline-mute"
+			class={[
+				'flex min-h-[52px] items-center gap-2 rounded-[18px] bg-fill py-1.5 pr-1.5 pl-4 outline-2',
+				said ? '-outline-offset-2 outline-clay' : 'outline-offset-2 outline-transparent focus-within:outline-mute'
+			]}
 			onsubmit={submit}
 		>
 			<label for={fieldId} class="sr-only">Your answer</label>
@@ -419,6 +469,7 @@
 				enterkeyhint="send"
 				autocomplete="off"
 				class="min-w-0 grow bg-transparent text-[16px] outline-none placeholder:text-faint"
+				bind:this={field}
 				data-testid="free-text"
 			/>
 			{#if text.trim() && !stopListening}
@@ -449,15 +500,34 @@
 			{/if}
 		</form>
 		{/if}
+		{/snippet}
 
-		{#if step && step.row.length > 0}
-			<div class="flex justify-center gap-7" data-testid="row">
-				{#each step.row as choice (choice.value)}
+		{#if (step && step.row.length > 0) || asides.length > 0}
+			<div class="flex flex-wrap justify-center gap-x-7" data-testid="row">
+				{#each step?.row ?? [] as choice (choice.value)}
 					<button
 						type="button"
 						class="min-h-9 text-[14px] text-mute"
 						onclick={() => pick({ choice })}>{choice.label}</button
 					>
+				{/each}
+				{#each asides as aside (aside.kind)}
+					{#if aside.kind === 'archive'}
+						{#if onarchive}
+							<button
+								type="button"
+								class="min-h-9 text-[14px] text-mute"
+								onclick={onarchive}
+								data-testid="card-archive">{aside.label}</button
+							>
+						{/if}
+					{:else}
+						<a
+							href={`/threads/${item.threadId}`}
+							class="flex min-h-9 items-center text-[14px] text-mute"
+							data-testid="whole-thread">{aside.label}</a
+						>
+					{/if}
 				{/each}
 			</div>
 		{/if}

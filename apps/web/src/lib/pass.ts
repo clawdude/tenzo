@@ -186,6 +186,20 @@ export function stepsOf(item: QueueItem, landing: LandingRule = 'merge'): Step[]
 			}
 		];
 	}
+	if (item.kind === 'reply') {
+		return [
+			{
+				key: 'reply',
+				ask: item.ask,
+				// Putting it away is the suggestion; going on is the field, which comes first.
+				suggested: { label: 'Got it', value: 'done', description: '' },
+				recommended: true,
+				others: [],
+				row: [],
+				placeholder: 'Reply to keep going…'
+			}
+		];
+	}
 	if (item.kind === 'ready') {
 		return [
 			{
@@ -305,6 +319,12 @@ export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 		const value = pick.choice.value;
 		return { kind: 'finished', decision: value === 'pr' || value === 'done' ? value : 'merge' };
 	}
+	if (item.kind === 'reply') {
+		const pick = picks[0];
+		if (!pick) throw new Error('A reply needs a decision.');
+		if ('text' in pick) return { kind: 'reply', decision: 'send', text: pick.text.trim() };
+		return { kind: 'reply', decision: 'done' };
+	}
 	if (item.kind === 'ready') {
 		const pick = picks[0];
 		if (!pick) throw new Error('A ready PR needs a decision.');
@@ -337,6 +357,20 @@ export function answerOf(item: QueueItem, picks: readonly Pick[]): ItemAnswer {
 		answers[question.id] = 'text' in pick ? pick.text.trim() : pick.choice.value;
 	});
 	return { kind: 'question', answers };
+}
+
+/**
+ * What a card offers besides answering, quietly under its answers: archive the thread (it
+ * confirms first, ArchiveSheet.svelte) on a reply and on finished work, and the whole thread on
+ * a reply, which has no back of its own.
+ */
+export type Aside = { kind: 'archive'; label: 'Archive thread' } | { kind: 'thread'; label: 'See the whole thread' };
+
+export function asidesOf(item: { kind: QueueItem['kind'] }): Aside[] {
+	const archive: Aside = { kind: 'archive', label: 'Archive thread' };
+	if (item.kind === 'reply') return [archive, { kind: 'thread', label: 'See the whole thread' }];
+	if (item.kind === 'finished') return [archive];
+	return [];
 }
 
 /** The fold under the field: "1 other option", "2 other options", or "Fewer options" when open. */

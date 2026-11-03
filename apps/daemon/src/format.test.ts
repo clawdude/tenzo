@@ -252,6 +252,27 @@ describe("formatItem", () => {
     });
   });
 
+  it("shows a reply: what you asked, what it said, got it or what next", () => {
+    const reply: QueueItem = {
+      ...item,
+      context: "",
+      kind: "reply",
+      ask: "It races the mock",
+      questions: [],
+      reply: { message: "It races the mock.\n\nFix: await it.", prompt: "Why is it flaky?" },
+    };
+    expect(formatItem(reply, "Flaky test")).toBe(
+      [
+        "itm_abcdefghij0123456789 · Flaky test · reply",
+        "  You asked: Why is it flaky?",
+        "    It races the mock.",
+        "    Fix: await it.",
+        "    got it: put it away",
+        "    Or say what to send it next.",
+      ].join("\n"),
+    );
+  });
+
   it("shows the landing events in a line each", () => {
     const at = "2026-10-04T12:00:00.000Z";
     const base = {

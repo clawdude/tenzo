@@ -69,6 +69,12 @@ export function formatItem(item: QueueItem, threadTitle?: string): string {
       "    done: nothing to land",
       "    Or say what needs changing.",
     );
+  } else if (item.kind === "reply" && item.reply) {
+    if (item.reply.prompt) lines.push(`  You asked: ${oneLine(item.reply.prompt, 300)}`);
+    for (const line of item.reply.message.split("\n")) {
+      if (line.trim() !== "") lines.push(`    ${line.trimEnd()}`);
+    }
+    lines.push("    got it: put it away", "    Or say what to send it next.");
   } else if (item.kind === "ready" && item.ready) {
     lines.push(`  ✓ ${item.ask}`, `    ${item.ready.url}`);
     for (const line of item.ready.summary.split("\n")) {
@@ -196,8 +202,15 @@ function describe(event: RuntimeEvent): string {
       return event.payload.message;
     case "config.checked":
       return event.payload.problem ?? "fine again";
-    case "thread.archived":
-      return "worktree removed, open items dismissed";
+    case "reply.opened":
+      return oneLine(event.payload.message, 160);
+    case "reply.resolved":
+      return event.payload.decision;
+    case "thread.archived": {
+      const why = { landed: "landed", manual: "by hand", retired: "a finished run" } as const;
+      const reason = event.payload.reason ? ` (${why[event.payload.reason]})` : "";
+      return `worktree removed, open items dismissed${reason}`;
+    }
     case "item.snoozed":
       return `until ${event.payload.until}`;
     case "item.unsnoozed":

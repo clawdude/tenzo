@@ -14,7 +14,7 @@
   <img src="docs/images/threads.png" width="250" alt="The Threads list, grouped by what each thread is doing">
 </p>
 
-Tenzo runs long-lived Claude Code threads on your computer, each in its own git worktree, and shows you **one card at a time** when a thread needs you: a question, a plan to approve, finished work to look at, a PR ready to merge. You answer from your phone or any browser, and go back to what you were doing.
+Tenzo runs long-lived Claude Code threads on your computer, each in its own git worktree, and shows you **one card at a time** when a thread needs you: a question, a plan to approve, an answer to read, finished work to look at, a PR ready to merge. You answer from your phone or any browser, and go back to what you were doing.
 
 Self-hosted and open source. No accounts and no cloud of ours: your agents, your logins, your network.
 

@@ -27,7 +27,8 @@ export const QueueItemId = z.string().regex(/^itm_[a-z0-9]{20}$/);
 export type QueueItemId = z.infer<typeof QueueItemId>;
 
 /**
- * Quick: the agent is stuck waiting on you (a question, a permission, a proposal, an error).
+ * Quick: the agent is stuck waiting on you (a question, a permission, a proposal, an error, a
+ * reply).
  * Review: finished work waiting for a look. The quick lane always comes first on the Pass.
  */
 export const Lane = z.enum(["quick", "review"]);
@@ -37,7 +38,8 @@ export type Lane = z.infer<typeof Lane>;
  * `finished`: work the agent reported (review lane). `error`: a turn failed, or the agent
  * crashed mid-turn; the daemon makes these from the log, no agent asked. Retry, tell it
  * something, or archive the thread. `ready`: a PR the agent opened can merge (after Open PR);
- * Merge, or say what first.
+ * Merge, or say what first. `reply`: a turn ended with the agent's words and nothing else to
+ * come (an answer to a question, say); the daemon opens it (quick lane). Got it, or reply.
  */
 export const QueueItemKind = z.enum([
   "question",
@@ -46,6 +48,7 @@ export const QueueItemKind = z.enum([
   "finished",
   "error",
   "ready",
+  "reply",
 ]);
 export type QueueItemKind = z.infer<typeof QueueItemKind>;
 
@@ -62,15 +65,20 @@ export const QueueItemResolution = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("cancelled") }),
   /** Its thread was archived (`thread.archived`). */
   z.object({ kind: z.literal("dismissed") }),
-  /** Finished work you marked done. */
+  /** Finished work you marked done; a reply you put away (Got it). */
   z.object({ kind: z.literal("done") }),
+  /** A reply the conversation went on from: a prompt reached its thread, from the card or anywhere. */
+  z.object({ kind: z.literal("continued") }),
   /** Finished work, or a ready PR, you said to merge: the agent lands it. */
   z.object({ kind: z.literal("merge") }),
   /** Finished work you said to open a PR for: the thread is landing. */
   z.object({ kind: z.literal("pr") }),
   /** Finished work, or a ready PR, sent back with a note: what needs changing first. */
   z.object({ kind: z.literal("changes"), note: z.string() }),
-  /** Finished work the agent reported again: the newer report replaces it. */
+  /**
+   * Finished work the agent reported again: the newer report replaces it. A reply another item
+   * of its thread came after.
+   */
   z.object({ kind: z.literal("superseded") }),
   /** An error you said to retry: what failed went again. */
   z.object({ kind: z.literal("retried") }),
@@ -139,6 +147,11 @@ export const QueueItem = z.object({
   finished: Finished.optional(),
   /** A ready item (quick lane): the PR and its state. `ask` is the headline. */
   ready: z.object({ url: WebUrl, summary: z.string() }).optional(),
+  /**
+   * A reply item (quick lane): the agent's final words in full (markdown; `ask` is their first
+   * line) and the prompt its turn answered, trimmed ("" when Tenzo didn't send one).
+   */
+  reply: z.object({ message: z.string(), prompt: z.string() }).optional(),
   /** An error item: what went wrong (`ask` says it in a few words), and what Retry sends. */
   error: ItemError.optional(),
   /** The request's fingerprint, when the agent gave one: what "the same ask again" means. */
@@ -202,6 +215,12 @@ export const ItemAnswer = z.discriminatedUnion("kind", [
     /** Merge it, or not yet: then `note` says what first. */
     decision: MergeDecision,
     note: z.string().optional(),
+  }),
+  z.object({
+    kind: z.literal("reply"),
+    /** Got it (put it away), or send `text` as the thread's next prompt. */
+    decision: z.enum(["done", "send"]),
+    text: z.string().optional(),
   }),
   z.object({
     kind: z.literal("error"),

@@ -65,7 +65,8 @@ Usage:
                                          build, or what to change, for a proposal;
                                          retry, archive, or what to tell it, for an error;
                                          merge, pr, done, or what needs changing, for
-                                         finished work; merge, or what first, for a ready PR
+                                         finished work; merge, or what first, for a ready PR;
+                                         got it, or what to say next, for a reply
   tenzo automation list [<project>]      the automations the projects' .tenzo/config.json define:
                                          schedule, next run, last run
   tenzo automation run <project> <name>  run one now (a thread, origin automation)
@@ -592,7 +593,7 @@ async function answer(args: string[]): Promise<void> {
   }
   say(
     result.delivery === "message" &&
-      (item.kind === "error" || item.kind === "finished" || item.kind === "ready")
+      (item.kind === "error" || item.kind === "finished" || item.kind === "ready" || item.kind === "reply")
       ? `Answered ${item.id}; it goes to the agent as its next turn.`
       : result.delivery === "message"
       ? `Answered ${item.id}. Its agent had stopped; resuming it with your answer.`
@@ -648,7 +649,9 @@ async function follow(
             ? "continue|stop|text"
             : mine[0]?.kind === "error"
               ? "retry|archive|text"
-              : "choice|text";
+              : mine[0]?.kind === "reply"
+                ? "got it|text"
+                : "choice|text";
         say(`\nAnswer with \`tenzo answer ${mine[0]?.id ?? "<item>"} <${how}>\`.`);
         return;
       }

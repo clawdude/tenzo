@@ -357,6 +357,7 @@ describe("thread.watch", () => {
       "user-input.resolved",
       "item.completed",
       "turn.completed",
+      "reply.opened",
     ]);
     // Every event frame came after the watch's answer, and they follow on from the backlog.
     const frames = c.frames;

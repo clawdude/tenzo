@@ -151,8 +151,8 @@ export const FINISHED_ASK = "Ready for review";
 export const READY_ASK = "Ready to merge";
 
 /**
- * The kinds of item an agent asks and then waits on, in its turn. Finished work, ready PRs and
- * errors wait on you, not on the agent.
+ * The kinds of item an agent asks and then waits on, in its turn. Finished work, ready PRs,
+ * errors and replies wait on you, not on the agent.
  */
 const ASKS: ReadonlySet<QueueItem["kind"]> = new Set(["question", "permission", "proposal"]);
 
@@ -169,11 +169,34 @@ type Asking =
   | RuntimeEventOf<"request.opened">
   | RuntimeEventOf<"proposal.requested">;
 
+/** A reply's one button: put it away. Going on is the free text above it. */
+export const REPLY_OPTIONS: readonly UserInputOption[] = [
+  { label: "Got it", value: "done", description: "", recommended: true },
+];
+
+/** What a reply item keeps of the agent's words: plenty for a card, not a transcript. */
+export const REPLY_LIMIT = 16_000;
+/** What a reply item keeps of the prompt it answered: a few lines under "You asked". */
+export const REPLY_PROMPT_LIMIT = 500;
+
 export function foldEvent(
   state: FoldState,
   event: RuntimeEvent,
   environmentId: EnvironmentId,
 ): Folded {
+  const folded = foldOne(state, event, environmentId);
+  // A reply is the thread's last word only while nothing else comes: another item for its
+  // thread puts it away (a prompt does too: `turn.started`, `reply.resolved`).
+  const opened = folded.changes.some((c) => c.type === "opened" && c.item.kind !== "reply");
+  if (!opened || !folded.state.open.some((item) => item.kind === "reply")) return folded;
+  const superseded = supersede(folded.state, "reply", event.createdAt);
+  return {
+    state: { ...folded.state, open: folded.state.open.filter((item) => item.kind !== "reply") },
+    changes: [...superseded, ...folded.changes],
+  };
+}
+
+function foldOne(state: FoldState, event: RuntimeEvent, environmentId: EnvironmentId): Folded {
   const runtime = state.runtime;
   switch (event.type) {
     case "session.started":
@@ -219,17 +242,21 @@ export function foldEvent(
       // A prompt of ours went: whatever failed before is behind it, so its error card goes. A
       // turn the agent starts by itself (a background task reporting) changes nothing about it.
       // A config card stays: the config is still wrong (`config.checked` says when it isn't).
+      // A reply is answered by any prompt that reaches its thread (most say so first, in
+      // `reply.resolved`; this catches the rest: a wake, a retry).
       const ours = event.payload.prompt !== undefined;
       const changes: ItemChange[] = [];
       const open = state.open.filter((item) => {
-        if (item.kind !== "error" || !ours || item.error?.cause === "config") return true;
+        const goes =
+          ours && (item.kind === "reply" || (item.kind === "error" && item.error?.cause !== "config"));
+        if (!goes) return true;
         changes.push({
           type: "resolved",
           item: {
             ...item,
             status: "resolved",
             resolvedAt: event.createdAt,
-            resolution: { kind: "recovered" },
+            resolution: { kind: item.kind === "reply" ? "continued" : "recovered" },
           },
         });
         return false;
@@ -438,6 +465,22 @@ export function foldEvent(
         decision === "merge" ? { kind: "merge" } : { kind: "changes", note: note ?? "" },
       );
     }
+    case "reply.opened": {
+      if (state.known.has(event.requestId)) return same(state);
+      // One reply per thread: a newer one replaces it.
+      const superseded = supersede(state, "reply", event.createdAt);
+      const item = replyItem(event, environmentId);
+      return {
+        state: {
+          ...state,
+          open: [...state.open.filter((open) => open.kind !== "reply"), item],
+          known: new Set([...state.known, event.requestId]),
+        },
+        changes: [...superseded, { type: "opened", item }],
+      };
+    }
+    case "reply.resolved":
+      return resolve(state, event, { kind: event.payload.decision });
     case "wake.scheduled":
       return same({
         ...state,
@@ -747,6 +790,57 @@ function readyItem(
   };
 }
 
+/** What a reply item asks when the agent's words have no line to show. */
+export const REPLY_ASK = "Answered";
+
+/**
+ * A reply: the agent's final words and the prompt they answer. Quick lane: the agent is done and
+ * waits on you as much as with a question.
+ */
+function replyItem(event: RuntimeEventOf<"reply.opened">, environmentId: EnvironmentId): QueueItem {
+  const message = cutMessage(event.payload.message.trim(), REPLY_LIMIT);
+  return {
+    id: itemIdFor(event.requestId),
+    environmentId,
+    threadId: event.threadId,
+    lane: "quick",
+    kind: "reply",
+    requestId: event.requestId,
+    ...(event.turnId ? { turnId: event.turnId } : {}),
+    context: "",
+    ask: firstLine(message) || REPLY_ASK,
+    options: [...REPLY_OPTIONS],
+    suggested: "done",
+    questions: [],
+    reply: { message, prompt: cutMessage((event.payload.prompt ?? "").trim(), REPLY_PROMPT_LIMIT) },
+    createdAt: event.createdAt,
+    status: "open",
+    detached: false,
+    resolvedAt: null,
+    resolution: null,
+    snoozedUntil: null,
+  };
+}
+
+/**
+ * The first line of markdown with words in it, as plain words: its heading, list or quote marks
+ * and emphasis gone, cut to a headline's length. What a reply's push and the CLI say.
+ */
+export function firstLine(markdown: string, limit = 200): string {
+  for (const raw of markdown.split("\n")) {
+    // A fence or a rule says nothing; a code block's first line will do.
+    if (/^\s*(```|~~~|([-*_]\s*){3,}$)/.test(raw)) continue;
+    const line = raw
+      .replace(/^\s*(#{1,6}\s+|[-*+>]\s+|\d+[.)]\s+)/, "")
+      .replaceAll(/\*\*|__|`/g, "")
+      .replaceAll(/\s+/g, " ")
+      .trim();
+    if (line === "") continue;
+    return line.length <= limit ? line : `${line.slice(0, limit - 1).trimEnd()}…`;
+  }
+  return "";
+}
+
 /** The thread's open error items of `cause`, resolved as replaced by a newer one. */
 function supersedeErrors(state: FoldState, cause: ItemError["cause"], at: string): ItemChange[] {
   return state.open
@@ -829,6 +923,7 @@ function resolve(
     | RuntimeEventOf<"proposal.resolved">
     | RuntimeEventOf<"report.resolved">
     | RuntimeEventOf<"merge.resolved">
+    | RuntimeEventOf<"reply.resolved">
     | RuntimeEventOf<"error.resolved">,
   resolution: QueueItemResolution,
 ): Folded {

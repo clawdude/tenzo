@@ -35,6 +35,9 @@ export function backLabels(item: Pick<QueueItem, 'kind'>): BackLabels {
 			return { kind: 'change', pill: 'See the change', title: 'The PR' };
 		case 'error':
 			return { kind: 'error', pill: 'What it was doing', title: 'What it was doing' };
+		case 'reply':
+			// The card shows no pill (See the whole thread instead); its back would be this.
+			return { kind: 'why', pill: 'What it looked at', title: 'What it looked at' };
 	}
 }
 

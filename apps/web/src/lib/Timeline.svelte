@@ -24,8 +24,10 @@
 		footer?: Snippet;
 		/** The thread's worktree: paths in it are shown relative to it. */
 		root?: string;
+		/** Messages sent from here that wait their turn: drawn last, as queued. */
+		queued?: readonly string[];
 	}
-	let { feed, working = false, footer, root = '' }: Props = $props();
+	let { feed, working = false, footer, root = '', queued = [] }: Props = $props();
 
 	/** Following the end: new rows scroll into view. Off once you scroll up to read. */
 	let following = $state(true);
@@ -56,6 +58,7 @@
 	// At the end, whatever changes (a new row, an output arriving), the end stays in view.
 	$effect.pre(() => {
 		void held.events;
+		void queued.length;
 		if (!following) return;
 		void tick().then(() => {
 			if (following && scroller) scroller.scrollTop = scroller.scrollHeight;
@@ -156,7 +159,7 @@
 
 	<ol class="flex flex-col">
 		{#each view.shown as row, i (row.key)}
-			{@const last = i === view.shown.length - 1 && !working}
+			{@const last = i === view.shown.length - 1 && !working && queued.length === 0}
 			<li class="flex gap-3.5 py-2.5" data-testid="row" data-kind={row.kind} data-key={row.key}>
 				<div class="flex w-3 shrink-0 flex-col items-center" aria-hidden="true">
 					<span class={['mt-[7px] size-2 rounded-full', DOT[toneOf(row)]]}></span>
@@ -293,6 +296,20 @@
 				<span class="text-[16px] text-mute">Working…</span>
 			</li>
 		{/if}
+		{#each queued as text, i (i)}
+			<li class="flex gap-3.5 py-2.5" data-testid="queued">
+				<div class="flex w-3 shrink-0 justify-center" aria-hidden="true">
+					<span class="mt-[7px] size-2 rounded-full bg-fill-strong"></span>
+				</div>
+				<div class="flex min-w-0 grow flex-col gap-1">
+					<div class="flex items-baseline justify-between gap-3">
+						<span class="text-[16px] font-semibold text-ink">You</span>
+						<span class="shrink-0 text-[13px] text-faint">queued</span>
+					</div>
+					<p class="text-[15px] leading-snug break-words whitespace-pre-line text-mute">{text}</p>
+				</div>
+			</li>
+		{/each}
 	</ol>
 	{@render footer?.()}
 	{#if !following && held.newer > 0}

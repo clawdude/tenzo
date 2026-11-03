@@ -380,6 +380,25 @@ export async function hasChanges(path: string): Promise<boolean> {
 }
 
 /**
+ * How many paths in the worktree at `path` have uncommitted or untracked changes, as
+ * `git status` lists them (an untracked folder once). 0 when it is no longer a worktree.
+ */
+export async function uncommittedFiles(path: string): Promise<number> {
+  const result = await runGit(path, ["status", "--porcelain", "-z"]).catch(() => null);
+  if (result?.code !== 0) return 0;
+  // -z: entries end in NUL; a rename's old path follows its entry as one more field.
+  const fields = result.stdout.split("\0");
+  let count = 0;
+  for (let i = 0; i < fields.length; i++) {
+    const entry = fields[i] ?? "";
+    if (entry.length < 4) continue;
+    count++;
+    if (/^[RC]/.test(entry)) i++;
+  }
+  return count;
+}
+
+/**
  * Removes the worktree at `path`, keeping its branch. A worktree that is already gone (deleted by
  * hand) is pruned instead, so its stale registration doesn't block git later.
  */

@@ -14,6 +14,7 @@ import {
   type QueueItem,
   type QueueItemId,
   type RuntimeEvent,
+  type RuntimeEventOf,
   type Snapshot,
   type StoredEvent,
   type ThinkingLevel,
@@ -75,7 +76,7 @@ import {
 } from "./event-store.ts";
 import { diffStat } from "./diff.ts";
 import { errorMessage, type ItemChange, isLandingCause, itemIdFor, waitsOnYou } from "./fold.ts";
-import { branchExists, commitsAhead, forkPoint, hasChanges, landedOn, stopDetachedGit } from "./git.ts";
+import { branchExists, commitsAhead, forkPoint, hasChanges, landedOn, stopDetachedGit, uncommittedFiles } from "./git.ts";
 import { randomId } from "./ids.ts";
 import {
   automationsOf,
@@ -247,6 +248,8 @@ interface Live {
   asIs: boolean;
   /** What the session's turns cost and how long they waited on you (`measureTurn`). */
   clock: TurnClock;
+  /** The agent's latest message of its own (not a subagent's) in the current turn, in full. */
+  said: string;
 }
 
 /** A session's running figures, to give each `turn.completed` what that turn alone took. */
@@ -524,7 +527,10 @@ export class Engine {
     }));
   }
 
-  /** Queues a prompt; it is sent as soon as the thread's running turn (if any) ends. */
+  /**
+   * Queues a prompt; it is sent as soon as the thread's running turn (if any) ends. The
+   * thread's reply card, if it has one, is answered by it: it goes in the same transaction.
+   */
   send(threadId: string, prompt: string): ThreadView {
     const thread = this.#active(threadId);
     const text = prompt.trim();
@@ -538,7 +544,25 @@ export class Engine {
     if (this.#archiving.has(thread.id)) {
       throw new TenzoError(`${thread.id} is being archived; start a new thread for more work.`);
     }
-    enqueuePrompt(this.store, thread.id, text);
+    const replies = openItems(this.store, thread.id).filter((item) => item.kind === "reply");
+    const resolutions = replies.map((item) =>
+      draft(thread, {
+        ...(item.turnId ? { turnId: item.turnId } : {}),
+        type: "reply.resolved",
+        requestId: item.requestId,
+        payload: { decision: "continued" },
+      }),
+    );
+    // Both or neither: the card goes only with the prompt that answers it.
+    const appended = transaction(this.store, () => {
+      const results = resolutions.map((event) => appendEvent(this.store, event));
+      enqueuePrompt(this.store, thread.id, text);
+      return results;
+    });
+    resolutions.forEach((event, i) => {
+      const result = appended[i];
+      if (result) this.#publish(event, result);
+    });
     this.#pump(thread.id);
     return this.#changed(thread.id);
   }
@@ -577,7 +601,12 @@ export class Engine {
    */
   async archive(
     threadId: string,
-    options: { force?: boolean; unless?: () => string | null } = {},
+    options: {
+      force?: boolean;
+      unless?: () => string | null;
+      /** Why, for the log (`thread.archived`): by hand unless said otherwise. */
+      reason?: "landed" | "manual" | "retired";
+    } = {},
   ): Promise<ThreadView> {
     const thread = getThread(this.store, threadId);
     if (thread.status === "archived") return this.view(thread.id);
@@ -614,8 +643,23 @@ export class Engine {
       this.#log(`couldn't remove the attachments of ${thread.id}: ${String(error)}`);
     });
     // Through the log, so folding it gives the dismissed items too.
-    this.#append(draft(getThread(this.store, thread.id), { type: "thread.archived", payload: {} }));
+    this.#append(
+      draft(getThread(this.store, thread.id), {
+        type: "thread.archived",
+        payload: { reason: options.reason ?? "manual" },
+      }),
+    );
     return this.#changed(thread.id);
+  }
+
+  /**
+   * How many files in the thread's worktree have changes that aren't committed: what Archive
+   * would discard. None once the worktree is gone (an archived thread's, or deleted by hand).
+   */
+  async uncommitted(threadId: string): Promise<{ files: number }> {
+    const thread = getThread(this.store, threadId);
+    if (thread.status !== "active" || !existsSync(thread.worktreePath)) return { files: 0 };
+    return { files: await uncommittedFiles(thread.worktreePath) };
   }
 
   threads(filter: { project?: string; includeArchived?: boolean } = {}): ThreadView[] {
@@ -881,6 +925,7 @@ export class Engine {
     if (checked.kind === "finished" || checked.kind === "ready") {
       return this.#answerAsMessage(item, thread, checked);
     }
+    if (checked.kind === "reply") return this.#answerReply(item, thread, checked);
 
     const live = this.#live.get(thread.id);
     if (!item.detached && live) {
@@ -1328,6 +1373,7 @@ export class Engine {
     try {
       await this.archive(threadId, {
         unless: () => this.#unfinished(threadId) ?? (openItems(this.store, threadId).length > 0 ? "It has an open item." : null),
+        reason: "retired",
       });
     } catch (error) {
       if (error instanceof ArchiveHeld) return false;
@@ -1419,6 +1465,67 @@ export class Engine {
     };
   }
 
+  /**
+   * Your answer to a reply. Got it puts it away; nothing goes to the agent. Words go to it as
+   * the thread's next prompt, as `send` sends them, which answers the reply in the same
+   * transaction: the conversation goes on in the same session.
+   */
+  #answerReply(
+    item: QueueItem,
+    thread: Thread,
+    answer: Extract<ItemAnswer, { kind: "reply" }>,
+  ): { item: QueueItem; delivery: "message" | "none"; thread: ThreadView } {
+    if (answer.decision === "send") {
+      const view = this.send(thread.id, answer.text ?? "");
+      return { item: getItem(this.store, item.id) ?? item, delivery: "message", thread: view };
+    }
+    this.#append(
+      draft(thread, {
+        ...(item.turnId ? { turnId: item.turnId } : {}),
+        type: "reply.resolved",
+        requestId: item.requestId,
+        payload: { decision: "done" },
+      }),
+    );
+    return {
+      item: getItem(this.store, item.id) ?? item,
+      delivery: "none",
+      thread: this.#changed(thread.id),
+    };
+  }
+
+  /**
+   * A turn of the thread ended with the agent's words and nothing else to come: its answer goes
+   * on the Pass as a reply card (`reply.opened`), and pushes like a question. Not for an
+   * automation's run (a card every run; its last words feed the next one), nor while landing
+   * (`#checkStalled` has those), nor when a turn, a prompt, an item or a wake is to come.
+   */
+  #checkReply(live: Live, event: RuntimeEventOf<"turn.completed">): void {
+    if (this.#closing || live.landed || live.turnId || event.payload.state !== "completed") return;
+    const message = (live.said || event.payload.result || "").trim();
+    if (message === "") return;
+    const thread = getThread(this.store, live.threadId);
+    if (thread.status !== "active" || thread.origin === "automation") return;
+    if (this.#archiving.has(thread.id) || this.#landing.has(thread.id)) return;
+    const { runtime, open } = loadFoldState(this.store, thread.id);
+    if (runtime.phase === "landing" || runtime.wake !== null || runtime.turnId !== null) return;
+    if (open.length > 0 || queuedCount(this.store, thread.id) > 0) return;
+    // What the turn answered: its prompt, unless that was only Tenzo picking a turn up again.
+    const asked = runtime.prompt === RESTART_PROMPT ? null : runtime.prompt;
+    try {
+      this.#append(
+        draft(thread, {
+          turnId: event.turnId,
+          type: "reply.opened",
+          requestId: randomId("req"),
+          payload: { message, ...(asked ? { prompt: asked } : {}) },
+        }),
+      );
+    } catch (error) {
+      this.#log(`couldn't put ${thread.id}'s reply on the Pass: ${String(error)}`);
+    }
+  }
+
   /** Sets the thread's wake timer from its log (`wake_me`); a time already past rings now. */
   #armWake(threadId: ThreadId): void {
     const wake = this.#closing ? null : loadFoldState(this.store, threadId).runtime.wake;
@@ -1471,7 +1578,7 @@ export class Engine {
       return;
     }
     this.#landing.add(threadId);
-    void this.archive(threadId)
+    void this.archive(threadId, { reason: "landed" })
       .catch((error: unknown) => {
         const message = error instanceof Error ? error.message : String(error);
         this.#log(`couldn't archive ${threadId}, which landed: ${message}`);
@@ -1816,6 +1923,7 @@ export class Engine {
       restarted,
       asIs: false,
       clock: { spentUsd: 0, asking: new Set(), waitingSince: null, waitedMs: 0 },
+      said: "",
     };
     this.#live.set(thread.id, live);
     live.reading = this.#read(live);
@@ -1884,12 +1992,20 @@ export class Engine {
         this.#budgetTurnEnded(live, event);
         // The turn that landed the thread is over: it archives instead of going on.
         if (live.landed) this.#archiveLanded(live.threadId);
-        else if (ours) {
-          this.#pump(live.threadId);
-          if (event.payload.state === "completed") this.#checkStalled(live);
+        else {
+          if (ours) this.#pump(live.threadId);
+          // Nothing to come after it: landing stalled, or the agent's words wait on you.
+          if (ours && event.payload.state === "completed") this.#checkStalled(live);
+          this.#checkReply(live, event);
         }
+        live.said = "";
         this.#finishRunIfDone(live.threadId);
         this.#changed(live.threadId);
+        break;
+      }
+      case "item.completed": {
+        const p = event.payload;
+        if (p.itemType === "assistant_message" && !p.parentItemId && p.text?.trim()) live.said = p.text;
         break;
       }
       case "thread.landed":
@@ -1900,6 +2016,9 @@ export class Engine {
         this.#changed(live.threadId);
         break;
       case "turn.started":
+        live.said = "";
+        this.#changed(live.threadId);
+        break;
       case "session.exited":
         this.#changed(live.threadId);
         break;
@@ -2077,8 +2196,8 @@ function draft(thread: Thread, event: Draft): RuntimeEvent {
   } as RuntimeEvent;
 }
 
-/** An answer that goes to a waiting agent: everything but finished work's and a ready PR's. */
-type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" | "ready" }>;
+/** An answer that goes to a waiting agent: everything but finished work's, a ready PR's and a reply's. */
+type AgentAnswer = Exclude<ItemAnswer, { kind: "finished" | "ready" | "reply" }>;
 
 function respond(
   session: AgentSession,
