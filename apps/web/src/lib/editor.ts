@@ -8,15 +8,11 @@
 /** How long after a tap in the card the field losing focus is still that tap's doing. */
 export const TAP_MS = 600;
 
-/** Edit in the card itself: everywhere but with a mouse or trackpad, where the field stays inline. */
-export function editsInCard(finePointer: boolean): boolean {
-	return !finePointer;
-}
-
 /**
  * Whether the field losing focus puts the card back. Not when the focus went elsewhere in the
  * card, or the card was just tapped: iOS doesn't focus a tapped button, the field just blurs.
- * Anything else (the keyboard dismissed, a tap outside) does.
+ * Anything else (the keyboard dismissed, a tap outside) does. The main safety net is elsewhere:
+ * the keyboard going down always puts the card back (Card.svelte).
  */
 export function blurLeaves(focusInCard: boolean, sinceTap: number): boolean {
 	if (focusInCard) return false;

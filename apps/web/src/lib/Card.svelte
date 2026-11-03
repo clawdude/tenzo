@@ -13,7 +13,7 @@
 	import { type Failure, fresh, isNewRefusal, refused, tap, unsent } from '#lib/answering.ts';
 	import { backLabels } from '#lib/back.ts';
 	import CardBack from '#lib/CardBack.svelte';
-	import { blurLeaves, editsInCard, foldedLine } from '#lib/editor.ts';
+	import { blurLeaves, foldedLine } from '#lib/editor.ts';
 	import { finishedView, type Shot, shotsOf } from '#lib/finished.ts';
 	import { turnOver } from '#lib/flip.ts';
 	import { renderMarkdown } from '#lib/markdown.ts';
@@ -175,11 +175,14 @@
 	let unfolded = $state(false);
 	/** Little room and not editing: the question and the answers only. */
 	const lean = $derived(compact && !editing);
-	const folded = $derived(foldedLine(said?.asked, view?.headline ?? step?.ask ?? item.ask));
+	/** What the card asks: its headline, else the current step's question. */
+	const headline = $derived(view?.headline ?? step?.ask ?? item.ask);
+	const folded = $derived(foldedLine(said?.asked, headline));
 	let tappedAt = -Infinity;
 
 	function edit() {
-		if (editing || !editsInCard(finePointer())) return;
+		// With a mouse or trackpad the field stays inline.
+		if (editing || finePointer()) return;
 		editing = true;
 		unfolded = false;
 		onedit?.(true);
@@ -297,8 +300,8 @@
 	-->
 	<div
 		class={[
-			'scroll min-h-0 touch-pan-y overflow-y-auto px-[22px] pt-4 pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]',
-			!editing ? 'grow' : unfolded ? 'max-h-[45%] shrink-0 pt-2' : 'hidden'
+			'scroll min-h-0 touch-pan-y overflow-y-auto px-[22px] pb-6 [mask-image:linear-gradient(to_bottom,#000_calc(100%-24px),transparent)]',
+			!editing ? 'grow pt-4' : unfolded ? 'max-h-[45%] shrink-0 pt-2' : 'hidden'
 		]}
 		data-testid="card-text"
 	>
@@ -363,7 +366,7 @@
 			class={['mb-4 text-[26px] leading-[1.18] font-bold tracking-[-0.02em]', code && 'line-clamp-3']}
 			data-testid="ask"
 		>
-			{view?.headline ?? step?.ask ?? item.ask}
+			{headline}
 		</h2>
 		{/if}
 		{#if code}
@@ -618,7 +621,7 @@
 					>
 					<div class="flex gap-2">
 						{#if dictation}{@render mic()}{/if}
-						{@render send(!text.trim() || stopListening !== null)}
+						{@render send(!text.trim())}
 					</div>
 				</div>
 			{:else if text.trim() && !stopListening}
@@ -634,8 +637,8 @@
 			<button
 				type="submit"
 				aria-label="Send"
-				{disabled}
-				class="opt flex size-10 shrink-0 items-center justify-center rounded-full bg-ink text-black disabled:bg-fill-strong disabled:text-faint"
+				aria-disabled={disabled}
+				class="opt flex size-10 shrink-0 items-center justify-center rounded-full bg-ink text-black aria-disabled:bg-fill-strong aria-disabled:text-faint"
 				onmousedown={keepFocus}
 				data-testid="send"
 			>

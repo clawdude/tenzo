@@ -859,6 +859,11 @@ async function writeInEditor(
   await top.getByTestId("editor-unfold").tap();
   await top.getByTestId("card-text").waitFor();
   if ((await top.getByTestId("editor-line").count()) > 0) problems.push("unfolded, the one line stayed");
+  // ⌄ keeps the focus (and so the keyboard) in the field.
+  const focused = await field.evaluate(
+    (el) => (globalThis as unknown as { document: { activeElement: unknown } }).document.activeElement === el,
+  );
+  if (!focused) problems.push("⌄ took the focus from the field");
   await top.getByTestId("editor-unfold").tap();
   await top.getByTestId("editor-line").waitFor();
   // No swiping the editor aside: a drag across its header does nothing.

@@ -1,12 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { blurLeaves, editsInCard, foldedLine, TAP_MS } from './editor.ts';
+import { blurLeaves, foldedLine, TAP_MS } from './editor.ts';
 
 describe('the card as an editor', () => {
-	it('opens on a touch screen, never with a mouse or trackpad', () => {
-		expect(editsInCard(false)).toBe(true);
-		expect(editsInCard(true)).toBe(false);
-	});
-
 	it('stays open when the focus moves within the card, or the card was just tapped', () => {
 		expect(blurLeaves(true, Infinity)).toBe(false);
 		expect(blurLeaves(false, 40)).toBe(false); // Cancel, mic or ⌄ on iOS: the field just blurs
